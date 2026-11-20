@@ -1,0 +1,466 @@
+// MatrixArk 数据库设计 v1.3。触发器、部分索引和 CHECK 由已提交的 SQL 迁移定义。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  owner
+  editor
+  reviewer
+  operator
+  viewer
+}
+
+enum Platform {
+  bilibili
+  xiaohongshu
+}
+
+enum ChannelKind {
+  official
+  manual
+  sandbox
+}
+
+enum VariantStatus {
+  draft
+  approved
+  superseded
+}
+
+enum TaskStatus {
+  scheduled
+  dispatching
+  paused
+  handed_off
+  submitted
+  under_review
+  published
+  failed
+  unknown
+  verified
+  canceled
+}
+
+enum AssetKind {
+  manuscript_image
+  task_evidence
+}
+
+enum GenerationSource {
+  import
+  rule
+  model
+  manual
+}
+
+enum TaskEventKind {
+  created
+  rescheduled
+  paused
+  claimed
+  handed_off
+  result
+  verified
+  canceled
+  retried
+  corrected
+  late_receipt
+  reminder
+  note
+}
+
+enum NotificationKind {
+  handoff_ready
+  overdue_reminder
+}
+
+enum NotificationStatus {
+  pending
+  sending
+  sent
+  failed
+  skipped
+}
+
+enum PublishResultState {
+  submitted
+  under_review
+  published
+  failed
+  unknown
+}
+
+enum AuthStatus {
+  pending
+  active
+  expired
+  revoked
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  memberships          Membership[]
+  sessions             Session[]
+  manuscripts          Manuscript[]          @relation("ManuscriptAuthor")
+  archivedManuscripts  Manuscript[]          @relation("ManuscriptArchiver")
+  uploadedAssets       Asset[]
+  variants             Variant[]
+  approvals            Approval[]
+  archivedAccounts     ChannelAccount[]
+  tasks                PublishTask[]         @relation("TaskAuthor")
+  canceledTasks        PublishTask[]         @relation("TaskCanceler")
+  recordedResults      PublishResult[]
+  taskEvents           TaskEvent[]
+  variantRejections    VariantRejection[]
+  notificationSettings NotificationSetting[]
+  oauthStates          OAuthState[]
+}
+
+model Session {
+  id        String   @id
+  userId    String
+  expiresAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Workspace {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  memberships            Membership[]
+  manuscripts            Manuscript[]
+  variants               Variant[]
+  accounts               ChannelAccount[]
+  tasks                  PublishTask[]
+  assets                 Asset[]
+  results                PublishResult[]
+  taskEvents             TaskEvent[]
+  variantRejections      VariantRejection[]
+  notificationSetting    NotificationSetting?
+  notificationDeliveries NotificationDelivery[]
+  oauthStates            OAuthState[]
+}
+
+model Membership {
+  id          String   @id @default(uuid())
+  userId      String
+  workspaceId String
+  role        Role     @default(editor)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, workspaceId])
+  @@index([workspaceId])
+}
+
+model Manuscript {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  title        String
+  body         String
+  tags         String[]  @default([])
+  createdById  String
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
+  archivedAt   DateTime? @db.Timestamptz(3)
+  archivedById String?
+
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  createdBy  User      @relation("ManuscriptAuthor", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  archivedBy User?     @relation("ManuscriptArchiver", fields: [archivedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  assets     Asset[]
+  variants   Variant[]
+
+  @@index([workspaceId, createdAt])
+}
+
+model Asset {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  manuscriptId String?
+  storageKey   String    @unique
+  filename     String
+  mimeType     String
+  size         Int
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  taskId       String?
+  kind         AssetKind
+  checksum     String?   @db.Char(64)
+  width        Int?
+  height       Int?
+  uploadedById String?
+
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  manuscript     Manuscript?     @relation(fields: [manuscriptId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  task           PublishTask?    @relation(fields: [taskId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  uploadedBy     User?           @relation(fields: [uploadedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  variants       VariantAsset[]
+  publishResults PublishResult[]
+
+  @@index([manuscriptId])
+  @@index([taskId], map: "Asset_task_idx")
+  @@index([workspaceId, createdAt(sort: Desc)], map: "Asset_workspace_idx")
+}
+
+model Variant {
+  id               String           @id @default(uuid())
+  workspaceId      String
+  manuscriptId     String
+  platform         Platform
+  version          Int
+  title            String
+  body             String
+  tags             String[]         @default([])
+  contentHash      String
+  status           VariantStatus    @default(draft)
+  createdById      String
+  createdAt        DateTime         @default(now()) @db.Timestamptz(3)
+  supersededAt     DateTime?        @db.Timestamptz(3)
+  platformFields   Json             @default("{}")
+  generationSource GenerationSource @default(rule)
+  modelName        String?
+  promptVersion    String?
+  snapshotVersion  Int              @default(0)
+  sealedAt         DateTime?        @db.Timestamptz(3)
+
+  workspace  Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  manuscript Manuscript         @relation(fields: [manuscriptId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdBy  User               @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  approval   Approval?
+  tasks      PublishTask[]
+  assets     VariantAsset[]
+  rejections VariantRejection[]
+
+  @@unique([manuscriptId, platform, version])
+  @@index([workspaceId, manuscriptId])
+  @@index([workspaceId, manuscriptId, platform, version(sort: Desc)], map: "Variant_current_idx")
+}
+
+model Approval {
+  id           String   @id @default(uuid())
+  workspaceId  String
+  variantId    String   @unique
+  approvedById String
+  approvedAt   DateTime @default(now()) @db.Timestamptz(3)
+  note         String?
+  snapshotHash String?  @db.Char(64)
+
+  variant    Variant @relation(fields: [variantId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  approvedBy User    @relation(fields: [approvedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+}
+
+model ChannelAccount {
+  id                    String      @id @default(uuid())
+  workspaceId           String
+  platform              Platform
+  channelKind           ChannelKind
+  displayName           String
+  operator              String?
+  externalId            String?
+  credentials           Json?
+  createdAt             DateTime    @default(now()) @db.Timestamptz(3)
+  authStatus            AuthStatus  @default(pending)
+  authScope             String[]    @default([])
+  authAuthorizedBy      String?
+  authExpiresAt         DateTime?   @db.Timestamptz(3)
+  authCheckedAt         DateTime?   @db.Timestamptz(3)
+  rateLimitedUntil      DateTime?   @db.Timestamptz(3)
+  lastError             String?
+  archivedAt            DateTime?   @db.Timestamptz(3)
+  archivedById          String?
+  credentialsCiphertext String?
+  credentialsKeyId      String?
+  credentialsUpdatedAt  DateTime?   @db.Timestamptz(3)
+
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  archivedBy  User?         @relation(fields: [archivedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  tasks       PublishTask[]
+  oauthStates OAuthState[]
+}
+
+model PublishTask {
+  id                 String       @id @default(uuid())
+  workspaceId        String
+  variantId          String
+  accountId          String
+  scheduledAt        DateTime     @db.Timestamptz(3)
+  status             TaskStatus   @default(scheduled)
+  attempts           Int          @default(0)
+  idempotencyKey     String       @unique
+  lastError          String?
+  note               String?
+  handedOffAt        DateTime?    @db.Timestamptz(3)
+  claimedAt          DateTime?    @db.Timestamptz(3)
+  createdById        String
+  createdAt          DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime     @updatedAt @db.Timestamptz(3)
+  variantContentHash String       @db.Char(64)
+  executionChannel   ChannelKind?
+  leaseId            String?      @db.Uuid
+  leaseExpiresAt     DateTime?    @db.Timestamptz(3)
+  canceledAt         DateTime?    @db.Timestamptz(3)
+  canceledById       String?
+  cancelReason       String?
+
+  workspace              Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  variant                Variant                @relation(fields: [variantId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  account                ChannelAccount         @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdBy              User                   @relation("TaskAuthor", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  canceledBy             User?                  @relation("TaskCanceler", fields: [canceledById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  result                 PublishResult?
+  assets                 Asset[]
+  events                 TaskEvent[]
+  notificationDeliveries NotificationDelivery[]
+
+  @@unique([accountId, variantId])
+  @@index([status, scheduledAt])
+  @@index([workspaceId, createdAt(sort: Desc), id(sort: Desc)], map: "PublishTask_workspace_cursor_idx")
+  @@index([workspaceId, status, createdAt(sort: Desc), id(sort: Desc)], map: "PublishTask_workspace_status_idx")
+  @@index([accountId, status], map: "PublishTask_account_status_idx")
+}
+
+model PublishResult {
+  id                  String             @id @default(uuid())
+  taskId              String             @unique
+  state               PublishResultState
+  remoteUrl           String?
+  remoteId            String?
+  screenshotKey       String?
+  note                String?
+  recordedById        String?
+  recordedAt          DateTime           @default(now()) @db.Timestamptz(3)
+  workspaceId         String
+  evidenceAssetId     String?
+  platformPublishedAt DateTime?          @db.Timestamptz(3)
+
+  task          PublishTask @relation(fields: [taskId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  workspace     Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  evidenceAsset Asset?      @relation(fields: [evidenceAssetId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "PublishResult_evidence_fkey")
+  recordedBy    User?       @relation(fields: [recordedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@index([workspaceId, recordedAt(sort: Desc)], map: "PublishResult_workspace_idx")
+}
+
+model VariantAsset {
+  variantId String
+  assetId   String
+  position  Int
+  isCover   Boolean @default(false)
+
+  variant Variant @relation(fields: [variantId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  asset   Asset   @relation(fields: [assetId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@id([variantId, assetId])
+  @@unique([variantId, position], map: "VariantAsset_unique_position")
+  @@index([assetId], map: "VariantAsset_asset_idx")
+}
+
+model VariantRejection {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String
+  variantId   String
+  reviewerId  String
+  reason      String
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  variant   Variant   @relation(fields: [variantId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  reviewer  User      @relation(fields: [reviewerId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@index([variantId, createdAt(sort: Desc)], map: "VariantRejection_variant_idx")
+}
+
+model TaskEvent {
+  id          BigInt        @id @default(autoincrement())
+  workspaceId String
+  taskId      String
+  kind        TaskEventKind
+  fromStatus  TaskStatus?
+  toStatus    TaskStatus?
+  actorId     String?
+  reason      String?
+  leaseId     String?       @db.Uuid
+  details     Json          @default("{}")
+  createdAt   DateTime      @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  task      PublishTask @relation(fields: [taskId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  actor     User?       @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@index([taskId, id], map: "TaskEvent_task_id_idx")
+  @@index([workspaceId, createdAt(sort: Desc)], map: "TaskEvent_workspace_created_idx")
+}
+
+model NotificationSetting {
+  workspaceId          String   @id
+  provider             String   @default("feishu")
+  enabled              Boolean  @default(false)
+  webhookCiphertext    String?
+  webhookKeyId         String?
+  signSecretCiphertext String?
+  signSecretKeyId      String?
+  updatedById          String?
+  updatedAt            DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  updatedBy User?     @relation(fields: [updatedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+}
+
+model NotificationDelivery {
+  id             String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId    String
+  taskId         String
+  kind           NotificationKind
+  dedupeKey      String
+  provider       String             @default("feishu")
+  status         NotificationStatus @default(pending)
+  attempts       Int                @default(0)
+  scheduledAt    DateTime           @db.Timestamptz(3)
+  nextAttemptAt  DateTime?          @db.Timestamptz(3)
+  leaseId        String?            @db.Uuid
+  leaseExpiresAt DateTime?          @db.Timestamptz(3)
+  lastError      String?
+  sentAt         DateTime?          @db.Timestamptz(3)
+  createdAt      DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime           @default(now()) @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  task      PublishTask @relation(fields: [taskId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([taskId, kind, dedupeKey], map: "NotificationDelivery_unique")
+}
+
+model OAuthState {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String
+  accountId   String
+  userId      String
+  platform    Platform
+  stateHash   String    @unique @db.Char(64)
+  expiresAt   DateTime  @db.Timestamptz(3)
+  consumedAt  DateTime? @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  account   ChannelAccount @relation(fields: [accountId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
