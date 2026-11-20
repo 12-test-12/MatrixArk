@@ -3,6 +3,7 @@ set -euo pipefail
 
 pg_bin=${PG16_BIN:-/usr/lib/postgresql/16/bin}
 cluster=$(mktemp -d "${RUNNER_TEMP:-/tmp}/matrixark-db.XXXXXX")
+server_log="$cluster/server.log"
 export PGHOST=127.0.0.1 PGPORT=55432 PGUSER=matrixark_ci
 baseline=apps/api/prisma/migrations/0000_init/migration.sql
 
@@ -13,9 +14,15 @@ stop_database() {
 }
 trap stop_database EXIT
 
-# The disposable cluster accepts connections only on the runner's loopback interface.
 "$pg_bin/initdb" -D "$cluster" -U "$PGUSER" --auth=trust --encoding=UTF8 --no-locale
-"$pg_bin/pg_ctl" -D "$cluster" -l "$cluster/server.log" -o "-h $PGHOST -p $PGPORT" -w start
+# All test clients use TCP loopback. Avoid the system Unix socket directory.
+printf "\nunix_socket_directories = ''\n" >> "$cluster/postgresql.conf"
+if ! "$pg_bin/pg_ctl" -D "$cluster" -l "$server_log" -o "-h $PGHOST -p $PGPORT" -w start; then
+  if [[ -s "$server_log" ]]; then
+    tail -n 80 "$server_log" >&2
+  fi
+  exit 1
+fi
 "$pg_bin/createdb" matrixark_test
 "$pg_bin/createdb" matrixark_upgrade_test
 
