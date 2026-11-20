@@ -1,0 +1,37 @@
+name: matrixark
+
+services:
+  migrate:
+    image: ${MATRIXARK_IMAGE:-matrixark-api:local}
+    command: [pnpm, db:deploy]
+    environment:
+      DATABASE_URL: ${MATRIXARK_MIGRATION_DATABASE_URL:?Set MATRIXARK_MIGRATION_DATABASE_URL}
+
+  api:
+    image: ${MATRIXARK_IMAGE:-matrixark-api:local}
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${MATRIXARK_DATABASE_URL:?Set MATRIXARK_DATABASE_URL}
+      API_PORT: '4000'
+      API_ORIGIN: ${API_ORIGIN:-http://localhost:3000}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set the HTTPS PUBLIC_BASE_URL}
+      NODE_ENV: production
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_DIR: /data/storage
+      SANDBOX_CHANNEL: 'false'
+    ports:
+      - '127.0.0.1:${API_PORT:-4000}:4000'
+    volumes:
+      - mediadata:/data/storage
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4000/api/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mediadata:

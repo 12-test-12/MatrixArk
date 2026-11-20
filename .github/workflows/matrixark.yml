@@ -1,0 +1,106 @@
+name: MatrixArk
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      database:
+        description: 数据库迁移检查
+        type: boolean
+        default: false
+      api:
+        description: API 构建、类型与测试检查
+        type: boolean
+        default: false
+      package_docker:
+        description: 最终打包 Docker 镜像
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: 选择本次任务
+    runs-on: ubuntu-24.04
+    outputs:
+      database: ${{ steps.targets.outputs.database }}
+      api: ${{ steps.targets.outputs.api }}
+      package_image: ${{ steps.targets.outputs.package_image }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: targets
+        env:
+          CHANGED_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CHANGED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_DATABASE: ${{ inputs.database }}
+          RUN_API: ${{ inputs.api }}
+          PACKAGE_DOCKER: ${{ inputs.package_docker }}
+        run: node infra/ci/select-targets.mjs
+
+  database:
+    name: PostgreSQL 16 迁移
+    needs: plan
+    if: needs.plan.outputs.database == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: corepack enable && pnpm install --frozen-lockfile --filter @matrixark/api...
+      - name: 安装原生 PostgreSQL 16
+        run: |
+          if [[ ! -x /usr/lib/postgresql/16/bin/initdb ]]; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-16
+          fi
+      - run: bash infra/ci/check-database.sh
+
+  api:
+    name: API 构建与测试
+    needs: plan
+    if: needs.plan.outputs.api == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: corepack enable && pnpm install --frozen-lockfile
+      - run: pnpm db:generate && pnpm build && pnpm typecheck && pnpm test
+
+  package:
+    name: 最终 Docker 打包
+    needs: plan
+    if: needs.plan.outputs.package_image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: 构建并导出镜像
+        shell: bash
+        run: |
+          image="matrixark-api:${GITHUB_SHA::12}"
+          docker build -f infra/api.Dockerfile -t "$image" .
+          docker save "$image" | gzip -1 > matrixark-api.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: matrixark-api-${{ github.sha }}
+          path: matrixark-api.tar.gz
+          compression-level: 0
+          if-no-files-found: error
