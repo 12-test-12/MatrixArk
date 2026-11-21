@@ -13,16 +13,18 @@ export type Account = {
 export type Approval = { approvedAt: string; snapshotHash: string | null };
 export type Picture = { assetId: string; position: number; isCover: boolean };
 export type VariantSummary = { id: string; platform: Platform; status: 'draft' | 'approved' | 'superseded'; version: number };
-export type Variant = VariantSummary & {
-  title: string; body: string; tags: string[]; assets: Picture[]; snapshotVersion: number;
+type VariantText = VariantSummary & { title: string; body: string; tags: string[] };
+export type Variant = VariantText & {
+  assets: Picture[]; snapshotVersion: number;
   approval: Approval | null;
 };
+export type ManuscriptVariant = VariantText & Partial<Pick<Variant, 'assets' | 'snapshotVersion' | 'approval'>>;
 export type ManuscriptSummary = {
   id: string; title: string; assetCount: number; updatedAt: string; variants: VariantSummary[];
 };
 export type Manuscript = {
   id: string; title: string; body: string; tags: string[];
-  assets: { id: string; filename: string }[]; variants: Variant[];
+  assets: { id: string; filename: string }[]; variants: ManuscriptVariant[];
 };
 export type TaskStatus = 'scheduled' | 'dispatching' | 'paused' | 'handed_off' | 'submitted'
   | 'under_review' | 'published' | 'failed' | 'unknown' | 'verified' | 'canceled';
@@ -79,6 +81,9 @@ export async function api<T>(path: string, options: { method?: string; body?: un
     if (response.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new Event('matrixark-session-expired'));
     const issue = Array.isArray(data?.issues) ? data.issues[0]?.message : undefined;
     const message = issue || (typeof data?.message === 'string' ? data.message : null);
+    if (response.status === 404 && typeof message === 'string' && message.startsWith(`Cannot ${options.method ?? 'GET'} /`)) {
+      throw new ApiError(404, '当前 API 未提供此功能。请启动与工作台同版本的 API，再重试。');
+    }
     throw new ApiError(response.status, response.status >= 500
       ? 'API 暂时不可用，请稍后重试。' : message ?? '请求未能完成');
   }

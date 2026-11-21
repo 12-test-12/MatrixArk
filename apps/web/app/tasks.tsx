@@ -173,20 +173,22 @@ export function Tasks({ scope, role, initialId }: { scope: string; role: Role; i
   const members = useResource<{ user: { id: string; name: string } }[]>(scope + '/members');
   const people = new Map(members.data?.map(({ user }) => [user.id, user.name]));
   const items = list.data?.items ?? [];
+  const listUnavailable = Boolean(list.error && !list.data);
   const active = selected || items[0]?.id || '';
   function changePage(next: string[]) { setPages(next); setSelected(''); setRecordedTitle(''); }
 
   return <>
     <PageHeader title="发布任务" description={role === 'operator' ? roleView.operator.description
       : canRecord(role) ? '查看交接进度、取得已审文案并记录发布结果。' : '查阅发布进度和回执。'}>
-      <button className="button" onClick={list.refresh}><RefreshCw size={16} aria-hidden="true" />刷新任务</button>
+      <button className="button" onClick={list.refresh}><RefreshCw size={16} aria-hidden="true" />
+        {listUnavailable ? '重试加载' : '刷新任务'}</button>
     </PageHeader>
     <div className="filters" aria-label="按任务状态筛选">
       {filters.map((filter) => <button className={status === filter.value ? 'active' : ''} key={filter.value} aria-pressed={status === filter.value}
         onClick={() => { setStatus(filter.value); changePage([]); }}>{filter.label}</button>)}
     </div>
     <Feedback error={list.error} notice={recordedTitle ? `「${recordedTitle}」的发布结果已保存。` : undefined} />
-    <div className="split-panel">
+    {!listUnavailable && <div className="split-panel">
       <section className="card item-list">
         <div className="card-heading"><h2>任务列表</h2><span className="count">{items.length}</span></div>
         {list.loading ? <Loading /> : items.length ? items.map((task) => <button key={task.id} className={`list-item ${active === task.id ? 'selected' : ''}`}
@@ -209,6 +211,6 @@ export function Tasks({ scope, role, initialId }: { scope: string; role: Role; i
       }} />
         : <section className="card detail-pane empty-detail">{list.loading ? <Loading />
           : <Empty icon={CalendarDays} title="在这里查看发布进度" description="为已审核的平台版本排期后，可以在这里查看交接与回执。" />}</section>}
-    </div>
+    </div>}
   </>;
 }

@@ -5,12 +5,17 @@ import {
 } from 'lucide-react';
 import {
   api, canEdit, canReview, fileBody, formatTime, imageUrl, platformLabel, platforms, post, useAction, useResource,
-  type Account, type Manuscript, type ManuscriptSummary, type Platform, type Role, type Variant,
+  type Account, type Manuscript, type ManuscriptSummary, type ManuscriptVariant, type Platform, type Role, type Variant,
 } from './api';
 import { Empty, Feedback, Loading, PageHeader, PlatformIcon, ReviewPicture } from './ui';
 
 function variantLabel(variant?: Pick<Variant, 'status'>) {
   return variant?.status === 'approved' ? '已审核' : variant ? '待审核' : '未生成';
+}
+
+function hasSnapshot(variant: ManuscriptVariant): variant is Variant {
+  return Array.isArray(variant.assets) && typeof variant.snapshotVersion === 'number'
+    && (variant.approval === null || typeof variant.approval?.snapshotHash === 'string' || variant.approval?.snapshotHash === null);
 }
 
 function rawFields(form: HTMLFormElement) {
@@ -216,10 +221,12 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
   const platform = selectedPlatform ?? pending?.platform
     ?? platforms.find((candidate) => currentVariants.some((variant) => variant.platform === candidate)) ?? platforms[0];
   const variant = currentVariants.find((item) => item.platform === platform);
+  const snapshot = variant && hasSnapshot(variant) ? variant : undefined;
   const draftKey = scope + '/variants/' + variant?.id;
-  const check = useResource<{ issues: { code: string; message: string }[] }>(variant ? scope + '/variants/' + variant.id + '/check' : null);
+  const check = useResource<{ issues: { code: string; message: string }[] }>(snapshot ? scope + '/variants/' + snapshot.id + '/check' : null);
+  const issues = Array.isArray(check.data?.issues) ? check.data.issues : undefined;
   const editable = canEdit(role);
-  const approved = variant?.status === 'approved' && Boolean(variant.approval?.snapshotHash) && variant.snapshotVersion === 1;
+  const approved = snapshot?.status === 'approved' && Boolean(snapshot.approval?.snapshotHash) && snapshot.snapshotVersion === 1;
   function refresh() { detail.refresh(); changed(); }
   function generate(targets: readonly Platform[]) {
     const targetPlatform = targets.length === 1 ? targets[0]! : platform;
@@ -230,10 +237,10 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
     }, '已生成平台版本。');
   }
   function approve() {
-    if (!variant || !manuscript) return;
-    setPlatform(variant.platform);
+    if (!snapshot || !manuscript || !issues || issues.length !== 0) return;
+    setPlatform(snapshot.platform);
     void action.run(async () => {
-      await post(scope + '/variants/' + variant.id + '/confirm', {});
+      await post(scope + '/variants/' + snapshot.id + '/confirm', {});
       check.refresh();
       refresh();
       onApproved?.(manuscript.title);
@@ -277,7 +284,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
       </div> : <p className="muted small">暂无配图。小红书图文至少需要 1 张。</p>}
       <div className="section-line variant-heading">
         <h3><PlatformIcon platform={platform} />{platformLabel[platform]}版本</h3>
-        {variant && <span className={`badge ${approved ? 'green' : 'amber'}`}>{approved ? '已审核' : '待审核'}</span>}
+        {snapshot && <span className={`badge ${approved ? 'green' : 'amber'}`}>{approved ? '已审核' : '待审核'}</span>}
       </div>
       <div className="filters platform-options" role="group" aria-label="按平台查看版本">
         {platforms.map((candidate) => {
@@ -298,7 +305,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
           {!currentVariants.length && <button type="button" className="button" disabled={action.busy}
             onClick={() => generate(platforms)}>一次生成两个平台版本</button>}
         </div>}
-      </div> : editable && (editing ?? drafts.has(draftKey)) ? <EditVersion key={variant.id} scope={scope} variant={variant}
+      </div> : snapshot && editable && (editing ?? drafts.has(draftKey)) ? <EditVersion key={snapshot.id} scope={scope} variant={snapshot}
         assets={manuscript.assets} drafts={drafts} draftKey={draftKey}
         onSave={() => { setPlatform(variant.platform); setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />
         : <>
@@ -306,31 +313,33 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
             <div className="section-line"><h3>{variant.title}</h3><span className="version">V{variant.version}</span></div>
             <p className="content-text">{variant.body}</p>
             {variant.tags.length > 0 && <div className="tag-row">{variant.tags.map((tag, index) => <span key={index}>#{tag}</span>)}</div>}
-            {variant.assets.length > 0 && <div className="picture-grid">
-              {variant.assets.map((asset) => <div className="picture" key={asset.assetId}>
+            {snapshot && snapshot.assets.length > 0 && <div className="picture-grid">
+              {snapshot.assets.map((asset) => <div className="picture" key={asset.assetId}>
                 <ReviewPicture src={imageUrl(scope, asset.assetId)} label={asset.isCover ? '版本封面' : `版本图片 ${asset.position + 1}`} />
                 {asset.isCover && <span className="picture-label">封面</span>}
               </div>)}
             </div>}
           </div>
-          <Feedback error={check.error} />
-          {check.data?.issues.length ? <div className="check-list" role="status">
-            <strong>发布前检查</strong><ul>{check.data.issues.map((issue) => <li key={issue.code}>{issue.message}</li>)}</ul>
+          <Feedback error={snapshot ? check.error : 'API 未返回版本图片快照。当前可查看文案，使用与工作台同版本的 API 后可继续编辑、审核和排期。'} />
+          {issues?.length ? <div className="check-list" role="status">
+            <strong>发布前检查</strong><ul>{issues.map((issue) => <li key={issue.code}>{issue.message}</li>)}</ul>
+            {editable && issues.some(({ code }) => code === 'images_missing') &&
+              <p>上传原稿配图后，在「编辑版本」中将图片加入当前平台版本。</p>}
           </div> : null}
           <div className="actions">
-            {editable && <button type="button" className="button" disabled={action.busy} onClick={() => setEditing(true)}>
+            {snapshot && editable && <button type="button" className="button" disabled={action.busy} onClick={() => setEditing(true)}>
               <PencilLine size={16} aria-hidden="true" />编辑版本
             </button>}
-            {canReview(role) && !approved && <button type="button" className="button primary"
-              disabled={action.busy || !check.data || check.data.issues.length !== 0} onClick={approve}>
+            {snapshot && canReview(role) && !approved && <button type="button" className="button primary"
+              disabled={action.busy || !issues || issues.length !== 0} onClick={approve}>
               <ShieldCheck size={17} aria-hidden="true" />确认审核
             </button>}
-            {approved && variant.approval && <span className="approved-note"><CircleCheck size={16} aria-hidden="true" />
-              {formatTime(variant.approval.approvedAt)} 确认
+            {approved && snapshot?.approval && <span className="approved-note"><CircleCheck size={16} aria-hidden="true" />
+              {formatTime(snapshot.approval.approvedAt)} 确认
             </span>}
           </div>
-          {approved && editable && <>{accounts.loading ? <Loading /> : accounts.error ? <Feedback error={accounts.error} />
-            : <Schedule key={variant.id} scope={scope} variant={variant} onSchedule={onSchedule} openAccounts={openAccounts}
+          {snapshot && approved && editable && <>{accounts.loading ? <Loading /> : accounts.error ? <Feedback error={accounts.error} />
+            : <Schedule key={snapshot.id} scope={scope} variant={snapshot} onSchedule={onSchedule} openAccounts={openAccounts}
               accounts={accounts.data?.filter((account) => account.platform === platform && account.channelKind === 'manual') ?? []} />}</>}
         </>}
     </div>

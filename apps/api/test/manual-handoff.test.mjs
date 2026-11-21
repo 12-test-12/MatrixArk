@@ -160,4 +160,18 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(articleDetail.status, 'published');
     assert.equal(articleDetail.result.remoteUrl, url);
   });
+
+  await t.test('标题、正文、话题均为 1 且无图片时仍返回完整版本快照', async () => {
+    const { data: textOnly } = await post(own + '/manuscripts', { title: '1', body: '1', tags: ['1'] });
+    const textPath = own + '/manuscripts/' + textOnly.id;
+    await post(textPath + '/generate', { platforms: ['xiaohongshu', 'bilibili'] });
+    const { data } = await call(textPath, { cookie });
+    assert.equal(data.variants.length, 2);
+    for (const item of data.variants) {
+      assert.deepEqual(item.assets, []);
+      assert.equal(item.snapshotVersion, 1);
+      const { data: check } = await call(own + '/variants/' + item.id + '/check', { cookie });
+      assert.deepEqual(check.issues.map(({ code }) => code), item.platform === 'xiaohongshu' ? ['images_missing'] : []);
+    }
+  });
 });
