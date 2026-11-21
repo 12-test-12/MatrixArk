@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from 'react';
 import {
-  ArrowRight, CalendarDays, Check, ChevronRight, CircleUserRound, ClipboardCheck, FileText, LogOut,
+  ArrowLeft, ArrowRight, Check, ChevronRight, CircleUserRound, ClipboardCheck, FileText, LogOut,
   Plus, Radio, Send, ShieldCheck, UserRound, UsersRound,
 } from 'lucide-react';
 import {
@@ -10,17 +10,15 @@ import {
   type Account, type Session, type Workspace,
 } from './api';
 import { Manuscripts, type ManuscriptDrafts } from './manuscripts';
+import { Members } from './members';
+import { Preview } from './preview';
 import { Tasks } from './tasks';
 import { Brand, Empty, Feedback, Loading, PageHeader } from './ui';
+import { roleView, Workbench, type Section } from './workbench';
 
-const nav = [
-  { id: 'manuscripts', label: '原稿与审核', icon: FileText },
-  { id: 'tasks', label: '发布任务', icon: CalendarDays },
-  { id: 'accounts', label: '发布账号', icon: UsersRound },
-] as const;
-type Section = (typeof nav)[number]['id'];
-
-function SignIn({ onSession, initialError }: { onSession: (session: Session) => void; initialError: string }) {
+function SignIn({ onSession, onPreview, initialError }: {
+  onSession: (session: Session) => void; onPreview: () => void; initialError: string;
+}) {
   const [registering, setRegistering] = useState(false);
   const action = useAction();
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -73,6 +71,9 @@ function SignIn({ onSession, initialError }: { onSession: (session: Session) => 
             {registering ? '返回登录' : '创建账号'}
           </button>
         </div>
+        <button type="button" className="button auth-preview" onClick={onPreview} disabled={action.busy}>
+          <ArrowLeft size={16} aria-hidden="true" />返回示例工作台
+        </button>
       </div>
     </section>
   </main>;
@@ -126,86 +127,75 @@ function WorkspaceBody({ workspace, section, taskId, drafts, openTasks, openAcco
   drafts: ManuscriptDrafts;
 }) {
   const scope = scopeFor(workspace.id);
-  const accounts = useResource<Account[]>(scope + '/accounts');
+  const accounts = useResource<Account[]>(canEdit(workspace.role) && section !== 'members' ? scope + '/accounts' : null);
   if (section === 'manuscripts') return <Manuscripts scope={scope} role={workspace.role} accounts={accounts} drafts={drafts}
     openTasks={openTasks} openAccounts={openAccounts} />;
   if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={taskId} />;
+  if (section === 'members') return <Members scope={scope} />;
   return <Accounts scope={scope} workspace={workspace} resource={accounts} />;
 }
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>();
+  const [showSignIn, setShowSignIn] = useState(false);
   const [startupError, setStartupError] = useState('');
   const [workspaceId, setWorkspaceId] = useState('');
-  const [section, setSection] = useState<Section>('manuscripts');
+  const [activeSection, setSection] = useState<Section>();
   const [taskId, setTaskId] = useState('');
   const [drafts] = useState<ManuscriptDrafts>(() => new Map());
   const logout = useAction();
 
   useEffect(() => {
     const controller = new AbortController();
-    const expired = () => { drafts.clear(); setStartupError('登录已过期，请重新登录。'); setSession(null); };
+    const expired = () => { drafts.clear(); setStartupError('登录已过期，请重新登录。'); setShowSignIn(true); setSession(null); };
     window.addEventListener('matrixark-session-expired', expired);
     void api<Session>('/auth/me', { signal: controller.signal }).then((current) => {
-      if (!controller.signal.aborted) setSession(current);
+      if (!controller.signal.aborted) setSession((active) => active ?? current);
     }).catch((error: unknown) => {
       if (controller.signal.aborted) return;
       if (!(error instanceof ApiError && error.status === 401)) setStartupError(messageOf(error));
-      setSession(null);
+      setSession((active) => active ?? null);
     });
     return () => { controller.abort(); window.removeEventListener('matrixark-session-expired', expired); };
   }, [drafts]);
 
-  if (session === undefined) return <main className="boot"><Brand /><Loading /></main>;
-  if (!session) return <SignIn initialError={startupError} onSession={(next) => {
-    setSession(next); setStartupError(''); setSection('manuscripts'); setWorkspaceId(''); setTaskId('');
-  }} />;
-  const workspace = session.workspaces.find(({ id }) => id === workspaceId) ?? session.workspaces[0];
-  const currentNav = nav.find(({ id }) => id === section)!;
-  return <div className="shell">
-    <a className="skip-link" href="#workspace-content">跳到工作区</a>
-    <aside className="sidebar">
-      <Brand detail />
-      <label className="workspace-picker">
+  if (!session) return showSignIn
+    ? <SignIn initialError={startupError} onPreview={() => setShowSignIn(false)} onSession={(next) => {
+      setSession(next); setShowSignIn(false); setStartupError(''); setSection(undefined); setWorkspaceId(''); setTaskId('');
+    }} />
+    : <Preview onLogin={() => setShowSignIn(true)} />;
+  const workspace = session.workspaces.find(({ id }) => id === workspaceId)
+    ?? session.workspaces.find(({ role }) => role !== 'owner') ?? session.workspaces[0];
+  const sections: readonly Section[] = workspace ? roleView[workspace.role].sections : [];
+  const section = activeSection && sections.includes(activeSection) ? activeSection : sections[0];
+  return <Workbench sections={sections} section={section} onSection={(next) => { setSection(next); setTaskId(''); }}
+    workspacePicker={<label className="workspace-picker">
         <span className="workspace-icon"><Radio size={19} aria-hidden="true" /></span>
         <span><small>当前工作室</small>
           <select aria-label="切换工作室" value={workspace?.id ?? ''} onChange={(event) => {
-            setWorkspaceId(event.target.value); setSection('manuscripts'); setTaskId('');
+            setWorkspaceId(event.target.value); setSection(undefined); setTaskId('');
           }}>
             {session.workspaces.length ? session.workspaces.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)
               : <option value="">暂无工作室</option>}
           </select>
         </span>
-      </label>
-      <nav aria-label="工作台导航" className="nav">
-        <div className="nav-label">工作台</div>
-        {nav.map(({ id, label, icon: Icon }) => <button key={id} type="button" aria-current={section === id ? 'page' : undefined}
-          className={`nav-item ${section === id ? 'active' : ''}`} onClick={() => { setSection(id); setTaskId(''); }}>
-          <Icon aria-hidden="true" size={19} /><span>{label}</span>{section === id && <span className="nav-dot" />}
-        </button>)}
-      </nav>
-      <div className="sidebar-profile">
+    </label>}
+    profile={<><div className="sidebar-profile">
         <span className="avatar" aria-hidden="true">{Array.from(session.user.name)[0] || 'M'}</span>
         <span className="profile-name"><strong>{session.user.name}</strong><small>{workspace ? roleLabel[workspace.role] : session.user.email}</small></span>
         <button className="icon-button" aria-label="退出登录" title="退出登录" disabled={logout.busy} onClick={() => void logout.run(async () => {
           try { await post('/auth/logout', {}); }
           catch (error) { if (!(error instanceof ApiError && error.status === 401)) throw error; }
           drafts.clear();
+          setStartupError('');
+          setShowSignIn(false);
           setSession(null);
         })}><LogOut size={17} aria-hidden="true" /></button>
       </div>
-      <Feedback error={logout.error} />
-    </aside>
-    <div className="shell-body">
-      <header className="topbar">
-        <div className="breadcrumb"><span>工作台</span><ChevronRight size={15} aria-hidden="true" /><strong>{currentNav.label}</strong></div>
-        {workspace && <span className="workspace-role"><CircleUserRound size={15} aria-hidden="true" />{roleLabel[workspace.role]}</span>}
-      </header>
-      <main id="workspace-content" tabIndex={-1} className="main">
-        {workspace ? <WorkspaceBody key={workspace.id} workspace={workspace} section={section} taskId={taskId} drafts={drafts}
-          openTasks={(id) => { setTaskId(id); setSection('tasks'); }} openAccounts={() => setSection('accounts')} />
-          : <section className="card"><Empty icon={Check} title="暂无可访问的工作室" description="加入工作室后可查看稿件和任务。" /></section>}
-      </main>
-    </div>
-  </div>;
+      <Feedback error={logout.error} /></>}
+    topbar={workspace && <span className="workspace-role"><CircleUserRound size={15} aria-hidden="true" />{roleLabel[workspace.role]}</span>}>
+    {workspace && section ? <WorkspaceBody key={workspace.id} workspace={workspace} section={section} taskId={taskId} drafts={drafts}
+      openTasks={(id) => { setTaskId(id); setSection('tasks'); }} openAccounts={() => setSection('accounts')} />
+      : <section className="card"><Empty icon={Check} title="暂无可访问的工作室" description="加入工作室后可查看稿件和任务。" /></section>}
+  </Workbench>;
 }

@@ -63,7 +63,7 @@ small, .small { font-size: 12px; }
 .auth-form > p { margin: 8px 0 25px; color: var(--muted); }
 .auth-submit { width: 100%; justify-content: space-between; min-height: 45px; margin-top: 3px; }
 .auth-switch { text-align: center; display: flex; justify-content: center; gap: 6px; color: var(--muted); margin-top: 20px; }
-.boot { min-height: 100svh; display: grid; gap: 10px; align-content: center; justify-items: center; }
+.auth-preview { display: flex; margin: 15px auto 0; }
 
 .shell { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100svh; }
 .sidebar { position: sticky; top: 0; align-self: start; min-height: 100svh; display: flex; flex-direction: column; padding: 22px 15px 16px; gap: 22px; background: var(--paper); border-right: 1px solid var(--line); }
@@ -85,6 +85,7 @@ small, .small { font-size: 12px; }
 .profile-name strong, .profile-name small { text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
 .profile-name small { color: var(--muted); font-size: 11px; }
 .topbar { height: 63px; padding: 0 clamp(20px, 3vw, 40px); display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--paper); border-bottom: 1px solid var(--line); }
+.preview-actions { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .breadcrumb, .workspace-role { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); min-width: 0; }
 .breadcrumb strong { color: var(--ink); }
 .workspace-role { padding: 5px 9px; border: 1px solid var(--line); border-radius: 20px; font-size: 11px; font-weight: 620; white-space: nowrap; }
@@ -191,6 +192,8 @@ textarea { resize: vertical; }
 .account-row:last-child { border-bottom: 0; }
 .account-row > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .account-row small { display: block; color: var(--muted); }
+.member-role { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.member-role select { min-height: 34px; padding: 4px 8px; font-size: 12px; }
 
 .badge { display: inline-flex; min-height: 23px; align-items: center; justify-content: center; border-radius: 999px; padding: 2px 8px; font-weight: 690; font-size: 11px; line-height: 1.2; white-space: nowrap; }
 .badge.gray { color: #555e72; background: #eef0f5; }
@@ -255,7 +258,9 @@ textarea { resize: vertical; }
   .detail-icon { width: 36px; height: 36px; }
   .detail-heading h2 { font-size: 16px; }
   .form-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-  .workspace-role { display: none; }
+  .topbar:has(.preview-actions) .breadcrumb > :not(strong) { display: none; }
+  .member-row { flex-wrap: wrap; }
+  .member-role { flex-basis: 100%; margin-left: 47px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; }

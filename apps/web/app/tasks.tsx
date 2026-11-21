@@ -8,6 +8,7 @@ import {
   type Handoff, type Role, type Task, type TaskDetail, type TaskStatus,
 } from './api';
 import { Empty, Feedback, Loading, PageHeader, TaskBadge } from './ui';
+import { roleView } from './workbench';
 
 const filters = [
   { value: '', label: '全部' }, { value: 'scheduled', label: '待交接' }, { value: 'handed_off', label: '待回填' },
@@ -70,7 +71,7 @@ function RecordResult({ path, saved }: { path: string; saved: () => void }) {
       }
       await post(path + '/result', { state, remoteUrl: remoteUrl || undefined, note: note || undefined, evidenceAssetId });
       saved();
-    }, '发布结果已保存。');
+    });
   }
   return <form className="task-section form-stack" onSubmit={submit}>
     <h3><ClipboardCheck size={17} aria-hidden="true" />回填发布结果</h3>
@@ -88,13 +89,13 @@ function RecordResult({ path, saved }: { path: string; saved: () => void }) {
         }} />
     </label>
     <label>备注 <small>选填</small><textarea name="note" rows={3} maxLength={1000} placeholder="例如 发布后需要继续观察审核结果" /></label>
-    <Feedback error={action.error} notice={action.notice} />
+    <Feedback error={action.error} />
     <button className="button primary" disabled={action.busy}>{action.busy ? '正在保存…' : '保存回填结果'}</button>
   </form>;
 }
 
-function TaskDetails({ id, scope, role, refreshList, people }: {
-  id: string; scope: string; role: Role; refreshList: () => void; people: Map<string, string>;
+function TaskDetails({ id, scope, role, onRecorded, people }: {
+  id: string; scope: string; role: Role; onRecorded: (title: string) => void; people: Map<string, string>;
 }) {
   const path = scope + '/tasks/' + id;
   const detail = useResource<TaskDetail>(path, 5_000);
@@ -107,7 +108,6 @@ function TaskDetails({ id, scope, role, refreshList, people }: {
 
   const result = task.result;
   const resultUrl = externalUrl(result?.remoteUrl ?? null);
-  function saved() { refreshList(); detail.refresh(); }
   function actorName(actorId: string | null) {
     return actorId ? people.get(actorId) ?? '工作室成员' : '系统';
   }
@@ -129,7 +129,10 @@ function TaskDetails({ id, scope, role, refreshList, people }: {
       </div>}
       <Feedback error={handoff.error} />
       {handoff.loading ? <Loading /> : handoff.data && <Package data={handoff.data} />}
-      {recordable && task.status === 'handed_off' && task.executionChannel === 'manual' && <RecordResult path={path} saved={saved} />}
+      {recordable && task.status === 'handed_off' && task.executionChannel === 'manual' && <RecordResult path={path} saved={() => {
+        detail.refresh();
+        onRecorded(task.variant.title);
+      }} />}
       {result && <div className="task-section">
         <div className="section-line"><h3><ClipboardCheck size={17} aria-hidden="true" />发布回执</h3><TaskBadge status={result.state} /></div>
         <p className="muted small">{actorName(result.recordedById)} · {formatTime(result.recordedAt)}</p>
@@ -158,9 +161,10 @@ function TaskDetails({ id, scope, role, refreshList, people }: {
 }
 
 export function Tasks({ scope, role, initialId }: { scope: string; role: Role; initialId: string }) {
-  const [status, setStatus] = useState<'' | TaskStatus>('');
+  const [status, setStatus] = useState<'' | TaskStatus>(initialId ? '' : roleView[role].taskStatus ?? '');
   const [selected, setSelected] = useState(initialId);
   const [pages, setPages] = useState<string[]>([]);
+  const [recordedTitle, setRecordedTitle] = useState('');
   const cursor = pages.at(-1);
   const search = new URLSearchParams({ limit: '20' });
   if (status) search.set('status', status);
@@ -170,22 +174,23 @@ export function Tasks({ scope, role, initialId }: { scope: string; role: Role; i
   const people = new Map(members.data?.map(({ user }) => [user.id, user.name]));
   const items = list.data?.items ?? [];
   const active = selected || items[0]?.id || '';
-  function changePage(next: string[]) { setPages(next); setSelected(''); }
+  function changePage(next: string[]) { setPages(next); setSelected(''); setRecordedTitle(''); }
 
   return <>
-    <PageHeader title="发布任务" description="查看交接进度、取得已审文案并记录发布结果。">
+    <PageHeader title="发布任务" description={role === 'operator' ? roleView.operator.description
+      : canRecord(role) ? '查看交接进度、取得已审文案并记录发布结果。' : '查阅发布进度和回执。'}>
       <button className="button" onClick={list.refresh}><RefreshCw size={16} aria-hidden="true" />刷新任务</button>
     </PageHeader>
     <div className="filters" aria-label="按任务状态筛选">
       {filters.map((filter) => <button className={status === filter.value ? 'active' : ''} key={filter.value} aria-pressed={status === filter.value}
         onClick={() => { setStatus(filter.value); changePage([]); }}>{filter.label}</button>)}
     </div>
-    <Feedback error={list.error} />
+    <Feedback error={list.error} notice={recordedTitle ? `「${recordedTitle}」的发布结果已保存。` : undefined} />
     <div className="split-panel">
       <section className="card item-list">
         <div className="card-heading"><h2>任务列表</h2><span className="count">{items.length}</span></div>
         {list.loading ? <Loading /> : items.length ? items.map((task) => <button key={task.id} className={`list-item ${active === task.id ? 'selected' : ''}`}
-          aria-pressed={active === task.id} onClick={() => setSelected(task.id)}>
+          aria-pressed={active === task.id} onClick={() => { setSelected(task.id); setRecordedTitle(''); }}>
           <span className="list-icon"><CalendarDays size={17} aria-hidden="true" /></span>
           <span className="list-copy"><strong>{task.variant.title}</strong><small>{task.account.displayName} · {formatTime(task.scheduledAt)}</small></span>
           <TaskBadge status={task.status} /><ChevronRight className="row-chevron" size={14} aria-hidden="true" />
@@ -197,7 +202,11 @@ export function Tasks({ scope, role, initialId }: { scope: string; role: Role; i
             onClick={() => { if (list.data?.nextCursor) changePage([...pages, list.data.nextCursor]); }}><ArrowRight size={17} aria-hidden="true" /></button>
         </div>}
       </section>
-      {active ? <TaskDetails key={active} id={active} scope={scope} role={role} refreshList={list.refresh} people={people} />
+      {active ? <TaskDetails key={active} id={active} scope={scope} role={role} people={people} onRecorded={(title) => {
+        if (status === 'handed_off') setSelected((current) => current === active ? '' : current);
+        setRecordedTitle(title);
+        list.refresh();
+      }} />
         : <section className="card detail-pane empty-detail">{list.loading ? <Loading />
           : <Empty icon={CalendarDays} title="在这里查看发布进度" description="为已审核的小红书版本排期后，可以在这里查看交接与回执。" />}</section>}
     </div>

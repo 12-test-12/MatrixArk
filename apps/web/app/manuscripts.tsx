@@ -180,10 +180,10 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
   </div>;
 }
 
-function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onSchedule, openAccounts }: {
+function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApproved, onSchedule, openAccounts }: {
   scope: string; role: Role; id: string; accounts: ReturnType<typeof useResource<Account[]>>;
   drafts: ManuscriptDrafts;
-  changed: () => void; onSchedule: (id: string) => void; openAccounts: () => void;
+  changed: () => void; onApproved?: () => void; onSchedule: (id: string) => void; openAccounts: () => void;
 }) {
   const detail = useResource<Manuscript>(scope + '/manuscripts/' + id);
   const action = useAction();
@@ -204,7 +204,8 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onSchedu
       await post(scope + '/variants/' + variant.id + '/confirm', {});
       check.refresh();
       refresh();
-    }, '已确认当前版本。');
+      onApproved?.();
+    }, onApproved ? '' : '已确认当前版本。');
   }
   function upload(files: File[]) {
     if (!files.length) return;
@@ -297,35 +298,51 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
 }) {
   const list = useResource<ManuscriptSummary[]>(scope + '/manuscripts');
   const [selection, setSelection] = useState('');
+  const [pendingOnly, setPendingOnly] = useState(role === 'reviewer');
+  const [reviewNotice, setReviewNotice] = useState('');
   const draftKey = scope + '/manuscripts/new';
   const [creating, setCreating] = useState(() => canEdit(role) && drafts.has(draftKey));
-  const items = list.data ?? [];
-  const active = selection || items[0]?.id || '';
+  const allItems = list.data ?? [];
+  const items = pendingOnly ? allItems.filter(({ variants }) =>
+    variants.some(({ platform, status }) => platform === 'xiaohongshu' && status === 'draft')) : allItems;
+  const selected = !pendingOnly || items.some(({ id }) => id === selection) ? selection : '';
+  const active = selected || items[0]?.id || '';
   const start = () => setCreating(true);
   return <>
-    <PageHeader title="原稿与审核" description="整理原稿与配图，确认可以交接的小红书版本。">
+    <PageHeader title={pendingOnly ? '待审核原稿' : '原稿与审核'}
+      description={role === 'reviewer' ? '检查小红书版本的文案、配图和封面。' : canEdit(role)
+        ? '整理原稿与配图，确认可以交接的小红书版本。' : '查阅原稿和对应的小红书版本。'}>
       {canEdit(role) && items.length > 0 && <button className="button primary" onClick={start}><Plus size={18} aria-hidden="true" />新建原稿</button>}
     </PageHeader>
-    <Feedback error={list.error} />
+    {role === 'reviewer' && <div className="filters" aria-label="按审核状态筛选">
+      <button type="button" className={pendingOnly ? 'active' : ''} aria-pressed={pendingOnly}
+        onClick={() => { setPendingOnly(true); setSelection(''); setReviewNotice(''); }}>待审核</button>
+      <button type="button" className={!pendingOnly ? 'active' : ''} aria-pressed={!pendingOnly}
+        onClick={() => { setPendingOnly(false); setSelection(''); setReviewNotice(''); }}>全部原稿</button>
+    </div>}
+    <Feedback error={list.error} notice={pendingOnly ? reviewNotice : undefined} />
     <div className="split-panel">
       <section className="card item-list">
         <div className="card-heading"><h2>原稿列表</h2><span className="count">{items.length}</span></div>
         {list.loading ? <Loading /> : items.length > 0 ? items.map((item) => {
-          const variant = item.variants.find((candidate) => candidate.platform === 'xiaohongshu');
+          const variant = item.variants.find((candidate) => candidate.platform === 'xiaohongshu' && candidate.status !== 'superseded');
           return <button key={item.id} className={`list-item ${active === item.id && !creating ? 'selected' : ''}`}
-            aria-pressed={active === item.id && !creating} onClick={() => { setSelection(item.id); setCreating(false); }}>
+            aria-pressed={active === item.id && !creating} onClick={() => { setSelection(item.id); setCreating(false); setReviewNotice(''); }}>
             <span className="list-icon"><FileText size={18} aria-hidden="true" /></span>
             <span className="list-copy"><strong>{item.title}</strong><small>{item.assetCount} 张图片 · {variantLabel(variant)}</small></span>
             <ChevronRight size={15} aria-hidden="true" />
           </button>;
-        }) : <Empty icon={FileText} title="暂无原稿" />}
+        }) : <Empty icon={FileText} title={pendingOnly ? '暂无待审核原稿' : '暂无原稿'} />}
       </section>
       {creating ? <NewManuscript scope={scope} drafts={drafts} draftKey={draftKey} onCancel={() => setCreating(false)} onSave={(id) => {
         setSelection(id); setCreating(false); list.refresh();
       }} /> : active ? <ManuscriptDetail key={active} scope={scope} role={role} id={active} accounts={accounts} drafts={drafts}
-        changed={list.refresh} onSchedule={openTasks} openAccounts={openAccounts} />
+        changed={list.refresh} onApproved={pendingOnly ? () => setReviewNotice('已确认当前版本。') : undefined}
+        onSchedule={openTasks} openAccounts={openAccounts} />
         : <section className="card detail-pane empty-detail">
-          {list.loading ? <Loading /> : <Empty icon={FileText} title="开始你的第一篇原稿" description="添加标题、正文和图片，然后生成可以送审的小红书图文。">
+          {list.loading ? <Loading /> : <Empty icon={FileText} title={canEdit(role) ? '开始你的第一篇原稿' : '暂无原稿可查看'}
+            description={pendingOnly ? '编辑生成小红书版本后会出现在这里。' : canEdit(role)
+              ? '添加标题、正文和图片，然后生成可以送审的小红书图文。' : '工作室有原稿后，可在这里查看。'}>
             {canEdit(role) && <button className="button primary" onClick={start}><Plus size={17} aria-hidden="true" />新建原稿</button>}
           </Empty>}
         </section>}
