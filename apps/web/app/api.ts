@@ -75,16 +75,24 @@ export class ApiError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 
-export async function api<T>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
+export async function api<T>(path: string, options: {
+  method?: string; body?: unknown; headers?: Record<string, string>; signal?: AbortSignal;
+} = {}): Promise<T> {
   const form = options.body instanceof FormData;
-  const video = options.body instanceof Blob ? options.body : undefined;
+  const blob = options.body instanceof Blob ? options.body : undefined;
   let response: Response;
   try {
+    const defaultHeaders: Record<string, string> = {};
+    if (blob) {
+      defaultHeaders['content-type'] = blob.type || 'video/mp4';
+      defaultHeaders['x-video-size'] = String(blob.size);
+    } else if (options.body !== undefined && !form) {
+      defaultHeaders['content-type'] = 'application/json';
+    }
     response = await fetch(`/api${path}`, {
       method: options.method ?? 'GET',
-      headers: video ? { 'content-type': 'video/mp4', 'x-video-size': String(video.size) }
-        : options.body !== undefined && !form ? { 'content-type': 'application/json' } : undefined,
-      body: video ?? (form ? options.body as FormData : JSON.stringify(options.body)),
+      headers: options.headers ? { ...defaultHeaders, ...options.headers } : (Object.keys(defaultHeaders).length ? defaultHeaders : undefined),
+      body: blob ?? (form ? options.body as FormData : JSON.stringify(options.body)),
       signal: options.signal,
       cache: 'no-store',
     });

@@ -29,7 +29,7 @@ async function validMp4(path: string, size: number) {
       } else if (length === 0) length = size - offset;
       if (length < 8 || length > size - offset) return false;
       if (offset === 0 && (type !== 'ftyp' || length < 16 || header.toString('ascii', 8, 12) === 'qt  ')) return false;
-      if (length > 8) boxes.add(type);
+      boxes.add(type);
       offset += length;
     }
     return offset === size && boxes.has('moov') && boxes.has('mdat');

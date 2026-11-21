@@ -215,7 +215,8 @@ export class ManuscriptsController {
     @Param('workspaceId') workspaceId: string, @Param('id') id: string, @Query('filename') filename: string,
     @Req() request: Request) {
     assertCan(membership.role, 'content:write');
-    if (request.get('content-type') !== 'video/mp4') throw new UnsupportedMediaTypeException('请选择 MP4 视频');
+    const contentType = request.get('content-type')?.split(';')[0]?.trim().toLowerCase();
+    if (contentType !== 'video/mp4') throw new UnsupportedMediaTypeException('请选择 MP4 视频');
     const size = Number(request.get('x-video-size'));
     if (!Number.isSafeInteger(size) || size <= 0) throw new BadRequestException('视频大小无效');
     if (size > VIDEO_UPLOAD_LIMIT) throw new PayloadTooLargeException('视频不能超过 100 MiB');

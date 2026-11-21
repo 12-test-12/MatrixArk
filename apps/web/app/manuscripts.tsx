@@ -391,7 +391,10 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
       {pickedVideo ? <div className="video-asset">
         {pickedVideoUrl && <video controls preload="metadata" aria-label="本地视频预览" src={pickedVideoUrl} />}
         <p className="muted small">{pickedVideo.name} · {videoAction.busy ? '正在上传' : '本地预览'}</p>
-        {videoAction.error && <button type="button" className="button compact" onClick={() => uploadVideo(pickedVideo)}>重试上传</button>}
+        {videoAction.error && <div className="actions">
+          <button type="button" className="button compact" onClick={() => uploadVideo(pickedVideo)}>重试上传</button>
+          <button type="button" className="button compact" onClick={() => { setPickedVideo(undefined); videoAction.reset(); }}>取消</button>
+        </div>}
       </div> : manuscript.videoAsset ? <div className="video-asset">
         <video controls preload="metadata" aria-label="原稿视频" src={imageUrl(scope, manuscript.videoAsset.id) + '/video'} />
         <p className="muted small">{manuscript.videoAsset.filename}</p>
