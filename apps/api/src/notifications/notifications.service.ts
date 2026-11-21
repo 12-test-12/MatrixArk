@@ -198,9 +198,14 @@ export class NotificationsService {
         status, nextAttemptAt, leaseId: null, leaseExpiresAt: null, lastError: reason, sentAt: status === 'sent' ? now : null,
       },
     });
-    if (status !== 'pending') await tx.taskEvent.create({
-      data: { workspaceId: delivery.workspaceId, taskId: delivery.taskId, kind: 'reminder', reason,
-        details: { deliveryId: delivery.id, kind: delivery.kind, status } },
-    });
+    if (status !== 'pending') {
+      const eventReason = status === 'sent'
+        ? (delivery.kind === 'handoff_ready' ? '交接提醒已送达' : '4 小时未回填提醒已送达')
+        : reason;
+      await tx.taskEvent.create({
+        data: { workspaceId: delivery.workspaceId, taskId: delivery.taskId, kind: 'reminder', reason: eventReason,
+          details: { deliveryId: delivery.id, kind: delivery.kind, status } },
+      });
+    }
   }
 }

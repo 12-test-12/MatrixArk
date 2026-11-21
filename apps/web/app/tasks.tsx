@@ -157,11 +157,17 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
         </div>
       </div>}
       {!!task.notificationDeliveries?.length && <div className="task-section">
-        <h3>飞书提醒</h3>
+        <h3><Send size={17} aria-hidden="true" />飞书提醒</h3>
         <dl className="task-meta">
           {task.notificationDeliveries.map((delivery) => <div key={delivery.id}>
             <dt>{delivery.kind === 'handoff_ready' ? '交接提醒' : '4 小时未回填提醒'}</dt>
-            <dd>{deliveryLabels[delivery.status]} · {formatTime(delivery.sentAt ?? delivery.scheduledAt)}</dd>
+            <dd>{deliveryLabels[delivery.status]} · {delivery.status === 'sent'
+              ? formatTime(delivery.sentAt ?? delivery.scheduledAt)
+              : delivery.status === 'pending'
+                ? `预计 ${formatTime(delivery.scheduledAt)}`
+                : delivery.status === 'skipped'
+                  ? `原计划 ${formatTime(delivery.scheduledAt)}`
+                  : formatTime(delivery.scheduledAt)}</dd>
             {delivery.lastError && <dd className="muted small">{delivery.lastError}</dd>}
           </div>)}
         </dl>
