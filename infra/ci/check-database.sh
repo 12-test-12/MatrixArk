@@ -80,3 +80,7 @@ BEGIN
 END $$;
 SQL
 done
+
+pnpm db:generate
+pnpm --filter '@matrixark/api...' build
+node --test apps/api/test/variant-snapshot.test.mjs

@@ -23,7 +23,10 @@ if (!manual) {
       '.github/workflows/matrixark.yml', 'infra/ci/select-targets.mjs',
     ].includes(path));
     database = common || files.some((path) =>
-      path.startsWith('apps/api/prisma/') || path.startsWith('apps/api/scripts/') || path === 'infra/ci/check-database.sh',
+      path.startsWith('apps/api/prisma/') || path.startsWith('apps/api/scripts/') ||
+      path.startsWith('apps/api/src/content/') || path.startsWith('apps/api/test/') ||
+      ['infra/ci/check-database.sh', 'packages/shared/src/platform.ts', 'packages/shared/src/schemas.ts',
+        'packages/shared/src/variant-rules.ts'].includes(path),
     );
     api = common || files.some((path) =>
       path.startsWith('apps/api/src/') || path.startsWith('packages/') || [

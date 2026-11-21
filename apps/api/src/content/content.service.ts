@@ -96,6 +96,7 @@ export class ContentService {
     },
     generationSource: GenerationSource,
     userId: string,
+    previousSnapshotHash?: string,
   ) {
     const { title, body, tags, assetIds, coverAssetId, platformFields } = input;
     if (coverAssetId !== null && !assetIds.includes(coverAssetId)) {
@@ -106,12 +107,15 @@ export class ContentService {
       if (Object.keys(platformFields).length > 0) throw new BadRequestException('小红书首版暂不支持平台扩展字段');
     }
     const assets = assetIds.map((assetId, position) => ({ assetId, position, isCover: assetId === coverAssetId }));
+    const hash = contentHash({ platform, title, body, tags, assets, platformFields });
+    if (hash === previousSnapshotHash) {
+      throw new BadRequestException({ code: 'variant_unchanged', message: '版本内容未变化' });
+    }
     const last = await tx.variant.findFirst({
       where: { manuscriptId: manuscript.id, platform },
       orderBy: { version: 'desc' },
       select: { version: true },
     });
-    const hash = contentHash({ platform, title, body, tags, assets, platformFields });
     const version = await tx.variant.create({
       data: {
         workspaceId: manuscript.workspaceId,
@@ -199,14 +203,15 @@ export class ContentService {
 
       const previousCover = current.assets.find(({ isCover }) => isCover)?.assetId;
       let defaultCover = assetIds[0] ?? null;
-      if (current.platform === 'bilibili' && current.snapshotVersion === 1) {
-        if (previousCover && assetIds.includes(previousCover)) defaultCover = previousCover;
-        if (input.assetIds === undefined) defaultCover = previousCover ?? null;
+      if (current.platform === 'bilibili' && current.snapshotVersion === 1
+        && (!previousCover || assetIds.includes(previousCover))) {
+        defaultCover = previousCover ?? null;
       }
       const platformFields = input.platformFields ?? current.platformFields;
       if (!platformFields || typeof platformFields !== 'object' || Array.isArray(platformFields)) {
         throw new BadRequestException('平台扩展字段须为 JSON 对象');
       }
+      const previousSnapshotHash = current.snapshotVersion === 1 && current.sealedAt ? current.contentHash : undefined;
       const variant = await this.createVersion(tx, manuscript, current.platform, {
         title: input.title ?? current.title,
         body: input.body ?? current.body,
@@ -214,7 +219,7 @@ export class ContentService {
         assetIds,
         coverAssetId: input.coverAssetId === undefined ? defaultCover : input.coverAssetId,
         platformFields,
-      }, 'manual', params.userId);
+      }, 'manual', params.userId, previousSnapshotHash);
       const pausedTaskCount = await this.supersedeVersions(tx, manuscript, [current.platform], [variant.id], params.userId);
       return { variant, supersededVariantId: current.id, pausedTaskCount };
     }, { isolationLevel: 'ReadCommitted' });

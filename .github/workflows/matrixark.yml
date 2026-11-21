@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       database:
-        description: 数据库迁移检查
+        description: 数据库迁移与集成测试
         type: boolean
         default: false
       api:
@@ -45,7 +45,7 @@ jobs:
         run: node infra/ci/select-targets.mjs
 
   database:
-    name: PostgreSQL 16 迁移
+    name: PostgreSQL 16 迁移与集成测试
     needs: plan
     if: needs.plan.outputs.database == 'true'
     runs-on: ubuntu-24.04

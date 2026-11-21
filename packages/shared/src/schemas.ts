@@ -39,8 +39,7 @@ export const updateVariantSchema = z.object({
   assetIds: z.array(z.string().uuid()).refine((ids) => new Set(ids).size === ids.length, '图片不能重复').optional(),
   coverAssetId: z.string().uuid().nullable().optional(),
   platformFields: z.record(jsonValueSchema).optional(),
-  note: z.string().trim().max(500).optional(),
-});
+}).refine((input) => Object.values(input).some((value) => value !== undefined), '至少提交一项版本内容');
 
 export const createAccountSchema = z.object({
   platform: z.enum(PLATFORMS),
