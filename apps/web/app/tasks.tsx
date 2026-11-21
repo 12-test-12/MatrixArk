@@ -185,7 +185,7 @@ export function Tasks({ scope, role, initialId }: { scope: string; role: Role; i
     </PageHeader>
     <div className="filters" aria-label="按任务状态筛选">
       {filters.map((filter) => <button className={status === filter.value ? 'active' : ''} key={filter.value} aria-pressed={status === filter.value}
-        onClick={() => { setStatus(filter.value); changePage([]); }}>{filter.label}</button>)}
+        disabled={listUnavailable} onClick={() => { setStatus(filter.value); changePage([]); }}>{filter.label}</button>)}
     </div>
     <Feedback error={list.error} notice={recordedTitle ? `「${recordedTitle}」的发布结果已保存。` : undefined} />
     {!listUnavailable && <div className="split-panel">

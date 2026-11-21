@@ -81,11 +81,12 @@ export async function api<T>(path: string, options: { method?: string; body?: un
     if (response.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new Event('matrixark-session-expired'));
     const issue = Array.isArray(data?.issues) ? data.issues[0]?.message : undefined;
     const message = issue || (typeof data?.message === 'string' ? data.message : null);
-    if (response.status === 404 && typeof message === 'string' && message.startsWith(`Cannot ${options.method ?? 'GET'} /`)) {
+    const method = (options.method ?? 'GET').toUpperCase();
+    if (response.status === 404 && typeof message === 'string' && message.toUpperCase().startsWith(`CANNOT ${method} /`)) {
       throw new ApiError(404, '当前 API 未提供此功能。请启动与工作台同版本的 API，再重试。');
     }
     throw new ApiError(response.status, response.status >= 500
-      ? 'API 暂时不可用，请稍后重试。' : message ?? '请求未能完成');
+      ? 'API 暂时不可用，请稍后重试。' : message ?? (response.status === 404 ? '当前 API 未提供此功能或服务未启动。' : '请求未能完成'));
   }
   if (data === null) throw new ApiError(response.status, 'API 返回了无法读取的数据');
   return data as T;

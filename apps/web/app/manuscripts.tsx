@@ -307,7 +307,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
         </div>}
       </div> : snapshot && editable && (editing ?? drafts.has(draftKey)) ? <EditVersion key={snapshot.id} scope={scope} variant={snapshot}
         assets={manuscript.assets} drafts={drafts} draftKey={draftKey}
-        onSave={() => { setPlatform(variant.platform); setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />
+        onSave={() => { setPlatform(snapshot.platform); setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />
         : <>
           <div className="variant-preview">
             <div className="section-line"><h3>{variant.title}</h3><span className="version">V{variant.version}</span></div>

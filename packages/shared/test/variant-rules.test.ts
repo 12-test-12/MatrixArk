@@ -72,9 +72,12 @@ describe('发布前校验', () => {
     expect(issues.some((i) => i.code === 'title_too_long')).toBe(true);
   });
 
-  it('合规内容没有 issue', () => {
+  it('合规内容没有 issue，B 站专栏允许无图纯文本', () => {
     expect(
       validateVariant('bilibili', { title: '标题', body: '正文', tags: ['a'], imageCount: 2 }),
+    ).toEqual([]);
+    expect(
+      validateVariant('bilibili', { title: '标题', body: '正文', tags: ['a'], imageCount: 0 }),
     ).toEqual([]);
   });
 });
