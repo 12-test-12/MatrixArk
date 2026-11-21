@@ -100,9 +100,13 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
         </button>)}
       </section>
       <section className="card detail-pane task-detail">
-        <div className="detail-heading"><div><h2>{active.manuscript.title}</h2>
-          <p>{platformLabel[active.manuscript.platform]}{active.task && ` · ${accountNames[active.manuscript.platform]}`}</p>
-        </div></div>
+        <div className="detail-heading">
+          <div className="detail-icon"><Icon size={22} aria-hidden="true" /></div>
+          <div><h2>{active.manuscript.title}</h2>
+            <p>{platformLabel[active.manuscript.platform]}{active.task && ` · ${accountNames[active.manuscript.platform]}`}</p>
+          </div>
+          {active.task && <TaskBadge status={active.task.status} />}
+        </div>
         <div className="detail-content">
           <div className="task-section">
             <div className="section-line"><h3><Send size={17} aria-hidden="true" />{active.task ? '已审交接包' : '平台版本'}</h3>
