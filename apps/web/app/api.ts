@@ -6,9 +6,9 @@ export type Session = { user: { id: string; name: string; email: string }; works
 export const platforms = ['xiaohongshu', 'bilibili'] as const;
 export type Platform = (typeof platforms)[number];
 export const platformLabel: Record<Platform, string> = { xiaohongshu: '小红书', bilibili: 'B 站专栏' };
-export const channelLabel = { manual: '人工交接', official: '官方通道 · 待接入', sandbox: '沙箱' };
 export type Account = {
-  id: string; platform: Platform; channelKind: keyof typeof channelLabel; displayName: string; operator?: string | null;
+  id: string; platform: Platform; channelKind: 'manual' | 'official' | 'sandbox'; displayName: string; operator?: string | null;
+  identityVerified: boolean; identityCheckedAt: string | null; availableForHandoff: boolean;
 };
 export type Approval = { approvedAt: string; snapshotHash: string | null };
 export type Picture = { assetId: string; position: number; isCover: boolean };
@@ -35,7 +35,8 @@ export type Result = {
 export type Task = {
   id: string; status: TaskStatus; scheduledAt: string; handedOffAt: string | null; lastError: string | null;
   executionChannel: string | null; isSandbox: boolean | null;
-  account: Omit<Account, 'channelKind'>; variant: Pick<Variant, 'id' | 'title' | 'platform' | 'version'>;
+  account: Pick<Account, 'id' | 'platform' | 'displayName' | 'operator'>;
+  variant: Pick<Variant, 'id' | 'title' | 'platform' | 'version'>;
   result: Result | null;
 };
 export type TaskDetail = Task & {

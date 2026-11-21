@@ -201,8 +201,8 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
       </div>
       <Feedback error={action.error} />
       <button className="button primary" disabled={action.busy}>确认排期<ChevronRight size={15} aria-hidden="true" /></button>
-    </form> : <p className="muted">排期前需要 <button type="button" className="text-button" onClick={openAccounts}>
-      添加{platformLabel[variant.platform]}人工账号</button>。</p>}
+    </form> : <p className="muted">当前没有可排期的{platformLabel[variant.platform]}账号。<button type="button" className="text-button" onClick={openAccounts}>
+      查看账号与授权状态</button>。</p>}
   </div>;
 }
 
@@ -340,7 +340,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
           </div>
           {snapshot && approved && editable && <>{accounts.loading ? <Loading /> : accounts.error ? <Feedback error={accounts.error} />
             : <Schedule key={snapshot.id} scope={scope} variant={snapshot} onSchedule={onSchedule} openAccounts={openAccounts}
-              accounts={accounts.data?.filter((account) => account.platform === platform && account.channelKind === 'manual') ?? []} />}</>}
+              accounts={accounts.data?.filter((account) => account.platform === platform && account.availableForHandoff) ?? []} />}</>}
         </>}
     </div>
   </section>;

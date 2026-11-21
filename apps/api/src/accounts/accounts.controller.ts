@@ -1,34 +1,35 @@
 import {
   Body,
   Controller,
+  ConflictException,
   Delete,
   Get,
+  HttpCode,
   NotFoundException,
   Param,
   Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { createAccountSchema } from '@matrixark/shared';
 import { z } from 'zod';
 import type { Role } from '@prisma/client';
-import { CurrentMembership } from '../auth/decorators';
+import { CurrentMembership, CurrentUser } from '../auth/decorators';
+import type { SessionUser } from '../auth/session.service';
 import { assertCan } from '../common/permissions';
 import { parse } from '../common/zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
+import { XiaohongshuIdentityService } from './xiaohongshu-identity.service';
 
 const updateAccountSchema = z.object({
   displayName: z.string().trim().min(1).max(60).optional(),
   operator: z.string().trim().max(40).optional(),
-  channelKind: z.enum(['official', 'manual', 'sandbox']).optional(),
-  credentials: z.record(z.string()).optional(),
-});
+}).strict();
 
 @Controller('workspaces/:workspaceId/accounts')
 @UseGuards(WorkspaceGuard)
 export class AccountsController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly xiaohongshu: XiaohongshuIdentityService) {}
 
   @Get()
   async list(@Param('workspaceId') workspaceId: string) {
@@ -43,6 +44,11 @@ export class AccountsController {
       channelKind: account.channelKind,
       displayName: account.displayName,
       operator: account.operator,
+      identityVerified: Boolean(account.externalId && account.authCheckedAt),
+      identityCheckedAt: account.authCheckedAt,
+      availableForHandoff: Boolean(account.externalId && account.authCheckedAt && account.channelKind === 'manual'
+        && !account.archivedAt && ['active', 'pending'].includes(account.authStatus)
+        && (!account.rateLimitedUntil || account.rateLimitedUntil <= new Date())),
       hasCredentials: Boolean(account.credentials),
       taskCount: account._count.tasks,
       createdAt: account.createdAt,
@@ -50,24 +56,31 @@ export class AccountsController {
   }
 
   @Post()
-  async create(
+  create(@CurrentMembership() membership: { role: Role }) {
+    assertCan(membership.role, 'account:manage');
+    throw new ConflictException('通过平台授权核验身份后才能添加发布账号。');
+  }
+
+  @Post('xiaohongshu/authorize')
+  authorizeXiaohongshu(
     @CurrentMembership() membership: { role: Role },
+    @CurrentUser() user: SessionUser,
     @Param('workspaceId') workspaceId: string,
-    @Body() body: unknown,
   ) {
     assertCan(membership.role, 'account:manage');
-    const input = parse(createAccountSchema, body);
-    return this.prisma.channelAccount.create({
-      data: {
-        workspaceId,
-        platform: input.platform,
-        channelKind: input.channelKind,
-        authStatus: input.channelKind === 'manual' ? 'active' : 'pending',
-        displayName: input.displayName,
-        operator: input.operator,
-        credentials: input.credentials,
-      },
-    });
+    return this.xiaohongshu.start(workspaceId, user.id);
+  }
+
+  @Post('xiaohongshu/authorize/:id/poll')
+  @HttpCode(200)
+  pollXiaohongshu(
+    @CurrentMembership() membership: { role: Role },
+    @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string,
+  ) {
+    assertCan(membership.role, 'account:manage');
+    return this.xiaohongshu.poll(workspaceId, user.id, id);
   }
 
   @Patch(':id')
@@ -81,7 +94,12 @@ export class AccountsController {
     const input = parse(updateAccountSchema, body);
     const existing = await this.prisma.channelAccount.findFirst({ where: { id, workspaceId } });
     if (!existing) throw new NotFoundException('账号不存在');
-    return this.prisma.channelAccount.update({ where: { id }, data: input });
+    if (existing.externalId && existing.authCheckedAt && input.displayName !== undefined) {
+      throw new ConflictException('已核验账号使用平台昵称。');
+    }
+    return this.prisma.channelAccount.update({
+      where: { id }, data: input, select: { id: true, platform: true, channelKind: true, displayName: true, operator: true },
+    });
   }
 
   @Delete(':id')

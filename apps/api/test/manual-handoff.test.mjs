@@ -9,6 +9,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   const url = process.env.DATABASE_URL;
   assert(url && new URL(url).pathname === '/matrixark_upgrade_test' && process.env.STORAGE_LOCAL_DIR,
     'Use infra/ci/check-database.sh');
+  process.env.XIAOHONGSHU_APP_ID = 'identity-fixture';
+  process.env.XIAOHONGSHU_APP_SECRET = 'identity-fixture-secret';
   const { AppModule } = await import('../dist/app.module.js');
   const { PrismaService } = await import('../dist/prisma/prisma.service.js');
   const { TasksService } = await import('../dist/tasks/tasks.service.js');
@@ -49,15 +51,22 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     return form;
   };
 
-  const { data: account } = await post(own + '/accounts', {
-    platform: 'xiaohongshu', channelKind: 'manual', displayName: '人工测试账号',
+  const prisma = api.get(PrismaService);
+  const workspaceId = owner.workspaces[0].id;
+  const fixtureAccount = (platform, channelKind, displayName, verified = true) => prisma.channelAccount.create({
+    data: {
+      workspaceId, platform, channelKind, displayName,
+      externalId: verified ? `fixture-${platform}-${channelKind}` : null,
+      authCheckedAt: verified ? new Date() : null,
+    },
   });
+  const account = await fixtureAccount('xiaohongshu', 'manual', '人工测试账号');
+  const unverified = await fixtureAccount('xiaohongshu', 'manual', '旧未核验账号', false);
   const { data: manuscript } = await post(own + '/manuscripts', { title: '审核标题', body: '已审核正文', tags: ['样例'] });
   const source = own + '/manuscripts/' + manuscript.id;
   const filename = '稿件封面 Café 🌿.png';
   const { data: image } = await post(source + '/assets', file(sourcePng, filename));
   assert.equal(image.filename, filename);
-  const prisma = api.get(PrismaService);
   const legacyName = Buffer.from(filename, 'utf8').toString('latin1');
   await prisma.asset.update({ where: { id: image.id }, data: { filename: legacyName } });
   const { data: withLegacyImage } = await call(source, { cookie });
@@ -68,6 +77,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   const schedule = { accountIds: [account.id], variantIds: [variant.id], scheduledAt };
   await post(own + '/tasks', schedule, 409);
   await post(own + '/variants/' + variant.id + '/confirm', {});
+  await post(own + '/tasks', { ...schedule, accountIds: [unverified.id] }, 409);
 
   const both = await Promise.all(Array.from({ length: 2 }, () => fetch(base + own + '/tasks', {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(schedule),
@@ -147,12 +157,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   await call(own + '/tasks?status=scheduled&cursor=' + firstPage.nextCursor, { cookie, status: 400 });
 
   await t.test('B 站专栏用同平台人工账号交接及回填', async () => {
-    const { data: bilibili } = await post(own + '/accounts', {
-      platform: 'bilibili', channelKind: 'manual', displayName: '专栏人工账号',
-    });
-    const { data: official } = await post(own + '/accounts', {
-      platform: 'bilibili', channelKind: 'official', displayName: '专栏官方账号',
-    });
+    const bilibili = await fixtureAccount('bilibili', 'manual', '专栏人工账号');
+    const official = await fixtureAccount('bilibili', 'official', '专栏官方账号');
     const { data: [article] } = await post(source + '/generate', { platforms: ['bilibili'] });
     await post(own + '/variants/' + article.id + '/confirm', {});
     const articleSchedule = { variantIds: [article.id], accountIds: [bilibili.id], scheduledAt };
@@ -184,5 +190,65 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       const { data: check } = await call(own + '/variants/' + item.id + '/check', { cookie });
       assert.deepEqual(check.issues.map(({ code }) => code), item.platform === 'xiaohongshu' ? ['images_missing'] : []);
     }
+  });
+
+  await t.test('只能通过小红书官方身份核验新增账号', async (test) => {
+    let approved = false;
+    const localFetch = globalThis.fetch;
+    test.mock.method(globalThis, 'fetch', (input, options) => {
+      const url = new URL(input);
+      if (url.origin !== 'https://openaccount.xiaohongshu.com') return localFetch(input, options);
+      const body = JSON.parse(options.body);
+      const result = (data) => Response.json({ code: 0, success: true, data });
+      switch (url.pathname.split('/').at(-1)) {
+        case 'code':
+          assert.deepEqual(body.scopes, ['basic_info']);
+          return result({
+            device_code: 'private-device-fixture',
+            verification_uri_complete: 'https://openaccount.xiaohongshu.com/device?user_code=ABCD-EFGH',
+            user_code: 'ABCD-EFGH', expires_in: 600, interval: 1,
+          });
+        case 'token':
+          assert.equal(body.device_code, 'private-device-fixture');
+          return approved ? result({ access_token: 'private-token-fixture', open_id: 'verified-fixture', scope: ['basic_info'] })
+            : Response.json({ code: 37002, success: false, data: null });
+        case 'batch_get_min_user_info':
+          assert.equal(options.headers.authorization, 'Bearer private-token-fixture');
+          return result({ open_id: 'verified-fixture', nickname: '平台返回昵称' });
+        default: assert.fail('Unexpected XiaoHongShu request');
+      }
+    });
+    for (const platform of ['bilibili', 'xiaohongshu']) {
+      await post(own + '/accounts', { platform, channelKind: 'manual', displayName: '任意账号' }, 409);
+    }
+    const path = own + '/accounts/xiaohongshu/authorize';
+    const otherPath = foreign + '/accounts/xiaohongshu/authorize';
+    const { data: ticket } = await post(path, {});
+    assert.deepEqual(Object.keys(ticket).sort(), ['expiresAt', 'id', 'userCode', 'verificationUrl']);
+    const poll = (id) => post(`${path}/${id}/poll`, {}, 200);
+    await call(`${otherPath}/${ticket.id}/poll`, { method: 'POST', cookie: otherCookie, body: {}, status: 404 });
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.equal((await poll(ticket.id)).data.status, 'pending');
+    assert.equal(await prisma.channelAccount.count({ where: { workspaceId, externalId: 'verified-fixture' } }), 0);
+    approved = true;
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.equal((await poll(ticket.id)).data.status, 'connected');
+    assert.equal((await poll(ticket.id)).data.status, 'connected');
+    const { data: accounts } = await call(own + '/accounts', { cookie });
+    const verified = accounts.find(({ displayName }) => displayName === '平台返回昵称');
+    assert.equal(verified.identityVerified, true);
+    assert.equal(verified.availableForHandoff, false);
+    const stored = await prisma.channelAccount.findUniqueOrThrow({ where: { id: verified.id } });
+    assert.equal(stored.externalId, 'verified-fixture');
+    assert.deepEqual(stored.authScope, ['basic_info']);
+    assert.equal(stored.credentials, null);
+    assert.equal(stored.credentialsCiphertext, null);
+    await call(own + '/accounts/' + verified.id, {
+      method: 'PATCH', cookie, body: { channelKind: 'manual' }, status: 400,
+    });
+    const { data: repeated } = await post(path, {});
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.equal((await poll(repeated.id)).data.status, 'connected');
+    assert.equal(await prisma.channelAccount.count({ where: { workspaceId, externalId: 'verified-fixture' } }), 1);
   });
 });

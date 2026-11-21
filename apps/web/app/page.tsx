@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Check, CircleUserRound, LogOut, Plus, Radio, UsersRound, X } from 'lucide-react';
+import { ArrowRight, Check, CircleUserRound, LogOut, Radio, ScanLine, UsersRound, X } from 'lucide-react';
+import qrcode from 'qrcode-generator';
 import {
-  api, ApiError, canEdit, channelLabel, messageOf, platformLabel, platforms, post, roleLabel, scopeFor, useAction, useResource,
+  api, ApiError, canEdit, formatTime, messageOf, platformLabel, post, roleLabel, scopeFor, useAction, useResource,
   type Account, type Session, type Workspace,
 } from './api';
 import { Manuscripts, type ManuscriptDrafts } from './manuscripts';
@@ -68,48 +69,68 @@ function SignIn({ onSession, onClose, initialError }: {
   </dialog>;
 }
 
-function Accounts({ scope, workspace, resource }: {
-  scope: string; workspace: Workspace; resource: ReturnType<typeof useResource<Account[]>>;
+function Accounts({ scope, resource }: {
+  scope: string; resource: ReturnType<typeof useResource<Account[]>>;
 }) {
-  const [adding, setAdding] = useState(false);
+  const [authorization, setAuthorization] = useState<{ id: string; userCode: string; image: string }>();
+  const [status, setStatus] = useState('');
   const action = useAction();
   const accounts = resource.data ?? [];
-  function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const fields = Object.fromEntries(new FormData(event.currentTarget));
+  const path = scope + '/accounts/xiaohongshu/authorize';
+  function connect() {
+    setStatus('');
     void action.run(async () => {
-      await post(scope + '/accounts', { ...fields, channelKind: 'manual' });
+      const ticket = await post<{ id: string; verificationUrl: string; userCode: string }>(path, {});
+      const code = qrcode(0, 'M');
+      code.addData(ticket.verificationUrl);
+      code.make();
+      setAuthorization({ id: ticket.id, userCode: ticket.userCode, image: code.createDataURL(4, 16) });
+    });
+  }
+  function poll() {
+    if (!authorization) return;
+    void action.run(async () => {
+      const result = await post<{ status: 'pending' | 'scanned' | 'connected' | 'expired' | 'denied' }>(`${path}/${authorization.id}/poll`, {});
+      if (result.status === 'scanned' || result.status === 'pending') {
+        setStatus(result.status === 'scanned' ? '已扫码，请在小红书 App 确认授权。' : '等待扫码授权。');
+        return;
+      }
+      setAuthorization(undefined);
+      if (result.status === 'expired') throw new Error('二维码已过期，请重新连接小红书账号。');
+      if (result.status === 'denied') throw new Error('授权未通过。需要连接时可重新扫码。');
       resource.refresh();
-      setAdding(false);
-    }, '人工发布账号已添加。');
+      setStatus('小红书账号身份已核验。');
+    });
   }
   return <>
-    <PageHeader title="发布账号" description="管理各平台账号。已审稿件按同平台账号排期交接。">
-      {canEdit(workspace.role) && <button className="button primary" onClick={() => { action.reset(); setAdding(true); }}>
-        <Plus size={17} aria-hidden="true" />添加账号
-      </button>}
+    <PageHeader title="发布账号" description="通过平台授权核验真实账号。账号身份和发布权限分别显示。">
+      <button className="button primary" onClick={connect} disabled={action.busy || Boolean(authorization)}>
+        <ScanLine size={17} aria-hidden="true" />连接小红书账号
+      </button>
     </PageHeader>
-    <Feedback error={action.error || resource.error} notice={action.notice} />
-    {adding && <form className="card form-card form-stack" onSubmit={save}>
-      <h2>添加人工发布账号</h2>
-      <div className="form-row">
-        <label>平台<select name="platform" required>
-          {platforms.map((platform) => <option key={platform} value={platform}>{platformLabel[platform]}</option>)}
-        </select></label>
-        <label>账号名称<input name="displayName" required maxLength={60} placeholder="填写账号显示名称" /></label>
+    <Feedback error={action.error || resource.error} notice={authorization ? undefined : status} />
+    {authorization && <section className="card form-card form-stack" aria-labelledby="xiaohongshu-auth-title">
+      <h2 id="xiaohongshu-auth-title">用小红书 App 扫码授权</h2>
+      <img src={authorization.image} width={192} height={192} alt={`小红书账号授权二维码，授权码 ${authorization.userCode}`} />
+      <p className="muted" role="status">{status || '在手机上确认授权后，检查授权结果。'}</p>
+      <div className="actions">
+        <button type="button" className="button primary" onClick={poll} disabled={action.busy}>检查授权结果</button>
+        <button type="button" className="button" disabled={action.busy} onClick={() => {
+          setAuthorization(undefined); setStatus(''); action.reset();
+        }}>关闭</button>
       </div>
-      <label>运营人 <small>选填</small><input name="operator" maxLength={40} placeholder="填写负责发布的人" /></label>
-      <div className="actions"><button className="button primary" disabled={action.busy}>保存账号</button>
-        <button type="button" className="button" onClick={() => setAdding(false)}>取消</button></div>
-    </form>}
+    </section>}
     <section className="card">
       <div className="card-heading"><h2>账号列表</h2></div>
       {resource.loading ? <Loading /> : accounts.length ? accounts.map((account) => <div className="account-row" key={account.id}>
         <PlatformIcon platform={account.platform} />
-        <div><strong>{account.displayName}</strong><small>{platformLabel[account.platform]} · {account.operator || '未填写运营人'}</small></div>
-        <span className="badge gray">{channelLabel[account.channelKind]}</span>
+        <div><strong>{account.displayName}</strong><small>{platformLabel[account.platform]}{account.identityCheckedAt
+          ? ` · 核验于 ${formatTime(account.identityCheckedAt)}` : ''}</small></div>
+        <span className={`badge ${account.identityVerified ? 'green' : 'gray'}`}>{account.identityVerified
+          ? account.availableForHandoff ? '身份已核验 · 人工交接' : '身份已核验 · 未开通发布'
+          : '历史账号 · 未核验'}</span>
       </div>) : !resource.error && <Empty icon={UsersRound} title="还没有发布账号"
-        description="添加各平台的人工账号后，就可以为同平台的已审版本排期。" />}
+        description="先连接小红书，授权成功后会显示平台返回的账号。B 站账号暂待开放平台授权。" />}
     </section>
   </>;
 }
@@ -124,7 +145,7 @@ function WorkspaceBody({ workspace, section, taskId, drafts, openTasks, openAcco
     openTasks={openTasks} openAccounts={openAccounts} />;
   if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={taskId} />;
   if (section === 'members') return <Members scope={scope} />;
-  return <Accounts scope={scope} workspace={workspace} resource={accounts} />;
+  return <Accounts scope={scope} resource={accounts} />;
 }
 
 export default function Home() {

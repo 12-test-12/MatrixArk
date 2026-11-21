@@ -90,6 +90,7 @@ export class TasksService {
       const existing = await tx.publishTask.findUnique({ where: { accountId_variantId: { accountId, variantId } } });
       if (existing) return { task: existing, disposition: 'existing' as const };
       if (!hasApproval(variant)) throw new ConflictException('版本需要有效审核');
+      if (!account.externalId || !account.authCheckedAt) throw new ConflictException('账号尚未通过平台身份核验。');
       if (!canUseAccount(account, await databaseTime(tx))) throw new ConflictException('该账号当前无法用于人工交接');
 
       const task = await tx.publishTask.create({

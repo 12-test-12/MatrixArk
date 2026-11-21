@@ -41,6 +41,10 @@ export const config = {
   port: int(process.env.API_PORT, 4000),
   apiOrigin: process.env.API_ORIGIN ?? 'http://localhost:3000',
   sessionTtlDays: int(process.env.SESSION_TTL_DAYS, 30),
+  xiaohongshu: {
+    appId: process.env.XIAOHONGSHU_APP_ID?.trim(),
+    appSecret: process.env.XIAOHONGSHU_APP_SECRET?.trim(),
+  },
   storage: {
     localDir: isAbsolute(storageDir) ? storageDir : join(repoRoot, storageDir),
   },
