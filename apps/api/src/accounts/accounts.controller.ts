@@ -40,20 +40,23 @@ export class AccountsController {
       include: { _count: { select: { tasks: true } } },
     });
     const now = new Date();
-    return accounts.map((account) => ({
-      id: account.id,
-      platform: account.platform,
-      channelKind: account.channelKind,
-      displayName: account.displayName,
-      operator: account.operator,
-      identityVerified: Boolean(account.externalId && account.authCheckedAt),
-      identityCheckedAt: account.authCheckedAt,
-      availableForHandoff: publishChannel(account, now) === 'manual',
-      availableForOfficial: publishChannel(account, now) === 'official',
-      hasCredentials: Boolean(account.credentialsCiphertext || account.credentials),
-      taskCount: account._count.tasks,
-      createdAt: account.createdAt,
-    }));
+    return accounts.map((account) => {
+      const channel = publishChannel(account, now);
+      return {
+        id: account.id,
+        platform: account.platform,
+        channelKind: account.channelKind,
+        displayName: account.displayName,
+        operator: account.operator,
+        identityVerified: Boolean(account.externalId && account.authCheckedAt),
+        identityCheckedAt: account.authCheckedAt,
+        availableForHandoff: channel === 'manual',
+        availableForOfficial: channel === 'official',
+        hasCredentials: Boolean(account.credentialsCiphertext || account.credentials),
+        taskCount: account._count.tasks,
+        createdAt: account.createdAt,
+      };
+    });
   }
 
   @Post()

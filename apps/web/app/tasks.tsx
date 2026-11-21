@@ -110,7 +110,8 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
 
   const result = task.result;
   const resultUrl = externalUrl(result?.remoteUrl ?? null);
-  const automated = (task.executionChannel ?? task.account.channelKind) !== 'manual';
+  const channel = task.executionChannel ?? (task.status === 'scheduled' ? task.account.channelKind : null);
+  const automated = channel === 'official' || channel === 'sandbox';
   function actorName(actorId: string | null) {
     return actorId ? people.get(actorId) ?? '工作室成员' : '系统';
   }

@@ -52,7 +52,7 @@ export const roleLabel: Record<Role, string> = {
   owner: '负责人', editor: '编辑', reviewer: '审核员', operator: '运营', viewer: '只读成员',
 };
 export const taskLabel: Record<TaskStatus, string> = {
-  scheduled: '待交接', dispatching: '交接中', paused: '已暂停', handed_off: '待回填', submitted: '已受理',
+  scheduled: '待执行', dispatching: '处理中', paused: '已暂停', handed_off: '待回填', submitted: '已受理',
   under_review: '平台审核中', published: '已发布', failed: '失败', unknown: '待核实', verified: '已核实', canceled: '已取消',
 };
 export const canEdit = (role: Role) => role === 'owner' || role === 'editor';

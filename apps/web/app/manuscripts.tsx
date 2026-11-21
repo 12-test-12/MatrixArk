@@ -109,12 +109,20 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
     event.preventDefault();
     const fields = rawFields(event.currentTarget);
     const body = textFields(fields);
+    const platformFields = variant.platform === 'bilibili' ? { ...variant.platformFields } : undefined;
+    if (platformFields) {
+      const target: Record<string, unknown> = platformFields;
+      for (const key of ['category', 'summary'] as const) {
+        const value = fields[key].trim();
+        if (value) target[key] = value;
+        else delete target[key];
+      }
+    }
     const submitted = drafts.get(draftKey);
     void action.run(async () => {
       await api(scope + '/variants/' + variant.id, {
         method: 'PATCH', body: { ...body, assetIds, coverAssetId: firstImageIsCover ? undefined : coverAssetId,
-          platformFields: variant.platform === 'bilibili'
-            ? { ...variant.platformFields, category: fields.category.trim(), summary: fields.summary.trim() } : undefined },
+          platformFields },
       });
       if (drafts.get(draftKey) === submitted) drafts.delete(draftKey);
       onSave();

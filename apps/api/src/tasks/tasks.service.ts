@@ -347,12 +347,16 @@ export class TasksService {
       variant: publishVariant(variant),
       account: { ...account, credentials: channel === 'official' ? bilibiliCredentials(account) : undefined },
       slot: { scheduledAt: task.scheduledAt.toISOString(), idempotencyKey: task.idempotencyKey },
-      beforeSubmit: async () => Boolean(await this.prisma.publishTask.findFirst({
-        where: { id: task.id, status: 'dispatching', leaseId, leaseExpiresAt: { gt: await databaseTime(this.prisma) },
-          account: { archivedAt: null, authStatus: 'active', credentialsUpdatedAt: account.credentialsUpdatedAt,
-            authExpiresAt: { gt: new Date() }, OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lte: new Date() } }] } },
-        select: { id: true },
-      })),
+      beforeSubmit: async () => {
+        const now = await databaseTime(this.prisma);
+        const lease = await this.prisma.publishTask.findFirst({
+          where: { id: task.id, status: 'dispatching', leaseId, leaseExpiresAt: { gt: now },
+            account: { archivedAt: null, authStatus: 'active', credentialsUpdatedAt: account.credentialsUpdatedAt,
+              authExpiresAt: { gt: now }, OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lte: now } }] } },
+          select: { id: true },
+        });
+        return Boolean(lease);
+      },
     };
     let failure: PublishReceipt | undefined;
     try {
