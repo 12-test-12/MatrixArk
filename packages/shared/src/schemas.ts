@@ -57,10 +57,13 @@ export const scheduleTasksSchema = z.object({
 
 export const recordResultSchema = z.object({
   state: z.enum(['published', 'failed', 'unknown']),
-  remoteUrl: z.string().trim().max(2048).url('链接格式不对').refine((value) => {
-    const url = URL.canParse(value) ? new URL(value) : null;
-    return url && ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password;
-  }, '作品链接须为 HTTP 或 HTTPS').or(z.literal('')).optional(),
+  remoteUrl: z.preprocess(
+    (value) => (typeof value === 'string' ? value.trim() : value),
+    z.string().max(2048).url('链接格式不对').refine((value) => {
+      const url = URL.canParse(value) ? new URL(value) : null;
+      return url && ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password;
+    }, '作品链接须为 HTTP 或 HTTPS').or(z.literal('')).optional(),
+  ),
   remoteId: z.string().trim().max(200).optional(),
   evidenceAssetId: z.string().uuid().optional(),
   note: z.string().trim().max(1000).optional(),

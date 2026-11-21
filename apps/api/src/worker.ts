@@ -19,7 +19,7 @@ async function main() {
       try {
         await tasks.dispatchDue();
       } catch (error) {
-        logger.error('交接轮询失败，下轮重试', error instanceof Error ? error.name : undefined);
+        logger.error('交接轮询失败，下轮重试', error instanceof Error ? error.stack : String(error));
       }
       await delay(5_000, undefined, { signal: stopped.signal }).catch((error: unknown) => {
         if (!stopped.signal.aborted) throw error;
@@ -31,6 +31,6 @@ async function main() {
 }
 
 main().catch((error: unknown) => {
-  logger.error('人工交接 Worker 启动失败', error instanceof Error ? error.name : undefined);
+  logger.error('人工交接 Worker 启动失败', error instanceof Error ? error.stack : String(error));
   process.exitCode = 1;
 });

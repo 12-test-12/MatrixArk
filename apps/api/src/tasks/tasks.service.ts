@@ -269,7 +269,10 @@ export class TasksService {
         });
         return false;
       }
-      if (await tx.publishTask.findFirst({ where: { accountId, status: 'dispatching' }, select: { id: true } })) return false;
+      if (await tx.publishTask.findFirst({
+        where: { accountId, status: 'dispatching', leaseExpiresAt: { gt: now } },
+        select: { id: true },
+      })) return false;
 
       // 人工适配器只生成本地回执，领取与交接在一个事务提交。
       const leaseId = randomUUID();
