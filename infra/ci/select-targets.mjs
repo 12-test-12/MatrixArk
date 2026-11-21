@@ -24,12 +24,15 @@ if (!manual) {
     ].includes(path));
     database = common || files.some((path) =>
       path.startsWith('apps/api/prisma/') || path.startsWith('apps/api/scripts/') ||
-      path.startsWith('apps/api/src/content/') || path.startsWith('apps/api/test/') ||
+      path.startsWith('apps/api/src/content/') || path.startsWith('apps/api/src/tasks/') ||
+      path.startsWith('apps/api/src/accounts/') || path === 'apps/api/src/app.module.ts' ||
+      path.startsWith('apps/api/test/') || path === 'apps/api/src/worker.ts' ||
+      path.startsWith('packages/adapters/src/') ||
       ['infra/ci/check-database.sh', 'packages/shared/src/platform.ts', 'packages/shared/src/schemas.ts',
-        'packages/shared/src/variant-rules.ts'].includes(path),
+        'packages/shared/src/variant-rules.ts', 'packages/shared/src/status.ts'].includes(path),
     );
     api = common || files.some((path) =>
-      path.startsWith('apps/api/src/') || path.startsWith('packages/') || [
+      path.startsWith('apps/api/src/') || path.startsWith('apps/web/') || path.startsWith('packages/') || [
         'apps/api/scripts/prisma.mjs', 'apps/api/prisma/schema.prisma', 'apps/api/tsconfig.json',
         'apps/api/tsconfig.build.json', 'apps/api/nest-cli.json', 'tsconfig.base.json', '.env.example',
       ].includes(path),

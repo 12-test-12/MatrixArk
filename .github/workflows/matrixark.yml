@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
       api:
-        description: API 构建、类型与测试检查
+        description: API 与 Web 构建、类型与测试检查
         type: boolean
         default: false
       package_docker:
@@ -67,7 +67,7 @@ jobs:
       - run: bash infra/ci/check-database.sh
 
   api:
-    name: API 构建与测试
+    name: API 与 Web 构建和测试
     needs: plan
     if: needs.plan.outputs.api == 'true'
     runs-on: ubuntu-24.04

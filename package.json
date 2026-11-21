@@ -9,7 +9,9 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r --parallel typecheck",
     "test": "pnpm -r --parallel test",
-    "dev:api": "pnpm db:generate && pnpm --filter @matrixark/shared build && pnpm --filter @matrixark/api dev",
+    "dev:api": "pnpm db:generate && pnpm --filter @matrixark/adapters... build && pnpm --filter @matrixark/api dev",
+    "dev:web": "pnpm --filter @matrixark/web dev",
+    "dev:worker": "pnpm --filter @matrixark/api start:worker",
     "db:generate": "pnpm --filter @matrixark/api db:generate",
     "db:migrate": "pnpm --filter @matrixark/api db:migrate",
     "db:deploy": "pnpm --filter @matrixark/api db:deploy"

@@ -51,26 +51,26 @@ describe('内容指纹与幂等键', () => {
     }));
   });
 
-  it('同一账号同一版本同一时间点，幂等键稳定', () => {
+  it('同一账号、版本和快照换时间排期，幂等键不变', () => {
     const input = {
       accountId: 'acc-1',
       variantId: 'var-1',
       hash: contentHash(base),
       scheduledAt: new Date('2026-11-20T10:00:00+08:00'),
     };
-    expect(idempotencyKey(input)).toBe(idempotencyKey({ ...input }));
+    const rescheduled = { ...input, scheduledAt: new Date('2026-11-20T10:01:00+08:00') };
+    expect(idempotencyKey(input)).toBe(idempotencyKey(rescheduled));
   });
 
-  it('换账号、换版本、换时间点都会换键', () => {
+  it('换账号、版本或内容指纹会换键', () => {
     const input = {
       accountId: 'acc-1',
       variantId: 'var-1',
       hash: 'h',
-      scheduledAt: new Date('2026-11-20T10:00:00+08:00'),
     };
     const key = idempotencyKey(input);
     expect(idempotencyKey({ ...input, accountId: 'acc-2' })).not.toBe(key);
     expect(idempotencyKey({ ...input, variantId: 'var-2' })).not.toBe(key);
-    expect(idempotencyKey({ ...input, scheduledAt: new Date('2026-11-20T10:01:00+08:00') })).not.toBe(key);
+    expect(idempotencyKey({ ...input, hash: 'new-hash' })).not.toBe(key);
   });
 });

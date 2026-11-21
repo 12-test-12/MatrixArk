@@ -15,6 +15,7 @@ COPY packages/adapters/package.json packages/adapters/package.json
 RUN pnpm install --filter @matrixark/api... --frozen-lockfile
 
 COPY packages/shared ./packages/shared
+COPY packages/adapters ./packages/adapters
 COPY apps/api ./apps/api
 
 RUN pnpm db:generate && pnpm --filter @matrixark/api... build

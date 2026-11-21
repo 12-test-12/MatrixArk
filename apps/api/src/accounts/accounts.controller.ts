@@ -62,6 +62,7 @@ export class AccountsController {
         workspaceId,
         platform: input.platform,
         channelKind: input.channelKind,
+        authStatus: input.channelKind === 'manual' ? 'active' : 'pending',
         displayName: input.displayName,
         operator: input.operator,
         credentials: input.credentials,

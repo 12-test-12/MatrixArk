@@ -52,15 +52,22 @@ export const createAccountSchema = z.object({
 export const scheduleTasksSchema = z.object({
   variantIds: z.array(z.string().uuid()).min(1, '至少选一个平台版本'),
   accountIds: z.array(z.string().uuid()).min(1, '至少选一个账号'),
-  scheduledAt: z.coerce.date(),
+  scheduledAt: z.string().datetime({ offset: true }).pipe(z.coerce.date()),
 });
 
 export const recordResultSchema = z.object({
   state: z.enum(['published', 'failed', 'unknown']),
-  remoteUrl: z.string().trim().url('链接格式不对').optional().or(z.literal('')),
+  remoteUrl: z.string().trim().max(2048).url('链接格式不对').refine((value) => {
+    const url = URL.canParse(value) ? new URL(value) : null;
+    return url && ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password;
+  }, '作品链接须为 HTTP 或 HTTPS').or(z.literal('')).optional(),
   remoteId: z.string().trim().max(200).optional(),
+  evidenceAssetId: z.string().uuid().optional(),
   note: z.string().trim().max(1000).optional(),
-});
+}).refine(
+  (result) => result.state !== 'published' || result.remoteUrl || result.evidenceAssetId,
+  '已发布须提交作品链接或截图',
+);
 
 export const verifyTaskSchema = z.object({
   published: z.boolean(),

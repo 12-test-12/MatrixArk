@@ -59,17 +59,14 @@ export function contentHash(input: {
 }
 
 /**
- * 幂等键：同一账号 + 同一版本 + 同一时间点，只允许发布一次。
- * 提交前用它抢锁，数据库唯一索引兜底。
+ * 幂等键固定在账号、版本及内容快照上，调整计划时间时沿用任务原键。
  */
 export function idempotencyKey(input: {
   accountId: string;
   variantId: string;
   hash: string;
-  scheduledAt: Date | string;
 }): string {
-  const slot = new Date(input.scheduledAt).toISOString().slice(0, 16); // 分钟精度
   return createHash('sha256')
-    .update([input.accountId, input.variantId, input.hash, slot].join('|'))
+    .update(JSON.stringify([input.accountId, input.variantId, input.hash]))
     .digest('hex');
 }

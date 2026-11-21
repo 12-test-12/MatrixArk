@@ -24,7 +24,7 @@ type ImageScope = Pick<Manuscript, 'id' | 'workspaceId'>;
 const imageTypes = ['image/jpeg', 'image/png', 'image/webp'];
 const pauseReason = '旧版本已被取代，须确认新版本后重新排期';
 
-function inspectSnapshot(variant: Snapshot) {
+export function inspectSnapshot(variant: Snapshot) {
   const imageCount = variant.assets.length;
   const issues = validateVariant(variant.platform, { ...variant, imageCount });
   const invalidOrder = variant.assets.some(({ position }, index) => position !== index);

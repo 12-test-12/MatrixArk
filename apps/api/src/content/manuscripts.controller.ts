@@ -7,7 +7,6 @@ import {
   Param,
   Patch,
   Post,
-  UnsupportedMediaTypeException,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -22,7 +21,7 @@ import type { Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
 import { ContentService, variantSnapshot } from './content.service';
-import { StorageService } from './storage.service';
+import { IMAGE_UPLOAD_LIMIT, StorageService, validateImageUpload } from './storage.service';
 
 @Controller('workspaces/:workspaceId/manuscripts')
 @UseGuards(WorkspaceGuard)
@@ -173,18 +172,15 @@ export class ManuscriptsController {
   }
 
   @Post(':id/assets')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 20 * 1024 * 1024 } }))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: IMAGE_UPLOAD_LIMIT } }))
   async uploadAsset(
     @CurrentMembership() membership: { role: Role },
     @Param('workspaceId') workspaceId: string,
     @Param('id') id: string,
-    @UploadedFile() file: Express.Multer.File | undefined,
+    @UploadedFile() upload: Express.Multer.File | undefined,
   ) {
     assertCan(membership.role, 'content:write');
-    if (!file) throw new NotFoundException('没有收到文件');
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype) || file.size === 0) {
-      throw new UnsupportedMediaTypeException('只接受非空的 JPEG、PNG 或 WebP 图片');
-    }
+    const { file, mimeType } = validateImageUpload(upload);
     const manuscript = await this.prisma.manuscript.findFirst({ where: { id, workspaceId } });
     if (!manuscript) throw new NotFoundException('稿件不存在');
 
@@ -196,7 +192,7 @@ export class ManuscriptsController {
         kind: 'manuscript_image',
         storageKey: key,
         filename: file.originalname,
-        mimeType: file.mimetype,
+        mimeType,
         size: file.size,
       },
     });

@@ -83,4 +83,5 @@ done
 
 pnpm db:generate
 pnpm --filter '@matrixark/api...' build
-node --test apps/api/test/variant-snapshot.test.mjs
+STORAGE_LOCAL_DIR="$cluster/storage" PUBLIC_BASE_URL=http://127.0.0.1 SANDBOX_CHANNEL=false STORAGE_DRIVER=local \
+  node --test --test-concurrency=1 apps/api/test/variant-snapshot.test.mjs apps/api/test/manual-handoff.test.mjs
