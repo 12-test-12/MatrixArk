@@ -23,21 +23,37 @@ export function isPlatform(value: string): value is Platform {
   return (PLATFORMS as readonly string[]).includes(value);
 }
 
-/**
- * 内容指纹：版本内容一变，指纹就变。幂等键依赖它，
- * 保证「改稿后重发」与「同稿重复提交」被区别对待。
- */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
+
+function stableStringify(value: JsonValue): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  const fields: string[] = [];
+  for (const key of Object.keys(value).sort()) {
+    const field = value[key];
+    if (field !== undefined) fields.push(`${JSON.stringify(key)}:${stableStringify(field)}`);
+  }
+  return `{${fields.join(',')}}`;
+}
+
+/** 完整发布快照的指纹，旧版本的指纹保持入库时的值。 */
 export function contentHash(input: {
   platform: Platform;
   title: string;
   body: string;
   tags: readonly string[];
+  assets: readonly { assetId: string; position: number; isCover: boolean }[];
+  platformFields: JsonValue;
 }): string {
-  const payload = JSON.stringify({
+  const payload = stableStringify({
     platform: input.platform,
     title: input.title.trim(),
     body: input.body.trim(),
     tags: [...input.tags],
+    assets: [...input.assets].sort((a, b) => a.position - b.position).map(
+      ({ assetId, position, isCover }) => ({ assetId, position, isCover }),
+    ),
+    platformFields: input.platformFields,
   });
   return createHash('sha256').update(payload).digest('hex');
 }

@@ -49,7 +49,7 @@ export interface VariantDraft {
 }
 
 export interface ValidationIssue {
-  field: 'title' | 'body' | 'tags' | 'images';
+  field: 'title' | 'body' | 'tags' | 'images' | 'snapshot';
   code: string;
   message: string;
 }

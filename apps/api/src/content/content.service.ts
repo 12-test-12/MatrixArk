@@ -1,211 +1,292 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import type { Platform, Prisma } from '@prisma/client';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import type { GenerationSource, Manuscript, Platform, Prisma, Variant } from '@prisma/client';
 import {
   PLATFORM_LABELS,
   contentHash,
   generateVariantDraft,
   validateVariant,
-  type ValidationIssue,
+  type updateVariantSchema,
 } from '@matrixark/shared';
+import type { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 
-export interface VersionInput {
-  title: string;
-  body: string;
-  tags: string[];
+export const variantSnapshot = {
+  approval: true,
+  assets: {
+    orderBy: { position: 'asc' },
+    select: { assetId: true, position: true, isCover: true },
+  },
+} as const satisfies Prisma.VariantInclude;
+
+type Snapshot = Prisma.VariantGetPayload<{ include: typeof variantSnapshot }>;
+type ImageScope = Pick<Manuscript, 'id' | 'workspaceId'>;
+
+const imageTypes = ['image/jpeg', 'image/png', 'image/webp'];
+const pauseReason = '旧版本已被取代，须确认新版本后重新排期';
+
+function inspectSnapshot(variant: Snapshot) {
+  const imageCount = variant.assets.length;
+  const issues = validateVariant(variant.platform, { ...variant, imageCount });
+  const invalidOrder = variant.assets.some(({ position }, index) => position !== index);
+  const invalidCover = variant.platform === 'xiaohongshu' && imageCount > 0 && !variant.assets[0]?.isCover;
+  if (variant.snapshotVersion !== 1 || !variant.sealedAt) {
+    issues.push({ field: 'snapshot', code: 'snapshot_required', message: '请保存为新版本后重新确认' });
+  } else if (invalidOrder || invalidCover || contentHash(variant) !== variant.contentHash) {
+    issues.push({ field: 'snapshot', code: 'snapshot_mismatch', message: '版本快照与内容指纹不一致' });
+  }
+  return { issues, imageCount };
 }
 
 @Injectable()
 export class ContentService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** 每个平台当前的版本（version 最大的那条，且未被取代） */
-  async currentVariants(manuscriptId: string) {
-    const variants = await this.prisma.variant.findMany({
-      where: { manuscriptId, status: { not: 'superseded' } },
-      include: { approval: true },
-      orderBy: [{ platform: 'asc' }, { version: 'desc' }],
+  private async lockManuscript(tx: Prisma.TransactionClient, workspaceId: string, id: string) {
+    const [manuscript] = await tx.$queryRaw<Manuscript[]>`
+      SELECT * FROM "Manuscript" WHERE "workspaceId" = ${workspaceId} AND id = ${id} FOR UPDATE
+    `;
+    if (!manuscript) throw new NotFoundException('稿件不存在');
+    if (manuscript.archivedAt) throw new ConflictException('稿件已归档');
+    return manuscript;
+  }
+
+  private async lockCurrentVariant(tx: Prisma.TransactionClient, workspaceId: string, id: string) {
+    const existing = await tx.variant.findFirst({
+      where: { id, workspaceId },
+      select: { manuscriptId: true },
     });
-    const seen = new Set<Platform>();
-    return variants.filter((variant) => {
-      if (seen.has(variant.platform)) return false;
-      seen.add(variant.platform);
-      return true;
+    if (!existing) throw new NotFoundException('版本不存在');
+    await this.lockManuscript(tx, workspaceId, existing.manuscriptId);
+    await tx.$queryRaw`
+      SELECT id FROM "Variant" WHERE "workspaceId" = ${workspaceId} AND id = ${id} FOR UPDATE
+    `;
+    const variant = await this.findSnapshot(tx, workspaceId, id);
+    if (variant.status === 'superseded') throw new ConflictException('该版本已被取代，请使用最新版本');
+    return variant;
+  }
+
+  private async findSnapshot(tx: Prisma.TransactionClient, workspaceId: string, id: string) {
+    const variant = await tx.variant.findFirst({ where: { id, workspaceId }, include: variantSnapshot });
+    if (!variant) throw new NotFoundException('版本不存在');
+    return variant;
+  }
+
+  private async manuscriptImages(tx: Prisma.TransactionClient, manuscript: ImageScope, assetIds?: string[]) {
+    return tx.asset.findMany({
+      where: {
+        workspaceId: manuscript.workspaceId,
+        manuscriptId: manuscript.id,
+        kind: 'manuscript_image',
+        mimeType: { in: imageTypes },
+        id: assetIds && { in: assetIds },
+      },
+      select: { id: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
   }
 
-  async imageCount(manuscriptId: string): Promise<number> {
-    const assets = await this.prisma.asset.findMany({
-      where: { manuscriptId },
-      select: { mimeType: true },
-    });
-    return assets.filter((asset) => asset.mimeType.startsWith('image/')).length;
-  }
-
-  /** 新建一个版本行；同一平台的上一版会被标记 superseded，内容永不原地修改 */
-  async createVersion(
-    tx: Prisma.TransactionClient | PrismaService,
-    params: {
-      workspaceId: string;
-      manuscriptId: string;
-      platform: Platform;
-      input: VersionInput;
-      userId: string;
+  private async createVersion(
+    tx: Prisma.TransactionClient,
+    manuscript: ImageScope,
+    platform: Platform,
+    input: Pick<Variant, 'title' | 'body' | 'tags'> & {
+      assetIds: string[];
+      coverAssetId: string | null;
+      platformFields: Prisma.JsonObject;
     },
+    generationSource: GenerationSource,
+    userId: string,
   ) {
+    const { title, body, tags, assetIds, coverAssetId, platformFields } = input;
+    if (coverAssetId !== null && !assetIds.includes(coverAssetId)) {
+      throw new BadRequestException('封面必须来自版本图片');
+    }
+    if (platform === 'xiaohongshu') {
+      if (coverAssetId !== (assetIds[0] ?? null)) throw new BadRequestException('小红书封面须为第一张图片');
+      if (Object.keys(platformFields).length > 0) throw new BadRequestException('小红书首版暂不支持平台扩展字段');
+    }
+    const assets = assetIds.map((assetId, position) => ({ assetId, position, isCover: assetId === coverAssetId }));
     const last = await tx.variant.findFirst({
-      where: { manuscriptId: params.manuscriptId, platform: params.platform },
+      where: { manuscriptId: manuscript.id, platform },
       orderBy: { version: 'desc' },
       select: { version: true },
     });
-
-    return tx.variant.create({
+    const hash = contentHash({ platform, title, body, tags, assets, platformFields });
+    const version = await tx.variant.create({
       data: {
-        workspaceId: params.workspaceId,
-        manuscriptId: params.manuscriptId,
-        platform: params.platform,
+        workspaceId: manuscript.workspaceId,
+        manuscriptId: manuscript.id,
+        platform,
         version: (last?.version ?? 0) + 1,
-        title: params.input.title,
-        body: params.input.body,
-        tags: params.input.tags,
-        contentHash: contentHash({ platform: params.platform, ...params.input }),
-        createdById: params.userId,
+        title,
+        body,
+        tags,
+        platformFields,
+        generationSource,
+        snapshotVersion: 1,
+        contentHash: hash,
+        createdById: userId,
       },
-      include: { approval: true },
+    });
+    if (assets.length) {
+      await tx.variantAsset.createMany({ data: assets.map((asset) => ({ ...asset, variantId: version.id })) });
+    }
+    return tx.variant.update({
+      where: { id: version.id },
+      data: { sealedAt: new Date() },
+      include: variantSnapshot,
     });
   }
 
-  /**
-   * 改稿 = 生成新版本 + 旧版本作废 + 暂停旧版本上尚未提交的任务。
-   * 已交接/已提交的任务不动（内容已经在外面了，暂停没有意义）。
-   */
-  async reviseVariant(
-    params: {
-      variantId: string;
-      workspaceId: string;
-      userId: string;
-      input: VersionInput;
-    },
+  private async supersedeVersions(
+    tx: Prisma.TransactionClient,
+    manuscript: ImageScope,
+    platforms: Platform[],
+    newVersionIds: string[],
+    userId: string,
   ) {
-    return this.prisma.$transaction(async (tx) => {
-      const current = await tx.variant.findFirst({
-        where: { id: params.variantId, workspaceId: params.workspaceId },
-      });
-      if (!current) throw new NotFoundException('版本不存在');
-      if (current.status === 'superseded') throw new BadRequestException('该版本已被新版本取代，请改最新版');
-
-      const next = await this.createVersion(tx, {
-        workspaceId: current.workspaceId,
-        manuscriptId: current.manuscriptId,
-        platform: current.platform,
-        input: params.input,
-        userId: params.userId,
-      });
-
-      await tx.variant.update({
-        where: { id: current.id },
-        data: { status: 'superseded', supersededAt: new Date() },
-      });
-
-      const paused = await tx.publishTask.updateMany({
-        where: { variantId: current.id, status: { in: ['scheduled', 'paused'] } },
-        data: { status: 'paused', lastError: '版本已修改，等待重新确认后排期' },
-      });
-
-      return { variant: next, supersededVariantId: current.id, pausedTaskCount: paused.count };
+    const superseded = await tx.variant.updateManyAndReturn({
+      where: {
+        workspaceId: manuscript.workspaceId,
+        manuscriptId: manuscript.id,
+        platform: { in: platforms },
+        status: { not: 'superseded' },
+        id: { notIn: newVersionIds },
+      },
+      data: { status: 'superseded', supersededAt: new Date() },
+      select: { id: true },
     });
+    const paused = await tx.publishTask.updateManyAndReturn({
+      where: {
+        workspaceId: manuscript.workspaceId,
+        variantId: { in: superseded.map(({ id }) => id) },
+        status: 'scheduled',
+      },
+      data: { status: 'paused', lastError: pauseReason },
+      select: { id: true },
+    });
+    if (paused.length) {
+      await tx.taskEvent.createMany({
+        data: paused.map(({ id }) => ({
+          workspaceId: manuscript.workspaceId,
+          taskId: id,
+          kind: 'paused',
+          fromStatus: 'scheduled',
+          toStatus: 'paused',
+          actorId: userId,
+          reason: pauseReason,
+        })),
+      });
+    }
+    return paused.length;
   }
 
-  /** 生成平台草稿：规则版，无模型也能跑 */
+  async reviseVariant(params: {
+    variantId: string;
+    workspaceId: string;
+    userId: string;
+    input: z.infer<typeof updateVariantSchema>;
+  }) {
+    return this.prisma.$transaction(async (tx) => {
+      const current = await this.lockCurrentVariant(tx, params.workspaceId, params.variantId);
+      const manuscript = { id: current.manuscriptId, workspaceId: current.workspaceId };
+      const { input } = params;
+      const assetIds = input.assetIds ?? (current.snapshotVersion === 0
+        ? (await this.manuscriptImages(tx, manuscript)).map(({ id }) => id)
+        : current.assets.map(({ assetId }) => assetId));
+      const allowed = await this.manuscriptImages(tx, manuscript, assetIds);
+      if (allowed.length !== assetIds.length) throw new BadRequestException('图片必须来自同一原稿');
+
+      const previousCover = current.assets.find(({ isCover }) => isCover)?.assetId;
+      let defaultCover = assetIds[0] ?? null;
+      if (current.platform === 'bilibili' && current.snapshotVersion === 1) {
+        if (previousCover && assetIds.includes(previousCover)) defaultCover = previousCover;
+        if (input.assetIds === undefined) defaultCover = previousCover ?? null;
+      }
+      const platformFields = input.platformFields ?? current.platformFields;
+      if (!platformFields || typeof platformFields !== 'object' || Array.isArray(platformFields)) {
+        throw new BadRequestException('平台扩展字段须为 JSON 对象');
+      }
+      const variant = await this.createVersion(tx, manuscript, current.platform, {
+        title: input.title ?? current.title,
+        body: input.body ?? current.body,
+        tags: input.tags ?? current.tags,
+        assetIds,
+        coverAssetId: input.coverAssetId === undefined ? defaultCover : input.coverAssetId,
+        platformFields,
+      }, 'manual', params.userId);
+      const pausedTaskCount = await this.supersedeVersions(tx, manuscript, [current.platform], [variant.id], params.userId);
+      return { variant, supersededVariantId: current.id, pausedTaskCount };
+    }, { isolationLevel: 'ReadCommitted' });
+  }
+
   async generateDrafts(params: {
     workspaceId: string;
     manuscriptId: string;
     platforms: Platform[];
     userId: string;
   }) {
-    const manuscript = await this.prisma.manuscript.findFirst({
-      where: { id: params.manuscriptId, workspaceId: params.workspaceId },
-    });
-    if (!manuscript) throw new NotFoundException('稿件不存在');
-
     return this.prisma.$transaction(async (tx) => {
+      const manuscript = await this.lockManuscript(tx, params.workspaceId, params.manuscriptId);
+      const assetIds = (await this.manuscriptImages(tx, manuscript)).map(({ id }) => id);
+      const platforms = [...new Set(params.platforms)];
       const created = [];
-      for (const platform of params.platforms) {
-        const draft = generateVariantDraft(
-          { title: manuscript.title, body: manuscript.body, tags: manuscript.tags },
-          platform,
-        );
-        const variant = await this.createVersion(tx, {
-          workspaceId: params.workspaceId,
-          manuscriptId: manuscript.id,
-          platform,
-          input: draft,
-          userId: params.userId,
-        });
-        // 重新生成时把上一版作废，避免同一平台出现两条"当前版本"
-        await tx.variant.updateMany({
-          where: {
-            manuscriptId: manuscript.id,
-            platform,
-            status: { not: 'superseded' },
-            id: { not: variant.id },
-          },
-          data: { status: 'superseded', supersededAt: new Date() },
-        });
-        created.push(variant);
+      for (const platform of platforms) {
+        const draft = generateVariantDraft(manuscript, platform);
+        created.push(await this.createVersion(tx, manuscript, platform, {
+          ...draft,
+          assetIds,
+          coverAssetId: assetIds[0] ?? null,
+          platformFields: {},
+        }, 'rule', params.userId));
       }
+      await this.supersedeVersions(tx, manuscript, platforms, created.map(({ id }) => id), params.userId);
       return created;
-    });
+    }, { isolationLevel: 'ReadCommitted' });
   }
 
-  async assertPublishable(variantId: string): Promise<{
-    issues: ValidationIssue[];
-    imageCount: number;
-  }> {
-    const variant = await this.prisma.variant.findUnique({ where: { id: variantId } });
-    if (!variant) throw new NotFoundException('版本不存在');
-    const imageCount = await this.imageCount(variant.manuscriptId);
-    const issues = validateVariant(variant.platform, {
-      title: variant.title,
-      body: variant.body,
-      tags: variant.tags,
-      imageCount,
-    });
-    return { issues, imageCount };
+  async check(workspaceId: string, variantId: string) {
+    const variant = await this.findSnapshot(this.prisma, workspaceId, variantId);
+    return { variant, ...inspectSnapshot(variant) };
   }
 
-  /** 确认：写 approval + 标记 approved，两者在同一个事务里 */
   async confirm(params: { variantId: string; workspaceId: string; userId: string; note?: string }) {
-    const variant = await this.prisma.variant.findFirst({
-      where: { id: params.variantId, workspaceId: params.workspaceId },
-    });
-    if (!variant) throw new NotFoundException('版本不存在');
-    if (variant.status === 'superseded') throw new BadRequestException('该版本已被新版本取代');
-
-    const { issues } = await this.assertPublishable(variant.id);
-    if (issues.length > 0) {
-      throw new BadRequestException({
-        message: `${PLATFORM_LABELS[variant.platform]}版本还有 ${issues.length} 个问题不能确认`,
-        issues,
-      });
-    }
-
     return this.prisma.$transaction(async (tx) => {
-      const approval = await tx.approval.upsert({
-        where: { variantId: variant.id },
-        create: {
+      const variant = await this.lockCurrentVariant(tx, params.workspaceId, params.variantId);
+      const { issues } = inspectSnapshot(variant);
+      if (issues.some(({ field }) => field === 'snapshot')) {
+        throw new ConflictException({ message: '版本快照无效，请保存为新版本后重新确认', issues });
+      }
+      if (variant.approval) {
+        if (variant.status !== 'approved' || variant.approval.snapshotHash !== variant.contentHash) {
+          throw new ConflictException('审批记录与版本快照不一致');
+        }
+        return { variant, approval: variant.approval };
+      }
+      if (issues.length > 0) {
+        throw new BadRequestException({
+          message: `${PLATFORM_LABELS[variant.platform]}版本还有 ${issues.length} 项问题，无法确认`,
+          issues,
+        });
+      }
+      const [inserted] = await tx.approval.createManyAndReturn({
+        skipDuplicates: true,
+        data: [{
           workspaceId: params.workspaceId,
           variantId: variant.id,
           approvedById: params.userId,
           note: params.note,
-        },
-        update: { approvedById: params.userId, approvedAt: new Date(), note: params.note },
+          snapshotHash: variant.contentHash,
+        }],
       });
+      const approval = inserted ?? await tx.approval.findUniqueOrThrow({ where: { variantId: variant.id } });
+      if (approval.snapshotHash !== variant.contentHash) throw new ConflictException('审批记录与版本快照不一致');
       const updated = await tx.variant.update({
         where: { id: variant.id },
         data: { status: 'approved' },
+        include: variantSnapshot,
       });
       return { variant: updated, approval };
-    });
+    }, { isolationLevel: 'ReadCommitted' });
   }
 }

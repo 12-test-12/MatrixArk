@@ -21,7 +21,7 @@ import { parse } from '../common/zod';
 import type { Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
-import { ContentService } from './content.service';
+import { ContentService, variantSnapshot } from './content.service';
 import { StorageService } from './storage.service';
 
 @Controller('workspaces/:workspaceId/manuscripts')
@@ -84,7 +84,7 @@ export class ManuscriptsController {
       where: { id, workspaceId },
       include: {
         assets: { orderBy: { createdAt: 'asc' } },
-        variants: { include: { approval: true }, orderBy: [{ platform: 'asc' }, { version: 'desc' }] },
+        variants: { include: variantSnapshot, orderBy: [{ platform: 'asc' }, { version: 'desc' }] },
       },
     });
     if (!manuscript) throw new NotFoundException('稿件不存在');
@@ -106,11 +106,21 @@ export class ManuscriptsController {
         title: v.title,
         body: v.body,
         tags: v.tags,
+        assets: v.assets,
+        platformFields: v.platformFields,
+        generationSource: v.generationSource,
+        snapshotVersion: v.snapshotVersion,
+        sealedAt: v.sealedAt,
         status: v.status,
         isCurrent: v.status !== 'superseded',
         createdAt: v.createdAt,
         approval: v.approval
-          ? { approvedById: v.approval.approvedById, approvedAt: v.approval.approvedAt, note: v.approval.note }
+          ? {
+            approvedById: v.approval.approvedById,
+            approvedAt: v.approval.approvedAt,
+            note: v.approval.note,
+            snapshotHash: v.approval.snapshotHash,
+          }
           : null,
       })),
     };

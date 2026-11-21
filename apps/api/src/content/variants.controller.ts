@@ -17,7 +17,7 @@ import { assertCan } from '../common/permissions';
 import { parse } from '../common/zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
-import { ContentService } from './content.service';
+import { ContentService, variantSnapshot } from './content.service';
 
 const confirmSchema = z.object({ note: z.string().trim().max(500).optional() });
 
@@ -33,7 +33,15 @@ export class VariantsController {
   async detail(@Param('workspaceId') workspaceId: string, @Param('id') id: string) {
     const variant = await this.prisma.variant.findFirst({
       where: { id, workspaceId },
-      include: { approval: true, tasks: { include: { account: true, result: true } } },
+      include: {
+        ...variantSnapshot,
+        tasks: {
+          include: {
+            account: { omit: { credentials: true, credentialsCiphertext: true, credentialsKeyId: true } },
+            result: true,
+          },
+        },
+      },
     });
     if (!variant) throw new NotFoundException('版本不存在');
     return variant;
@@ -41,10 +49,7 @@ export class VariantsController {
 
   @Get(':id/check')
   async check(@Param('workspaceId') workspaceId: string, @Param('id') id: string) {
-    const variant = await this.prisma.variant.findFirst({ where: { id, workspaceId } });
-    if (!variant) throw new NotFoundException('版本不存在');
-    const { issues, imageCount } = await this.content.assertPublishable(variant.id);
-    return { issues, imageCount };
+    return this.content.check(workspaceId, id);
   }
 
   @Patch(':id')
@@ -61,7 +66,7 @@ export class VariantsController {
       variantId: id,
       workspaceId,
       userId: user.id,
-      input: { title: input.title, body: input.body, tags: input.tags },
+      input,
     });
     return result;
   }
