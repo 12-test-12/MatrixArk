@@ -41,6 +41,10 @@ export type Task = {
   result: Result | null;
 };
 export type TaskDetail = Task & {
+  notificationDeliveries?: {
+    id: string; kind: 'handoff_ready' | 'overdue_reminder'; status: 'pending' | 'sending' | 'sent' | 'failed' | 'skipped';
+    attempts: number; scheduledAt: string; sentAt: string | null; lastError: string | null;
+  }[];
   events: { id: string; kind: string; toStatus: TaskStatus | null; actorId: string | null;
     createdAt: string; reason: string | null }[];
 };

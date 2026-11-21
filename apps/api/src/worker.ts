@@ -2,10 +2,24 @@ import 'reflect-metadata';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { NotificationsService } from './notifications/notifications.service';
 import { TasksModule } from './tasks/tasks.module';
 import { TasksService } from './tasks/tasks.service';
 
 const logger = new Logger('PublishWorker');
+
+async function poll(signal: AbortSignal, run: () => Promise<unknown>, failure: string) {
+  while (!signal.aborted) {
+    try {
+      await run();
+    } catch (error) {
+      logger.error(failure, error instanceof Error ? error.stack : String(error));
+    }
+    await delay(5_000, undefined, { signal }).catch((error: unknown) => {
+      if (!signal.aborted) throw error;
+    });
+  }
+}
 
 async function main() {
   const stopped = new AbortController();
@@ -13,23 +27,14 @@ async function main() {
   process.once('SIGTERM', () => stopped.abort());
   const app = await NestFactory.createApplicationContext(TasksModule, { abortOnError: false });
   const tasks = app.get(TasksService);
+  const notifications = app.get(NotificationsService);
   logger.log('发布任务 Worker 已启动');
   try {
-    while (!stopped.signal.aborted) {
-      try {
-        await tasks.dispatchDue();
-      } catch (error) {
-        logger.error('任务派发轮询失败，下轮重试', error instanceof Error ? error.stack : String(error));
-      }
-      try {
-        await tasks.pollAutomaticResults();
-      } catch (error) {
-        logger.error('平台回执轮询失败，下轮重试', error instanceof Error ? error.stack : String(error));
-      }
-      await delay(5_000, undefined, { signal: stopped.signal }).catch((error: unknown) => {
-        if (!stopped.signal.aborted) throw error;
-      });
-    }
+    await Promise.all([
+      poll(stopped.signal, () => tasks.dispatchDue(), '任务派发轮询失败，下轮重试'),
+      poll(stopped.signal, () => tasks.pollAutomaticResults(), '平台回执轮询失败，下轮重试'),
+      poll(stopped.signal, () => notifications.deliverDue(stopped.signal), '飞书投递轮询失败，下轮重试'),
+    ]);
   } finally {
     await app.close();
   }

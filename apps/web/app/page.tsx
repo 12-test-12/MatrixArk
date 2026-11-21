@@ -69,8 +69,55 @@ function SignIn({ onSession, onClose, initialError }: {
   </dialog>;
 }
 
-function Accounts({ scope, canManage, resource }: {
-  scope: string; canManage: boolean; resource: ReturnType<typeof useResource<Account[]>>;
+function FeishuSettings({ scope }: { scope: string }) {
+  const path = scope + '/notifications/feishu';
+  const resource = useResource<{
+    enabled: boolean; webhookConfigured: boolean; signatureConfigured: boolean; encryptionReady: boolean;
+  }>(path);
+  const action = useAction();
+  const setting = resource.data;
+  function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const fields = new FormData(form);
+    const webhook = String(fields.get('webhook') ?? '').trim();
+    const signSecret = String(fields.get('signSecret') ?? '').trim();
+    void action.run(async () => {
+      await api(path, { method: 'PATCH', body: {
+        enabled: fields.has('enabled'), webhook: webhook || undefined,
+        signSecret: signSecret || (fields.has('clearSignature') ? null : undefined),
+      } });
+      form.reset();
+      resource.refresh();
+    }, '飞书提醒设置已保存。');
+  }
+  return <section className="card form-card form-stack" aria-labelledby="feishu-settings-title">
+    <h2 id="feishu-settings-title">飞书提醒</h2>
+    <p className="muted small">人工任务到点交接时提醒一次，交接后 4 小时仍待回填再提醒一次。</p>
+    {resource.loading && !setting && <Loading />}
+    <Feedback error={action.error || resource.error} notice={action.notice} />
+    {setting && !setting.encryptionReady && <p className="muted">配置服务端加密密钥后可以保存机器人。</p>}
+    {setting && (setting.encryptionReady || setting.enabled) && <form key={JSON.stringify(setting)} className="form-stack feishu-form" onSubmit={save}>
+      <label className="checkbox-field"><input name="enabled" type="checkbox" defaultChecked={setting.enabled}
+        disabled={action.busy || (!setting.encryptionReady && !setting.enabled)} />启用工作室飞书提醒</label>
+      {setting.encryptionReady && <>
+        <label>Webhook 地址 <small>{setting.webhookConfigured ? '已保存，留空保留' : '启用时必填'}</small>
+          <input name="webhook" type="password" autoComplete="off" maxLength={250} spellCheck={false} disabled={action.busy} />
+        </label>
+        <label>签名密钥 <small>{setting.signatureConfigured ? '已保存，留空保留' : '机器人开启签名校验时填写'}</small>
+          <input name="signSecret" type="password" autoComplete="new-password" maxLength={256} disabled={action.busy} />
+        </label>
+        {setting.signatureConfigured && <label className="checkbox-field">
+          <input name="clearSignature" type="checkbox" disabled={action.busy} />清除已保存的签名密钥
+        </label>}
+      </>}
+      <button className="button primary" disabled={action.busy}>{action.busy ? '正在保存…' : '保存提醒设置'}</button>
+    </form>}
+  </section>;
+}
+
+function Accounts({ scope, canManage, canConfigure, resource }: {
+  scope: string; canManage: boolean; canConfigure: boolean; resource: ReturnType<typeof useResource<Account[]>>;
 }) {
   const [authorization, setAuthorization] = useState<{ id: string; userCode: string; image: string }>();
   const [status, setStatus] = useState('');
@@ -134,6 +181,7 @@ function Accounts({ scope, canManage, resource }: {
       </div>) : !resource.error && <Empty icon={UsersRound} title="还没有发布账号"
         description="先连接小红书完成扫码授权，或通过 B 站官方授权绑定账号。" />}
     </section>
+    {canConfigure && <FeishuSettings scope={scope} />}
   </>;
 }
 
@@ -147,7 +195,7 @@ function WorkspaceBody({ workspace, section, taskId, drafts, openTasks, openAcco
     openTasks={openTasks} openAccounts={openAccounts} />;
   if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={taskId} />;
   if (section === 'members') return <Members scope={scope} />;
-  return <Accounts scope={scope} canManage={canEdit(workspace.role)} resource={accounts} />;
+  return <Accounts scope={scope} canManage={canEdit(workspace.role)} canConfigure={workspace.role === 'owner'} resource={accounts} />;
 }
 
 export default function Home() {

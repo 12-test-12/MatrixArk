@@ -29,6 +29,7 @@ const bilibili = {
 };
 const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? '';
 const databaseUrl = process.env.DATABASE_URL?.trim();
+const notificationKey = process.env.NOTIFICATION_CREDENTIALS_KEY?.trim();
 
 if (!databaseUrl) throw new Error('请在 .env 或进程环境中设置 DATABASE_URL');
 const database = URL.canParse(databaseUrl) ? new URL(databaseUrl) : undefined;
@@ -36,6 +37,9 @@ if (!database || !['postgresql:', 'postgres:'].includes(database.protocol) || !d
   throw new Error('DATABASE_URL 必须是包含主机和库名的 PostgreSQL 连接地址');
 }
 if (storageDriver !== 'local') throw new Error('STORAGE_DRIVER 当前只支持 local');
+if (notificationKey && !/^[\da-f]{64}$/i.test(notificationKey)) {
+  throw new Error('NOTIFICATION_CREDENTIALS_KEY 必须为 64 位十六进制字符');
+}
 if (bilibili.enabled && (sandboxChannel || !bilibili.clientId || !bilibili.clientSecret
   || !bilibili.credentialsKey || !/^[\da-f]{64}$/i.test(bilibili.credentialsKey))) {
   throw new Error('启用 B 站官方投稿须关闭沙箱，并配置 BILIBILI_CLIENT_ID、BILIBILI_CLIENT_SECRET 和 64 位十六进制 BILIBILI_CREDENTIALS_KEY');
@@ -53,6 +57,7 @@ export const config = {
   sessionTtlDays: int(process.env.SESSION_TTL_DAYS, 30),
   sandboxChannel,
   bilibili,
+  notificationKey,
   xiaohongshu: {
     appId: process.env.XIAOHONGSHU_APP_ID?.trim(),
     appSecret: process.env.XIAOHONGSHU_APP_SECRET?.trim(),

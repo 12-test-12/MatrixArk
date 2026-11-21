@@ -159,7 +159,12 @@ export class XiaohongshuIdentityService {
       const existing = await tx.channelAccount.findFirst({ where: { ...scope, externalId: identity.open_id } });
       const verified = { authCheckedAt: new Date(), authAuthorizedBy: userId, authScope: ['basic_info'] };
       if (existing) {
-        await tx.channelAccount.update({ where: { id: existing.id }, data: verified });
+        const identityOnly = existing.channelKind === 'official' && existing.authStatus === 'pending'
+          && existing.authScope.length === 1 && existing.authScope[0] === 'basic_info'
+          && !existing.credentials && !existing.credentialsCiphertext;
+        await tx.channelAccount.update({ where: { id: existing.id }, data: {
+          ...verified, ...(identityOnly && { channelKind: 'manual', authStatus: 'active' }),
+        } });
         return;
       }
       const names = new Set((await tx.channelAccount.findMany({ where: scope, select: { displayName: true } }))
@@ -168,7 +173,7 @@ export class XiaohongshuIdentityService {
       let displayName = nickname;
       for (let suffix = 2; names.has(displayName); suffix++) displayName = `${nickname} (${suffix})`;
       await tx.channelAccount.create({
-        data: { ...scope, ...verified, channelKind: 'official', displayName, externalId: identity.open_id },
+        data: { ...scope, ...verified, channelKind: 'manual', authStatus: 'active', displayName, externalId: identity.open_id },
       });
     });
   }

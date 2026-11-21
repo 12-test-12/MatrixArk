@@ -19,6 +19,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   process.env.BILIBILI_CLIENT_ID = 'bilibili-fixture';
   process.env.BILIBILI_CLIENT_SECRET = 'bilibili-fixture-secret';
   process.env.BILIBILI_CREDENTIALS_KEY = 'a'.repeat(64);
+  process.env.NOTIFICATION_CREDENTIALS_KEY = 'b'.repeat(64);
   const { AppModule } = await import('../dist/app.module.js');
   const { PrismaService } = await import('../dist/prisma/prisma.service.js');
   const { TasksService } = await import('../dist/tasks/tasks.service.js');
@@ -245,7 +246,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     const { data: accounts } = await call(own + '/accounts', { cookie });
     const verified = accounts.find(({ displayName }) => displayName === '平台返回昵称');
     assert.equal(verified.identityVerified, true);
-    assert.equal(verified.availableForHandoff, false);
+    assert.equal(verified.availableForHandoff, true);
+    assert.equal(verified.availableForOfficial, false);
     const stored = await prisma.channelAccount.findUniqueOrThrow({ where: { id: verified.id } });
     assert.equal(stored.externalId, 'verified-fixture');
     assert.deepEqual(stored.authScope, ['basic_info']);
@@ -254,10 +256,12 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await call(own + '/accounts/' + verified.id, {
       method: 'PATCH', cookie, body: { channelKind: 'manual' }, status: 400,
     });
+    await prisma.channelAccount.update({ where: { id: verified.id }, data: { channelKind: 'official', authStatus: 'pending' } });
     const { data: repeated } = await post(path, {});
     await new Promise((resolve) => setTimeout(resolve, 1050));
     assert.equal((await poll(repeated.id)).data.status, 'connected');
     assert.equal(await prisma.channelAccount.count({ where: { workspaceId, externalId: 'verified-fixture' } }), 1);
+    assert.equal((await prisma.channelAccount.findUniqueOrThrow({ where: { id: verified.id } })).channelKind, 'manual');
   });
 
   await t.test('B 站官方投稿使用已审快照，领取去重，回执回读及超时恢复', async (t) => {
@@ -464,5 +468,110 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(await prisma.taskEvent.count({
       where: { kind: 'created', task: { variantId: { in: variantIds } } },
     }), 51);
+  });
+
+  await t.test('飞书设置脱敏、两类提醒去重、限流重试和过期回收', async (t) => {
+    const { NotificationsService } = await import('../dist/notifications/notifications.service.js');
+    const path = own + '/notifications/feishu';
+    const webhook = 'https://open.feishu.cn/open-apis/bot/v2/hook/matrixark-test-fixture';
+    const secret = 'matrixark-sign-fixture';
+    const patch = (body, status = 200) => call(path, { method: 'PATCH', cookie, body, status });
+    assert.equal((await call(path, { cookie })).data.enabled, false);
+    await call(path, { cookie: otherCookie, status: 403 });
+    await prisma.membership.create({ data: { workspaceId, userId: other.user.id, role: 'editor' } });
+    await call(path, { method: 'PATCH', cookie: otherCookie, body: { enabled: false }, status: 403 });
+    await patch({ enabled: true, webhook: 'https://open.feishu.cn.example.test/open-apis/bot/v2/hook/fixture' }, 400);
+    await patch({ enabled: true }, 400);
+    assert.deepEqual((await patch({ enabled: true, webhook, signSecret: secret })).data, {
+      enabled: true, webhookConfigured: true, signatureConfigured: true, encryptionReady: true,
+    });
+    const stored = await prisma.notificationSetting.findUniqueOrThrow({ where: { workspaceId } });
+    for (const value of [webhook, secret]) assert.ok(!JSON.stringify(stored).includes(value));
+
+    const sends = [];
+    let behavior = 'success';
+    const localFetch = globalThis.fetch;
+    t.mock.method(globalThis, 'fetch', (input, options) => {
+      if (new URL(input).hostname !== 'open.feishu.cn') return localFetch(input, options);
+      assert.equal(String(input), webhook);
+      assert.equal(options.redirect, 'error');
+      const { timestamp, sign, content } = JSON.parse(options.body);
+      assert.equal(sign, createHmac('sha256', timestamp + '\n' + secret).digest('base64'));
+      sends.push(content.text);
+      if (behavior === 'throttle') return Promise.resolve(Response.json({ code: 11232 }));
+      if (behavior === 'timeout') return Promise.reject(new Error('simulated timeout'));
+      return Promise.resolve(Response.json({ code: 0 }));
+    });
+    const { data: draft } = await post(own + '/manuscripts', { title: '飞书测试稿', body: '提醒正文', tags: [] });
+    await post(own + '/manuscripts/' + draft.id + '/assets', file(sourcePng));
+    const { data: [variant] } = await post(own + '/manuscripts/' + draft.id + '/generate', { platforms: ['xiaohongshu'] });
+    await post(own + '/variants/' + variant.id + '/confirm', {});
+    const verified = await prisma.channelAccount.findFirstOrThrow({ where: { workspaceId, externalId: 'verified-fixture' } });
+    const { data: { items } } = await post(own + '/tasks', {
+      variantIds: [variant.id], accountIds: [verified.id, account.id], scheduledAt,
+    });
+    assert.equal(await worker.get(TasksService).dispatchDue(), 2);
+    const first = items.find(({ accountId }) => accountId === verified.id);
+    const second = items.find(({ accountId }) => accountId === account.id);
+    const firstPath = own + '/tasks/' + first.id;
+    const firstReady = () => prisma.notificationDelivery.findFirstOrThrow({ where: { taskId: first.id, kind: 'handoff_ready' } });
+    const firstOverdue = await prisma.notificationDelivery.findFirstOrThrow({ where: { taskId: first.id, kind: 'overdue_reminder' } });
+    assert.equal(firstOverdue.scheduledAt - (await firstReady()).scheduledAt, 4 * 60 * 60_000);
+    const services = [worker.get(NotificationsService), api.get(NotificationsService)];
+    behavior = 'throttle';
+    await Promise.all(services.map((service) => service.deliverDue()));
+    assert.equal(sends.length, 2);
+    const retry = await firstReady();
+    assert.equal(retry.status, 'pending');
+    assert.equal(retry.attempts, 1);
+    assert.ok(retry.nextAttemptAt > new Date(Date.now() + 55_000));
+    await services[0].deliverDue();
+    assert.equal(sends.length, 2);
+    await prisma.notificationDelivery.update({ where: { id: retry.id }, data: { nextAttemptAt: new Date(0) } });
+    behavior = 'success';
+    await Promise.all(services.map((service) => service.deliverDue()));
+    assert.equal(sends.length, 3);
+    assert.equal((await firstReady()).status, 'sent');
+    assert.match(sends.at(-1), /飞书测试稿/u);
+    assert.ok(!sends.at(-1).includes('提醒正文'));
+
+    const past = new Date(Date.now() - 4 * 60 * 60_000 - 1500);
+    await prisma.publishTask.update({ where: { id: first.id }, data: { handedOffAt: past } });
+    const due = new Date(past.getTime() + 4 * 60 * 60_000);
+    await prisma.notificationDelivery.update({ where: { id: firstOverdue.id },
+      data: { scheduledAt: due, nextAttemptAt: due, dedupeKey: 'overdue:' + past.toISOString() } });
+    await services[0].deliverDue();
+    assert.equal(sends.length, 4);
+    assert.match(sends.at(-1), /4 小时仍未回填/u);
+    const { data: detail } = await call(firstPath, { cookie });
+    assert.deepEqual(detail.notificationDeliveries.map(({ status }) => status).sort(), ['sent', 'sent']);
+    assert.ok(!JSON.stringify(detail).includes(webhook));
+
+    const secondReady = await prisma.notificationDelivery.findFirstOrThrow({ where: { taskId: second.id, kind: 'handoff_ready' } });
+    await prisma.notificationDelivery.update({ where: { id: secondReady.id }, data: { nextAttemptAt: new Date(0) } });
+    behavior = 'timeout';
+    await services[0].deliverDue();
+    assert.equal(sends.length, 5);
+    assert.equal((await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: secondReady.id } })).status, 'failed');
+    const secondPath = own + '/tasks/' + second.id;
+    await post(secondPath + '/result', { state: 'published', remoteUrl: 'https://example.test/feishu' }, 200);
+    assert.equal((await call(secondPath, { cookie })).data.notificationDeliveries
+      .find(({ kind }) => kind === 'overdue_reminder').status, 'skipped');
+    await services[1].deliverDue();
+    assert.equal(sends.length, 5);
+
+    const seed = { taskId: first.id, workspaceId, kind: 'handoff_ready', scheduledAt: new Date(0) };
+    const expired = await prisma.notificationDelivery.create({ data: { ...seed, dedupeKey: 'expired', nextAttemptAt: new Date(0) } });
+    const interrupted = await prisma.notificationDelivery.create({ data: {
+      ...seed, dedupeKey: 'interrupted', status: 'sending', attempts: 1, leaseId: randomUUID(), leaseExpiresAt: new Date(0),
+    } });
+    await patch({ enabled: false });
+    await patch({ enabled: true });
+    await services[1].deliverDue();
+    assert.equal(sends.length, 5);
+    assert.equal((await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: expired.id } })).status, 'skipped');
+    const recovered = await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: interrupted.id } });
+    assert.equal(recovered.status, 'failed');
+    assert.match(recovered.lastError, /投递结果未知/u);
   });
 });

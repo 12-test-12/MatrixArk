@@ -19,8 +19,10 @@ const filters = [
 const eventLabels: Record<string, string> = {
   created: '创建排期', claimed: '领取任务', handed_off: '完成人工交接', result: '回填发布结果', paused: '暂停任务',
   rescheduled: '调整排期', verified: '核对结果', canceled: '取消任务', retried: '重试任务', corrected: '更正结果',
-  late_receipt: '迟到的回执',
+  late_receipt: '迟到的回执', reminder: '飞书投递记录',
 };
+
+const deliveryLabels = { pending: '待投递', sending: '投递中', sent: '已送达', failed: '投递失败', skipped: '已跳过' } as const;
 
 function externalUrl(value: string | null) {
   if (!value || !URL.canParse(value)) return null;
@@ -153,6 +155,16 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
             <Images size={15} aria-hidden="true" />查看截图
           </a>}
         </div>
+      </div>}
+      {!!task.notificationDeliveries?.length && <div className="task-section">
+        <h3>飞书提醒</h3>
+        <dl className="task-meta">
+          {task.notificationDeliveries.map((delivery) => <div key={delivery.id}>
+            <dt>{delivery.kind === 'handoff_ready' ? '交接提醒' : '4 小时未回填提醒'}</dt>
+            <dd>{deliveryLabels[delivery.status]} · {formatTime(delivery.sentAt ?? delivery.scheduledAt)}</dd>
+            {delivery.lastError && <dd className="muted small">{delivery.lastError}</dd>}
+          </div>)}
+        </dl>
       </div>}
       {task.events.length > 0 && <div className="task-section">
         <h3><History size={17} aria-hidden="true" />操作记录</h3>

@@ -8,6 +8,7 @@ import { bilibiliCredentials, publishChannel } from '../accounts/publish-account
 import { config } from '../config';
 import { inspectSnapshot, variantSnapshot } from '../content/content.service';
 import { StorageService } from '../content/storage.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 const lockTables = {
@@ -91,7 +92,8 @@ type TaskFilters = {
 export class TasksService {
   private readonly manual = new ManualHandoffAdapter();
 
-  constructor(private readonly prisma: PrismaService, private readonly storage: StorageService) {}
+  constructor(private readonly prisma: PrismaService, private readonly storage: StorageService,
+    private readonly notifications: NotificationsService) {}
 
   async schedule(workspaceId: string, userId: string, input: z.infer<typeof scheduleTasksSchema>) {
     const variantIds = [...new Set(input.variantIds)];
@@ -193,7 +195,13 @@ export class TasksService {
   async detail(workspaceId: string, id: string) {
     const task = await this.prisma.publishTask.findFirst({
       where: { id, workspaceId },
-      include: { ...taskRelations, events: { orderBy: { id: 'asc' } } },
+      include: {
+        ...taskRelations, events: { orderBy: { id: 'asc' } },
+        notificationDeliveries: {
+          orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
+          select: { id: true, kind: true, status: true, attempts: true, scheduledAt: true, sentAt: true, lastError: true },
+        },
+      },
     });
     if (!task) throw new NotFoundException('任务不存在');
     const { events, ...view } = task;
@@ -265,6 +273,10 @@ export class TasksService {
         },
       });
       await tx.publishTask.update({ where: { id }, data: { status: input.state } });
+      await tx.notificationDelivery.updateMany({
+        where: { taskId: id, status: 'pending' },
+        data: { status: 'skipped', nextAttemptAt: null, lastError: '任务已回填' },
+      });
       await tx.taskEvent.create({
         data: {
           workspaceId, taskId: id, kind: 'result', fromStatus: task.status, toStatus: input.state,
@@ -369,6 +381,7 @@ export class TasksService {
         data: { workspaceId, taskId: id, kind: 'handed_off', fromStatus: 'dispatching', toStatus: 'handed_off',
           leaseId, reason: receipt.message },
       });
+      await this.notifications.enqueueHandoff(tx, workspaceId, id, now);
       return true;
     }, { isolationLevel: 'ReadCommitted' });
   }

@@ -131,6 +131,9 @@ textarea { resize: vertical; }
 .file-field::file-selector-button { border: 0; padding: 4px 8px; margin-right: 7px; border-radius: 5px; color: #4935bb; background: var(--accent-soft); font: inherit; cursor: pointer; }
 .form-stack { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; gap: 13px; min-width: 0; }
 .form-stack > label, .form-stack > .form-row, .form-stack > .field-group, .form-stack > .feedback { width: 100%; }
+.form-stack .checkbox-field { grid-template-columns: auto minmax(0, 1fr); align-items: center; min-height: 28px; }
+.checkbox-field input[type=checkbox] { width: 16px; min-height: 0; height: 16px; margin: 0; padding: 0; accent-color: var(--accent); }
+.feishu-form { width: 100%; max-width: 32rem; }
 .form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .form-card:not(.detail-pane) { margin-bottom: 17px; }
 .feedback { display: flex; align-items: start; gap: 7px; padding: 8px 11px; margin: 0 0 11px; border: 1px solid #e4e2f3; border-radius: 8px; background: #f6f4fd; color: #4d3e90; font-size: 13px; overflow-wrap: anywhere; }
