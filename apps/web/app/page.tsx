@@ -114,6 +114,7 @@ function Accounts({ scope, canManage, resource }: {
       if (result.status === 'expired') throw new Error('二维码已过期，请重新连接小红书账号。');
       if (result.status === 'denied') throw new Error('授权未通过。需要连接时可重新扫码。');
       resource.refresh();
+      setShowArchived(false);
       setStatus('小红书账号身份已核验。');
     });
   }

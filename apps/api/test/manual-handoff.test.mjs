@@ -483,7 +483,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await patch({ enabled: true, webhook: 'https://open.feishu.cn.example.test/open-apis/bot/v2/hook/fixture' }, 400);
     await patch({ enabled: true }, 400);
     assert.deepEqual((await patch({ enabled: true, webhook, signSecret: secret })).data, {
-      enabled: true, webhookConfigured: true, signatureConfigured: true, encryptionReady: true,
+      enabled: true, webhookConfigured: true, signatureConfigured: true,
     });
     const stored = await prisma.notificationSetting.findUniqueOrThrow({ where: { workspaceId } });
     assert.equal(stored.webhookKeyId, 'notification-local-v1');
@@ -631,6 +631,12 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await call(accountPath, { method: 'DELETE', cookie });
     assert.equal((await call(own + '/accounts', { cookie })).data.some(({ id }) => id === archivedCandidate.id), false);
     assert.equal((await call(own + '/accounts?archived=true', { cookie })).data.some(({ id }) => id === archivedCandidate.id), true);
+    const duplicate = await prisma.channelAccount.create({
+      data: { workspaceId, platform, channelKind: 'manual', displayName: '归档夹具账号',
+        externalId: 'archive-account-duplicate', authCheckedAt: new Date(), authStatus: 'active' },
+    });
+    await call(accountPath + '/restore', { method: 'PATCH', cookie, status: 409 });
+    await prisma.channelAccount.delete({ where: { id: duplicate.id } });
     assert.equal((await call(own + '/manuscripts', { cookie })).data.some(({ id }) => id === historical.draft.id), false);
     assert.equal((await call(own + '/manuscripts?archived=true', { cookie })).data.some(({ id }) => id === historical.draft.id), true);
     assert.equal((await call(historyPath, { cookie })).data.result.remoteUrl, 'https://example.test/archive-history');

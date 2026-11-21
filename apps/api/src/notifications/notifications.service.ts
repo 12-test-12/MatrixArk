@@ -33,7 +33,6 @@ function presentSetting(setting: NotificationSetting | null) {
     enabled: setting?.enabled ?? false,
     webhookConfigured: Boolean(setting?.webhookCiphertext),
     signatureConfigured: Boolean(setting?.signSecretCiphertext),
-    encryptionReady: true,
   };
 }
 

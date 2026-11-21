@@ -66,19 +66,24 @@ export class ContentService {
         archivedAt: archive ? new Date() : null, archivedById: archive ? userId : null,
       } });
       if (archive) {
-        const reason = '原稿已归档，待发任务已暂停';
-        const paused = await tx.publishTask.updateManyAndReturn({
-          where: { workspaceId, status: 'scheduled', variant: { manuscriptId: id } },
-          data: { status: 'paused', lastError: reason },
-          select: { id: true },
-        });
-        if (paused.length) await tx.taskEvent.createMany({
-          data: paused.map(({ id: taskId }) => ({ workspaceId, taskId, kind: 'paused',
-            fromStatus: 'scheduled', toStatus: 'paused', actorId: userId, reason })),
-        });
+        await this.pauseScheduledTasks(tx, workspaceId, { variant: { manuscriptId: id } }, '原稿已归档，待发任务已暂停', userId);
       }
       return { ok: true };
     });
+  }
+
+  private async pauseScheduledTasks(tx: Prisma.TransactionClient, workspaceId: string,
+    target: Prisma.PublishTaskWhereInput, reason: string, userId: string) {
+    const paused = await tx.publishTask.updateManyAndReturn({
+      where: { ...target, workspaceId, status: 'scheduled' },
+      data: { status: 'paused', lastError: reason },
+      select: { id: true },
+    });
+    if (paused.length) await tx.taskEvent.createMany({
+      data: paused.map(({ id: taskId }) => ({ workspaceId, taskId, kind: 'paused',
+        fromStatus: 'scheduled', toStatus: 'paused', actorId: userId, reason })),
+    });
+    return paused.length;
   }
 
   private async lockCurrentVariant(tx: Prisma.TransactionClient, workspaceId: string, id: string) {
@@ -191,29 +196,8 @@ export class ContentService {
       data: { status: 'superseded', supersededAt: new Date() },
       select: { id: true },
     });
-    const paused = await tx.publishTask.updateManyAndReturn({
-      where: {
-        workspaceId: manuscript.workspaceId,
-        variantId: { in: superseded.map(({ id }) => id) },
-        status: 'scheduled',
-      },
-      data: { status: 'paused', lastError: pauseReason },
-      select: { id: true },
-    });
-    if (paused.length) {
-      await tx.taskEvent.createMany({
-        data: paused.map(({ id }) => ({
-          workspaceId: manuscript.workspaceId,
-          taskId: id,
-          kind: 'paused',
-          fromStatus: 'scheduled',
-          toStatus: 'paused',
-          actorId: userId,
-          reason: pauseReason,
-        })),
-      });
-    }
-    return paused.length;
+    return this.pauseScheduledTasks(tx, manuscript.workspaceId,
+      { variantId: { in: superseded.map(({ id }) => id) } }, pauseReason, userId);
   }
 
   async reviseVariant(params: {
