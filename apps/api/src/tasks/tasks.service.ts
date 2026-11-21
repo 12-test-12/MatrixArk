@@ -259,7 +259,8 @@ export class TasksService {
 
       const variant = await tx.variant.findUniqueOrThrow({ where: { id: variantId }, include: publishableVariant });
       const account = await tx.channelAccount.findUniqueOrThrow({ where: { id: accountId } });
-      if (!hasApproval(variant) || variant.contentHash !== task.variantContentHash || !canUseAccount(account, now)) {
+      if (!hasApproval(variant) || variant.contentHash !== task.variantContentHash
+        || account.platform !== variant.platform || !canUseAccount(account, now)) {
         const reason = '审核快照失效或人工账号不可用';
         assertTransition(task.status, 'paused');
         await tx.publishTask.update({ where: { id }, data: { status: 'paused', lastError: reason } });

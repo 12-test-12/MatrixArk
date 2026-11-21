@@ -10,6 +10,8 @@ describe('任务与回执校验规则', () => {
     };
     expect(scheduleTasksSchema.safeParse(valid).success).toBe(true);
     expect(scheduleTasksSchema.safeParse({ ...valid, scheduledAt: 'invalid' }).success).toBe(false);
+    expect(scheduleTasksSchema.safeParse({ ...valid, variantIds: [] }).success).toBe(false);
+    expect(scheduleTasksSchema.safeParse({ ...valid, accountIds: ['not-a-uuid'] }).success).toBe(false);
   });
 
   it('已发布必须提供作品链接或截图', () => {

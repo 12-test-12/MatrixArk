@@ -38,6 +38,7 @@ function SignIn({ onSession, onClose, initialError }: {
     setRegistering(!registering);
   }
   return <dialog ref={dialog} className="auth-dialog" aria-labelledby="auth-title" onClose={onClose}
+    onClick={(event) => { if (event.target === dialog.current && !action.busy) dialog.current.close(); }}
     onCancel={(event) => { if (action.busy) event.preventDefault(); }}>
     <div className="auth-heading">
       <h2 id="auth-title">{registering ? '创建工作室账号' : '登录工作台'}</h2>
@@ -152,8 +153,8 @@ export default function Home() {
 
   if (session === undefined) return <main className="boot"><Brand /><Loading /></main>;
   if (!session) return <>
-    <Preview onLogin={() => setShowSignIn(true)} />
-    {showSignIn && <SignIn initialError={startupError} onClose={() => setShowSignIn(false)} onSession={(next) => {
+    <Preview onLogin={() => { setStartupError(''); setShowSignIn(true); }} />
+    {showSignIn && <SignIn initialError={startupError} onClose={() => { setShowSignIn(false); setStartupError(''); }} onSession={(next) => {
       setSession(next); setShowSignIn(false); setStartupError(''); setSection(undefined); setWorkspaceId(''); setTaskId('');
     }} />}
   </>;

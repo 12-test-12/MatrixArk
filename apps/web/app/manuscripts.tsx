@@ -176,7 +176,7 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
       const date = new Date(String(fields.get('scheduledAt')));
       if (!Number.isFinite(date.getTime())) throw new Error('请选择有效的交接时间。');
       const response = await post<{ items: { id: string }[] }>(scope + '/tasks', {
-        variantIds: [variant.id], accountIds: [fields.get('accountId')], scheduledAt: date.toISOString(),
+        variantIds: [variant.id], accountIds: [String(fields.get('accountId') ?? '')], scheduledAt: date.toISOString(),
       });
       if (!response.items[0]) throw new Error('未收到任务编号。');
       onSchedule(response.items[0].id);
@@ -222,14 +222,16 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
   const approved = variant?.status === 'approved' && Boolean(variant.approval?.snapshotHash) && variant.snapshotVersion === 1;
   function refresh() { detail.refresh(); changed(); }
   function generate(targets: readonly Platform[]) {
+    const targetPlatform = targets.length === 1 ? targets[0]! : platform;
+    setPlatform(targetPlatform);
     void action.run(async () => {
       await post(scope + '/manuscripts/' + id + '/generate', { platforms: targets });
-      setPlatform(platform);
       refresh();
     }, '已生成平台版本。');
   }
   function approve() {
     if (!variant || !manuscript) return;
+    setPlatform(variant.platform);
     void action.run(async () => {
       await post(scope + '/variants/' + variant.id + '/confirm', {});
       check.refresh();
@@ -298,7 +300,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
         </div>}
       </div> : editable && (editing ?? drafts.has(draftKey)) ? <EditVersion key={variant.id} scope={scope} variant={variant}
         assets={manuscript.assets} drafts={drafts} draftKey={draftKey}
-        onSave={() => { setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />
+        onSave={() => { setPlatform(variant.platform); setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />
         : <>
           <div className="variant-preview">
             <div className="section-line"><h3>{variant.title}</h3><span className="version">V{variant.version}</span></div>
