@@ -6,25 +6,32 @@ export type Session = { user: { id: string; name: string; email: string }; works
 export const platforms = ['xiaohongshu', 'bilibili'] as const;
 export type Platform = (typeof platforms)[number];
 export const platformLabel: Record<Platform, string> = { xiaohongshu: '小红书', bilibili: 'B 站专栏' };
+export function publishPlatformLabel(platform: Platform, hasVideo: boolean) {
+  return hasVideo && platform === 'bilibili' ? 'B 站视频' : platformLabel[platform];
+}
 export type Account = {
   id: string; platform: Platform; channelKind: 'manual' | 'official' | 'sandbox'; displayName: string; operator?: string | null;
   identityVerified: boolean; identityCheckedAt: string | null; availableForHandoff: boolean; availableForOfficial: boolean;
 };
 export type Approval = { approvedAt: string; snapshotHash: string | null };
 export type Picture = { assetId: string; position: number; isCover: boolean };
+export type VideoAsset = { id: string; filename: string; size: number };
 export type VariantSummary = { id: string; platform: Platform; status: 'draft' | 'approved' | 'superseded'; version: number };
 type VariantText = VariantSummary & { title: string; body: string; tags: string[]; platformFields?: Record<string, unknown> };
 export type Variant = VariantText & {
   assets: Picture[]; snapshotVersion: number;
   approval: Approval | null;
+  videoAsset?: VideoAsset | null;
 };
-export type ManuscriptVariant = VariantText & Partial<Pick<Variant, 'assets' | 'snapshotVersion' | 'approval'>>;
+export type ManuscriptVariant = VariantText & Partial<Pick<Variant, 'assets' | 'snapshotVersion' | 'approval' | 'videoAsset'>>;
 export type ManuscriptSummary = {
   id: string; title: string; assetCount: number; updatedAt: string; variants: VariantSummary[];
+  videoAssetId?: string | null;
 };
 export type Manuscript = {
   id: string; title: string; body: string; tags: string[]; archivedAt?: string | null;
   assets: { id: string; filename: string }[]; variants: ManuscriptVariant[];
+  videoAsset?: VideoAsset | null;
 };
 export type TaskStatus = 'scheduled' | 'dispatching' | 'paused' | 'handed_off' | 'submitted'
   | 'under_review' | 'published' | 'failed' | 'unknown' | 'verified' | 'canceled';
@@ -37,7 +44,7 @@ export type Task = {
   id: string; status: TaskStatus; scheduledAt: string; handedOffAt: string | null; claimedAt: string | null; lastError: string | null;
   executionChannel: string | null; isSandbox: boolean | null;
   account: Pick<Account, 'id' | 'platform' | 'displayName' | 'operator' | 'channelKind'>;
-  variant: Pick<Variant, 'id' | 'title' | 'platform' | 'version'>;
+  variant: Pick<Variant, 'id' | 'title' | 'platform' | 'version'> & { videoAssetId?: string | null };
   result: Result | null;
 };
 export type TaskDetail = Task & {
@@ -50,6 +57,7 @@ export type TaskDetail = Task & {
 };
 export type Handoff = Pick<Variant, 'title' | 'body' | 'tags' | 'version'> & {
   assets: (Picture & { url: string })[];
+  video?: (VideoAsset & { url: string }) | null;
 };
 
 export const roleLabel: Record<Role, string> = {
@@ -69,12 +77,14 @@ export class ApiError extends Error {
 
 export async function api<T>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   const form = options.body instanceof FormData;
+  const video = options.body instanceof Blob ? options.body : undefined;
   let response: Response;
   try {
     response = await fetch(`/api${path}`, {
       method: options.method ?? 'GET',
-      headers: options.body !== undefined && !form ? { 'content-type': 'application/json' } : undefined,
-      body: form ? options.body as FormData : JSON.stringify(options.body),
+      headers: video ? { 'content-type': 'video/mp4', 'x-video-size': String(video.size) }
+        : options.body !== undefined && !form ? { 'content-type': 'application/json' } : undefined,
+      body: video ?? (form ? options.body as FormData : JSON.stringify(options.body)),
       signal: options.signal,
       cache: 'no-store',
     });

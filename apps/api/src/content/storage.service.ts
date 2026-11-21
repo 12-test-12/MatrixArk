@@ -1,10 +1,42 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { createWriteStream } from 'node:fs';
+import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { Transform, type Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { join, normalize, resolve, sep } from 'node:path';
-import { BadRequestException, Injectable, NotFoundException, UnsupportedMediaTypeException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, PayloadTooLargeException, UnsupportedMediaTypeException } from '@nestjs/common';
 import { config } from '../config';
 
 export const IMAGE_UPLOAD_LIMIT = 20 * 1024 * 1024;
+export const VIDEO_UPLOAD_LIMIT = 100 * 1024 * 1024;
+
+async function validMp4(path: string, size: number) {
+  const file = await open(path, 'r');
+  try {
+    const header = Buffer.alloc(16);
+    const boxes = new Set<string>();
+    let offset = 0;
+    for (let count = 0; offset < size && count < 1024; count++) {
+      const { bytesRead } = await file.read(header, 0, 16, offset);
+      if (bytesRead < 8) return false;
+      const type = header.toString('ascii', 4, 8);
+      let length = header.readUInt32BE(0);
+      if (length === 1) {
+        if (bytesRead < 16) return false;
+        const extended = header.readBigUInt64BE(8);
+        if (extended < 16n || extended > BigInt(size - offset)) return false;
+        length = Number(extended);
+      } else if (length === 0) length = size - offset;
+      if (length < 8 || length > size - offset) return false;
+      if (offset === 0 && (type !== 'ftyp' || length < 16 || header.toString('ascii', 8, 12) === 'qt  ')) return false;
+      if (length > 8) boxes.add(type);
+      offset += length;
+    }
+    return offset === size && boxes.has('moov') && boxes.has('mdat');
+  } finally {
+    await file.close();
+  }
+}
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 function decodeUploadName(filename: string) {
@@ -58,6 +90,38 @@ export class StorageService {
 
   async remove(key: string) {
     await rm(this.absolute(key), { force: true });
+  }
+
+  async saveVideo(workspaceId: string, input: Readable, expectedSize: number) {
+    const key = `${workspaceId}/${randomUUID()}.mp4`;
+    const target = this.absolute(key);
+    await mkdir(join(target, '..'), { recursive: true });
+    const hash = createHash('sha256');
+    let size = 0;
+    const verify = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        size += chunk.length;
+        if (size > VIDEO_UPLOAD_LIMIT) return callback(new PayloadTooLargeException('视频不能超过 100 MiB'));
+        hash.update(chunk);
+        callback(null, chunk);
+      },
+    });
+    try {
+      await pipeline(input, verify, createWriteStream(target, { flags: 'wx' }));
+      if (size !== expectedSize) throw new BadRequestException('视频上传未完成，请重试');
+      if (!await validMp4(target, size)) throw new UnsupportedMediaTypeException('请选择有效的 MP4 视频文件');
+      return { storageKey: key, size, checksum: hash.digest('hex') };
+    } catch (error) {
+      await this.remove(key).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  videoPath(workspaceId: string, key: string) {
+    if (!key.startsWith(workspaceId + '/') || !/^[a-f\d-]{36}\.mp4$/u.test(key.slice(workspaceId.length + 1))) {
+      throw new NotFoundException('视频不存在');
+    }
+    return this.absolute(key);
   }
 
   async readImage(workspaceId: string, key: string) {

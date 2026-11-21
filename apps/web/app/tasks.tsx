@@ -4,7 +4,7 @@ import {
   Images, RefreshCw, Send,
 } from 'lucide-react';
 import {
-  canRecord, fileBody, formatTime, platformLabel, post, taskLabel, useAction, useResource,
+  canRecord, fileBody, formatTime, publishPlatformLabel, post, taskLabel, useAction, useResource,
   type Handoff, type Role, type Task, type TaskDetail, type TaskStatus,
 } from './api';
 import { Empty, Feedback, Loading, PageHeader, TaskBadge } from './ui';
@@ -43,6 +43,10 @@ function Package({ data }: { data: Handoff }) {
     <div className="variant-preview">
       <div className="section-line"><h3>{data.title}</h3><span className="version">V{data.version}</span></div>
       <p className="content-text">{data.body}</p>
+      {data.video && <div className="video-asset">
+        <video controls preload="none" aria-label="已审交接视频" src={data.video.url} />
+        <a className="button compact" href={data.video.url} download={data.video.filename}>下载已审视频</a>
+      </div>}
       {data.tags.length > 0 && <div className="tag-row">{data.tags.map((tag, index) => <span key={index}>#{tag}</span>)}</div>}
       {data.assets.length > 0 && <div className="picture-grid">
         {data.assets.map((asset) => <a href={asset.url} className="picture" download key={asset.assetId}>
@@ -120,7 +124,7 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
   return <section className="card detail-pane task-detail">
     <div className="detail-heading">
       <div className="detail-icon"><CalendarDays size={22} aria-hidden="true" /></div>
-      <div><h2>{task.variant.title}</h2><p>{platformLabel[task.variant.platform]} · {task.account.displayName} · V{task.variant.version}</p></div>
+      <div><h2>{task.variant.title}</h2><p>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))} · {task.account.displayName} · V{task.variant.version}</p></div>
       <TaskBadge status={task.status} />
     </div>
     <div className="detail-content">
@@ -223,7 +227,7 @@ export function Tasks({ scope, role, initialId }: { scope: string; role: Role; i
         {list.loading ? <Loading /> : items.length ? items.map((task) => <button key={task.id} className={`list-item ${active === task.id ? 'selected' : ''}`}
           aria-pressed={active === task.id} onClick={() => { setSelected(task.id); setRecordedTitle(''); }}>
           <span className="list-icon"><CalendarDays size={17} aria-hidden="true" /></span>
-          <span className="list-copy"><strong>{task.variant.title}</strong><small>{platformLabel[task.variant.platform]} · {task.account.displayName} · {formatTime(task.scheduledAt)}</small></span>
+          <span className="list-copy"><strong>{task.variant.title}</strong><small>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))} · {task.account.displayName} · {formatTime(task.scheduledAt)}</small></span>
           <TaskBadge status={task.status} /><ChevronRight className="row-chevron" size={14} aria-hidden="true" />
         </button>) : <Empty icon={CalendarDays} title="暂无匹配的任务" />}
         {(cursor || list.data?.nextCursor) && <div className="pagination">

@@ -44,6 +44,7 @@ export function contentHash(input: {
   tags: readonly string[];
   assets: readonly { assetId: string; position: number; isCover: boolean }[];
   platformFields: JsonValue;
+  videoAssetId?: string | null;
 }): string {
   const payload = stableStringify({
     platform: input.platform,
@@ -54,6 +55,7 @@ export function contentHash(input: {
       ({ assetId, position, isCover }) => ({ assetId, position, isCover }),
     ),
     platformFields: input.platformFields,
+    ...(input.videoAssetId ? { videoAssetId: input.videoAssetId } : {}),
   });
   return createHash('sha256').update(payload).digest('hex');
 }

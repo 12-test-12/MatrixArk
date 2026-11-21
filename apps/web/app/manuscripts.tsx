@@ -1,10 +1,10 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowDown, ArrowUp, CalendarPlus, ChevronRight, CircleCheck, FileText, ImagePlus, Images, PencilLine, Plus,
   ShieldCheck, Sparkles,
 } from 'lucide-react';
 import {
-  api, canEdit, canReview, fileBody, formatTime, imageUrl, platformLabel, platforms, post, useAction, useResource,
+  api, canEdit, canReview, fileBody, formatTime, imageUrl, platforms, post, publishPlatformLabel, useAction, useResource,
   type Account, type Manuscript, type ManuscriptSummary, type ManuscriptVariant, type Platform, type Role, type Variant,
 } from './api';
 import { Empty, Feedback, Loading, PageHeader, PlatformIcon, ReviewPicture } from './ui';
@@ -39,6 +39,24 @@ function textFields({ title, body, tags }: ReturnType<typeof rawFields>) {
 
 export type ManuscriptDrafts = Map<string, { fields: ReturnType<typeof rawFields>; assetIds?: string[]; coverAssetId?: string | null }>;
 
+function DraftPreview({ fields, name, cover, video }: {
+  fields?: ReturnType<typeof rawFields>; name?: string; cover?: string; video?: string;
+}) {
+  const draft = fields && textFields(fields);
+  return <aside className="draft-preview" aria-label="实时预览">
+    <h3>实时预览{name ? ` · ${name}` : ''}</h3>
+    <div className="draft-preview-content">
+      {video ? <video controls preload="metadata" poster={cover} src={video} aria-label="当前视频预览" />
+        : cover ? <img src={cover} alt="当前封面" /> : null}
+      <h4 className={draft?.title ? '' : 'muted'}>{draft?.title || '稿件标题'}</h4>
+      <p className={`content-text${draft?.body ? '' : ' muted'}`}>{draft?.body || '输入正文后会显示在这里。'}</p>
+      {!!draft?.tags.length && <div className="tag-row">
+        {draft.tags.map((tag, index) => <span key={index}>#{tag}</span>)}
+      </div>}
+    </div>
+  </aside>;
+}
+
 function TextFields({ values, disabled }: { values?: Pick<ReturnType<typeof rawFields>, 'title' | 'body' | 'tags'>; disabled: boolean }) {
   return <>
     <label>标题<input name="title" autoFocus required disabled={disabled} maxLength={200} defaultValue={values?.title} placeholder="输入稿件标题" /></label>
@@ -52,6 +70,7 @@ function NewManuscript({ scope, drafts, draftKey, onSave, onCancel }: {
 }) {
   const action = useAction();
   const [initial] = useState(() => drafts.get(draftKey)?.fields);
+  const [live, setLive] = useState(initial);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const body = textFields(rawFields(event.currentTarget));
@@ -62,8 +81,10 @@ function NewManuscript({ scope, drafts, draftKey, onSave, onCancel }: {
       onSave(id);
     });
   }
-  return <form className="card form-card form-stack detail-pane" onSubmit={submit} onInput={(event) => {
+  return <section className="card form-card detail-pane draft-compose">
+    <div className="draft-compose-grid"><form className="form-stack" onSubmit={submit} onInput={(event) => {
     const fields = rawFields(event.currentTarget);
+    setLive(fields);
     if (Object.values(fields).some(Boolean)) drafts.set(draftKey, { fields });
     else drafts.delete(draftKey);
   }}>
@@ -77,7 +98,7 @@ function NewManuscript({ scope, drafts, draftKey, onSave, onCancel }: {
         onCancel();
       }}>取消</button>
     </div>
-  </form>;
+  </form><DraftPreview fields={live} /></div></section>;
 }
 
 function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCancel }: {
@@ -87,6 +108,9 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
   const action = useAction();
   const form = useRef<HTMLFormElement>(null);
   const [initial] = useState(() => drafts.get(draftKey));
+  const [live, setLive] = useState(() => initial?.fields ?? {
+    title: variant.title, body: variant.body, tags: variant.tags.join('，'), category: '', summary: '',
+  });
   const [assetIds, setAssetIds] = useState(() => initial?.assetIds ?? variant.assets.map((asset) => asset.assetId));
   const firstImageIsCover = variant.platform === 'xiaohongshu';
   const [coverAssetId, setCoverAssetId] = useState(() => initial?.coverAssetId === undefined
@@ -109,7 +133,7 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
     event.preventDefault();
     const fields = rawFields(event.currentTarget);
     const body = textFields(fields);
-    const platformFields = variant.platform === 'bilibili' ? { ...variant.platformFields } : undefined;
+    const platformFields = variant.platform === 'bilibili' && !variant.videoAsset ? { ...variant.platformFields } : undefined;
     if (platformFields) {
       const target: Record<string, unknown> = platformFields;
       for (const key of ['category', 'summary'] as const) {
@@ -129,13 +153,16 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
     });
   }
   const available = assets.filter((asset) => !assetIds.includes(asset.id));
-  return <form ref={form} className="form-stack" onSubmit={submit} onInput={(event) => {
+  const previewCover = firstImageIsCover ? assetIds[0] : coverAssetId;
+  return <div className="draft-compose"><div className="draft-compose-grid">
+    <form ref={form} className="form-stack" onSubmit={submit} onInput={(event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+      setLive(rawFields(event.currentTarget));
       keepDraft(assetIds, coverAssetId);
     }
   }}>
     <TextFields values={initial?.fields ?? { ...variant, tags: variant.tags.join('，') }} disabled={action.busy} />
-    {variant.platform === 'bilibili' && <div className="field-group">
+    {variant.platform === 'bilibili' && !variant.videoAsset && <div className="field-group">
       <h3>B 站官方投稿</h3>
       <label>专栏子分类 ID<input name="category" inputMode="numeric" pattern="[0-9]+" maxLength={20}
         disabled={action.busy} defaultValue={initial?.fields.category ?? String(variant.platformFields?.category ?? '')} /></label>
@@ -182,7 +209,11 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
         onCancel();
       }}>取消</button>
     </div>
-  </form>;
+  </form>
+    <DraftPreview fields={live} name={publishPlatformLabel(variant.platform, Boolean(variant.videoAsset))}
+      cover={previewCover ? imageUrl(scope, previewCover) + '/thumbnail' : undefined}
+      video={variant.videoAsset ? imageUrl(scope, variant.videoAsset.id) + '/video' : undefined} />
+  </div></div>;
 }
 
 function localDateTime() {
@@ -195,7 +226,7 @@ function Schedule({ scope, variants, accounts, onSchedule, openAccounts }: {
 }) {
   const action = useAction();
   const targets = accounts.filter((account) => (account.availableForHandoff || account.availableForOfficial)
-    && variants.some(({ platform }) => platform === account.platform));
+    && variants.some(({ platform, videoAsset }) => platform === account.platform && (!videoAsset || account.channelKind !== 'official')));
   const [selection, setSelection] = useState<string[]>([]);
   const selected = targets.length === 1 ? targets : targets.filter(({ id }) => selection.includes(id));
   function selectAccounts(ids: string[], checked: boolean) {
@@ -225,10 +256,10 @@ function Schedule({ scope, variants, accounts, onSchedule, openAccounts }: {
         const groupIds = group.map(({ id }) => id);
         const allSelected = group.every(({ id }) => selection.includes(id));
         return <fieldset className="schedule-accounts" key={variant.id} disabled={action.busy}>
-          <legend>{platformLabel[variant.platform]} · V{variant.version}</legend>
+          <legend>{publishPlatformLabel(variant.platform, Boolean(variant.videoAsset))} · V{variant.version}</legend>
           {group.length > 1 && <button type="button" className="text-button"
             onClick={() => selectAccounts(groupIds, !allSelected)}>
-            {allSelected ? '取消全选' : '全选'}{platformLabel[variant.platform]}账号
+            {allSelected ? '取消全选' : '全选'}{publishPlatformLabel(variant.platform, Boolean(variant.videoAsset))}账号
           </button>}
           {group.map((account) => <label key={account.id}>
             <input type="checkbox" checked={selected.some(({ id }) => id === account.id)} disabled={targets.length === 1}
@@ -256,6 +287,15 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
 }) {
   const detail = useResource<Manuscript>(scope + '/manuscripts/' + id);
   const action = useAction();
+  const videoAction = useAction();
+  const [pickedVideo, setPickedVideo] = useState<File>();
+  const [pickedVideoUrl, setPickedVideoUrl] = useState('');
+  useEffect(() => {
+    if (!pickedVideo) return;
+    const url = URL.createObjectURL(pickedVideo);
+    setPickedVideoUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [pickedVideo]);
   const [editing, setEditing] = useState<boolean | null>(null);
   const [selectedPlatform, setPlatform] = useState<Platform>();
   const manuscript = detail.data;
@@ -310,6 +350,16 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
       } finally { refresh(); }
     }, '原稿配图已上传。');
   }
+  function uploadVideo(file?: File) {
+    if (!file) return;
+    setPickedVideo(file);
+    void videoAction.run(async () => {
+      if (file.size > 100 * 1024 * 1024) throw new Error('视频不能超过 100 MiB。');
+      await api(scope + '/manuscripts/' + id + '/video?filename=' + encodeURIComponent(file.name), { method: 'PUT', body: file });
+      setPickedVideo(undefined);
+      refresh();
+    }, '视频已保存，可以查看和审核平台版本。');
+  }
   if (!manuscript) return <section className="card detail-pane">{detail.loading ? <Loading /> : <Feedback error={detail.error} />}</section>;
   return <section className="card detail-pane manuscript-detail">
     <div className="detail-heading">
@@ -327,7 +377,27 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
         <p className="content-text">{manuscript.body}</p>
       </details>
       <div className="section-line">
-        <h3><Images size={17} aria-hidden="true" />原稿配图</h3>
+        <h3>视频素材</h3>
+        {editable && <label className="button compact upload-button">
+          {videoAction.busy ? '正在上传…' : manuscript.videoAsset ? '替换视频' : '上传视频'}
+          <input type="file" accept=".mp4,video/mp4" disabled={action.busy || videoAction.busy}
+            aria-label={manuscript.videoAsset ? '替换原稿视频' : '上传原稿视频'} onChange={(event) => {
+              uploadVideo(event.currentTarget.files?.[0]);
+              event.currentTarget.value = '';
+            }} />
+        </label>}
+      </div>
+      <Feedback error={videoAction.error} notice={videoAction.notice} />
+      {pickedVideo ? <div className="video-asset">
+        {pickedVideoUrl && <video controls preload="metadata" aria-label="本地视频预览" src={pickedVideoUrl} />}
+        <p className="muted small">{pickedVideo.name} · {videoAction.busy ? '正在上传' : '本地预览'}</p>
+        {videoAction.error && <button type="button" className="button compact" onClick={() => uploadVideo(pickedVideo)}>重试上传</button>}
+      </div> : manuscript.videoAsset ? <div className="video-asset">
+        <video controls preload="metadata" aria-label="原稿视频" src={imageUrl(scope, manuscript.videoAsset.id) + '/video'} />
+        <p className="muted small">{manuscript.videoAsset.filename}</p>
+      </div> : editable && <p className="muted small">发视频时上传一份 MP4，最多 100 MiB。</p>}
+      <div className="section-line">
+        <h3><Images size={17} aria-hidden="true" />{manuscript.videoAsset ? '视频封面与配图' : '原稿配图'}</h3>
         {editable && <label className="button compact upload-button">
           <ImagePlus size={16} aria-hidden="true" />上传图片
           <input type="file" multiple accept="image/jpeg,image/png,image/webp" aria-label="上传原稿配图" disabled={action.busy}
@@ -343,7 +413,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
         </div>)}
       </div> : <p className="muted small">暂无配图。小红书图文至少需要 1 张。</p>}
       <div className="section-line variant-heading">
-        <h3><PlatformIcon platform={platform} />{platformLabel[platform]}版本</h3>
+        <h3><PlatformIcon platform={platform} />{publishPlatformLabel(platform, Boolean(manuscript.videoAsset))}版本</h3>
         {snapshot && <span className={`badge ${approved ? 'green' : 'amber'}`}>{approved ? '已审核' : '待审核'}</span>}
       </div>
       <div className="filters platform-options" role="group" aria-label="按平台查看版本">
@@ -353,14 +423,14 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
             aria-pressed={platform === candidate} disabled={action.busy} onClick={() => {
               if (platform === candidate) return;
               action.reset(); setPlatform(candidate); setEditing(null);
-            }}>{platformLabel[candidate]} <small>{variantLabel(current)}</small></button>;
+            }}>{publishPlatformLabel(candidate, Boolean(manuscript.videoAsset))} <small>{variantLabel(current)}</small></button>;
         })}
       </div>
       {!variant ? <div className="sub-empty">
         <p>生成平台版本后，可检查文案、图片顺序和封面。</p>
         {editable && <div className="actions">
           <button type="button" className="button primary" disabled={action.busy} onClick={() => generate([platform])}>
-            <Sparkles size={16} aria-hidden="true" />生成{platformLabel[platform]}版本
+            <Sparkles size={16} aria-hidden="true" />生成{publishPlatformLabel(platform, Boolean(manuscript.videoAsset))}版本
           </button>
           {!currentVariants.length && <button type="button" className="button" disabled={action.busy}
             onClick={() => generate(platforms)}>一次生成两个平台版本</button>}
@@ -372,7 +442,11 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
           <div className="variant-preview">
             <div className="section-line"><h3>{variant.title}</h3><span className="version">V{variant.version}</span></div>
             <p className="content-text">{variant.body}</p>
-            {variant.platform === 'bilibili' && typeof variant.platformFields?.summary === 'string' && variant.platformFields.summary &&
+            {variant.videoAsset && <div className="video-asset">
+              <video controls preload="none" aria-label="待审核版本视频" src={imageUrl(scope, variant.videoAsset.id) + '/video'} />
+              <p className="muted small">{variant.videoAsset.filename}</p>
+            </div>}
+            {variant.platform === 'bilibili' && !variant.videoAsset && typeof variant.platformFields?.summary === 'string' && variant.platformFields.summary &&
               <div className="field-group">
                 <h4>专栏摘要 · 分类 {String(variant.platformFields.category ?? '')}</h4>
                 <p className="content-text">{variant.platformFields.summary}</p>
@@ -456,7 +530,7 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
           return <button key={item.id} className={`list-item ${active === item.id && !creating ? 'selected' : ''}`}
             aria-pressed={active === item.id && !creating} onClick={() => { setSelection(item.id); setCreating(false); setReviewNotice(''); }}>
             <span className="list-icon"><FileText size={18} aria-hidden="true" /></span>
-            <span className="list-copy"><strong>{item.title}</strong><small>{item.assetCount} 张图片 · {variants.length
+            <span className="list-copy"><strong>{item.title}</strong><small>{item.videoAssetId ? '视频 · ' : ''}{item.assetCount} 张图片 · {variants.length
               ? `${variants.length} 个版本 · ${pending ? `${pending} 个待审核` : '已审核'}` : '未生成版本'}</small></span>
             <ChevronRight className="row-chevron" size={15} aria-hidden="true" />
           </button>;

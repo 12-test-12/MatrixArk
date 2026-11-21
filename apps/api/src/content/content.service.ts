@@ -13,6 +13,7 @@ import { PrismaService } from '../prisma/prisma.service';
 
 export const variantSnapshot = {
   approval: true,
+  videoAsset: { select: { id: true, filename: true, size: true } },
   assets: {
     orderBy: { position: 'asc' },
     select: { assetId: true, position: true, isCover: true },
@@ -30,6 +31,9 @@ export function inspectSnapshot(variant: Snapshot) {
   const issues = validateVariant(variant.platform, { ...variant, imageCount });
   const invalidOrder = variant.assets.some(({ position }, index) => position !== index);
   const invalidCover = variant.platform === 'xiaohongshu' && imageCount > 0 && !variant.assets[0]?.isCover;
+  if (variant.videoAssetId && !variant.assets.some(({ isCover }) => isCover)) {
+    issues.push({ field: 'images', code: 'video_cover_required', message: '视频稿件需要选择封面' });
+  }
   if (variant.snapshotVersion !== 1 || !variant.sealedAt) {
     issues.push({ field: 'snapshot', code: 'snapshot_required', message: '请保存为新版本后重新确认' });
   } else if (invalidOrder || invalidCover || contentHash(variant) !== variant.contentHash) {
@@ -129,12 +133,13 @@ export class ContentService {
       assetIds: string[];
       coverAssetId: string | null;
       platformFields: Prisma.JsonObject;
+      videoAssetId?: string | null;
     },
     generationSource: GenerationSource,
     userId: string,
     previousSnapshotHash?: string,
   ) {
-    const { title, body, tags, assetIds, coverAssetId, platformFields } = input;
+    const { title, body, tags, assetIds, coverAssetId, platformFields, videoAssetId } = input;
     if (coverAssetId !== null && !assetIds.includes(coverAssetId)) {
       throw new BadRequestException('封面必须来自版本图片');
     }
@@ -143,7 +148,7 @@ export class ContentService {
       if (Object.keys(platformFields).length > 0) throw new BadRequestException('小红书首版暂不支持平台扩展字段');
     }
     const assets = assetIds.map((assetId, position) => ({ assetId, position, isCover: assetId === coverAssetId }));
-    const hash = contentHash({ platform, title, body, tags, assets, platformFields });
+    const hash = contentHash({ platform, title, body, tags, assets, platformFields, videoAssetId });
     if (hash === previousSnapshotHash) {
       throw new BadRequestException({ code: 'variant_unchanged', message: '版本内容未变化' });
     }
@@ -162,6 +167,7 @@ export class ContentService {
         body,
         tags,
         platformFields,
+        videoAssetId,
         generationSource,
         snapshotVersion: 1,
         contentHash: hash,
@@ -234,6 +240,7 @@ export class ContentService {
         assetIds,
         coverAssetId: input.coverAssetId === undefined ? defaultCover : input.coverAssetId,
         platformFields,
+        videoAssetId: current.videoAssetId,
       }, 'manual', params.userId, previousSnapshotHash);
       const pausedTaskCount = await this.supersedeVersions(tx, manuscript, [current.platform], [variant.id], params.userId);
       return { variant, supersededVariantId: current.id, pausedTaskCount };
@@ -258,10 +265,50 @@ export class ContentService {
           assetIds,
           coverAssetId: assetIds[0] ?? null,
           platformFields: {},
+          videoAssetId: manuscript.videoAssetId,
         }, 'rule', params.userId));
       }
       await this.supersedeVersions(tx, manuscript, platforms, created.map(({ id }) => id), params.userId);
       return created;
+    }, { isolationLevel: 'ReadCommitted' });
+  }
+
+  async replaceVideo(workspaceId: string, manuscriptId: string, userId: string,
+    file: { storageKey: string; size: number; checksum: string; filename: string }) {
+    return this.prisma.$transaction(async (tx) => {
+      const manuscript = await this.lockManuscript(tx, workspaceId, manuscriptId);
+      if (manuscript.videoAssetId) {
+        const current = await tx.asset.findUniqueOrThrow({ where: { id: manuscript.videoAssetId } });
+        if (current.checksum === file.checksum) {
+          const { id, filename, size } = current;
+          return { video: { id, filename, size }, changed: false, pausedTaskCount: 0 };
+        }
+      }
+      const video = await tx.asset.create({
+        data: { ...file, workspaceId, manuscriptId, uploadedById: userId, kind: 'manuscript_video', mimeType: 'video/mp4' },
+        select: { id: true, filename: true, size: true },
+      });
+      await tx.manuscript.update({ where: { id: manuscriptId }, data: { videoAssetId: video.id } });
+      const current = await tx.variant.findMany({
+        where: { workspaceId, manuscriptId, status: { not: 'superseded' } }, include: variantSnapshot,
+        orderBy: [{ platform: 'asc' }, { version: 'desc' }],
+      });
+      const platforms = [...new Set(current.map(({ platform }) => platform))];
+      const replacements = [];
+      const sourceImages = current.some(({ snapshotVersion }) => snapshotVersion === 0)
+        ? (await this.manuscriptImages(tx, manuscript)).map(({ id }) => id) : [];
+      for (const platform of platforms) {
+        const version = current.find((item) => item.platform === platform)!;
+        const assetIds = version.snapshotVersion === 0 ? sourceImages : version.assets.map(({ assetId }) => assetId);
+        const previousCover = version.assets.find(({ isCover }) => isCover)?.assetId;
+        replacements.push(await this.createVersion(tx, manuscript, platform, {
+          title: version.title, body: version.body, tags: version.tags, assetIds,
+          coverAssetId: platform === 'xiaohongshu' ? assetIds[0] ?? null : previousCover ?? assetIds[0] ?? null,
+          platformFields: version.platformFields as Prisma.JsonObject, videoAssetId: video.id,
+        }, 'manual', userId));
+      }
+      const pausedTaskCount = await this.supersedeVersions(tx, manuscript, platforms, replacements.map(({ id }) => id), userId);
+      return { video, changed: true, pausedTaskCount };
     }, { isolationLevel: 'ReadCommitted' });
   }
 

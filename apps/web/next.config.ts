@@ -6,7 +6,7 @@ const config: NextConfig = {
   agentRules: false,
   devIndicators: false,
   poweredByHeader: false,
-  experimental: { proxyClientMaxBodySize: '24mb' },
+  experimental: { proxyClientMaxBodySize: '100mb' },
   async rewrites() {
     return [{ source: '/api/:path*', destination: `${apiOrigin}/api/:path*` }];
   },

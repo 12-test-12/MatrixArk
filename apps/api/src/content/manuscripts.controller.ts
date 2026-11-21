@@ -1,5 +1,6 @@
 import {
   Body,
+  BadRequestException,
   Controller,
   Delete,
   Get,
@@ -7,12 +8,17 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
+  Req,
+  PayloadTooLargeException,
+  UnsupportedMediaTypeException,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import type { Request } from 'express';
 import { generateVariantsSchema, updateManuscriptSchema, createManuscriptSchema } from '@matrixark/shared';
 import { CurrentMembership, CurrentUser } from '../auth/decorators';
 import type { SessionUser } from '../auth/session.service';
@@ -22,7 +28,7 @@ import type { Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
 import { ContentService, variantSnapshot } from './content.service';
-import { IMAGE_UPLOAD_LIMIT, StorageService, imageDisplayName, validateImageUpload } from './storage.service';
+import { IMAGE_UPLOAD_LIMIT, VIDEO_UPLOAD_LIMIT, StorageService, imageDisplayName, validateImageUpload } from './storage.service';
 
 @Controller('workspaces/:workspaceId/manuscripts')
 @UseGuards(WorkspaceGuard)
@@ -44,7 +50,7 @@ export class ManuscriptsController {
           where: { status: { not: 'superseded' } },
           select: { id: true, platform: true, version: true, status: true },
         },
-        _count: { select: { assets: true } },
+        _count: { select: { assets: { where: { kind: 'manuscript_image' } } } },
       },
     });
 
@@ -55,6 +61,7 @@ export class ManuscriptsController {
       updatedAt: m.updatedAt,
       archivedAt: m.archivedAt,
       assetCount: m._count.assets,
+      videoAssetId: m.videoAssetId,
       variants: m.variants.map((v) => ({
         id: v.id,
         platform: v.platform,
@@ -84,7 +91,8 @@ export class ManuscriptsController {
     const manuscript = await this.prisma.manuscript.findFirst({
       where: { id, workspaceId },
       include: {
-        assets: { orderBy: { createdAt: 'asc' } },
+        assets: { where: { kind: 'manuscript_image' }, orderBy: { createdAt: 'asc' } },
+        videoAsset: { select: { id: true, filename: true, size: true } },
         variants: { include: variantSnapshot, orderBy: [{ platform: 'asc' }, { version: 'desc' }] },
       },
     });
@@ -99,6 +107,7 @@ export class ManuscriptsController {
       createdAt: manuscript.createdAt,
       updatedAt: manuscript.updatedAt,
       archivedAt: manuscript.archivedAt,
+      videoAsset: manuscript.videoAsset,
       imageCount,
       assets: manuscript.assets.map((asset) => ({ ...asset, filename: imageDisplayName(asset.filename) })),
       variants: manuscript.variants.map((v) => ({
@@ -109,6 +118,7 @@ export class ManuscriptsController {
         body: v.body,
         tags: v.tags,
         assets: v.assets,
+        videoAsset: v.videoAsset,
         platformFields: v.platformFields,
         generationSource: v.generationSource,
         snapshotVersion: v.snapshotVersion,
@@ -198,5 +208,32 @@ export class ManuscriptsController {
         throw error;
       }
     });
+  }
+
+  @Put(':id/video')
+  async uploadVideo(@CurrentMembership() membership: { role: Role }, @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string, @Param('id') id: string, @Query('filename') filename: string,
+    @Req() request: Request) {
+    assertCan(membership.role, 'content:write');
+    if (request.get('content-type') !== 'video/mp4') throw new UnsupportedMediaTypeException('请选择 MP4 视频');
+    const size = Number(request.get('x-video-size'));
+    if (!Number.isSafeInteger(size) || size <= 0) throw new BadRequestException('视频大小无效');
+    if (size > VIDEO_UPLOAD_LIMIT) throw new PayloadTooLargeException('视频不能超过 100 MiB');
+    if (typeof filename !== 'string' || !/^[^\u0000-\u001f/\\]{1,180}\.mp4$/iu.test(filename)) {
+      throw new BadRequestException('视频文件名无效');
+    }
+    const manuscript = await this.prisma.manuscript.findFirst({ where: { id, workspaceId, archivedAt: null }, select: { id: true } });
+    if (!manuscript) throw new NotFoundException('在用原稿不存在');
+    const file = await this.storage.saveVideo(workspaceId, request, size);
+    try {
+      const result = await this.content.replaceVideo(workspaceId, id, user.id, { ...file, filename });
+      if (!result.changed) await this.storage.remove(file.storageKey).catch(() => undefined);
+      return result;
+    } catch (error) {
+      // Preserve the file when the database cannot confirm whether the transaction committed.
+      const stored = await this.prisma.asset.findUnique({ where: { storageKey: file.storageKey } }).catch(() => undefined);
+      if (stored === null) await this.storage.remove(file.storageKey).catch(() => undefined);
+      throw error;
+    }
   }
 }

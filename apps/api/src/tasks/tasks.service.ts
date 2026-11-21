@@ -32,7 +32,7 @@ function lockRow(tx: Prisma.TransactionClient, table: keyof typeof lockTables, w
 
 const taskRelations = {
   account: { select: { id: true, platform: true, displayName: true, operator: true, channelKind: true } },
-  variant: { select: { id: true, manuscriptId: true, platform: true, version: true, title: true } },
+  variant: { select: { id: true, manuscriptId: true, platform: true, version: true, title: true, videoAssetId: true } },
   result: true,
 } as const satisfies Prisma.PublishTaskInclude;
 
@@ -153,6 +153,7 @@ export class TasksService {
     const channel = publishChannel(account, now);
     if (!channel) throw new ConflictException(`账号「${account.displayName}」当前不可排期，请检查授权和通道配置`);
     if (channel === 'official') {
+      if (variant.videoAssetId) throw new ConflictException('视频官方投稿未开通，请选择人工交接或沙箱账号');
       if (!bilibiliCredentials(account)) throw new ConflictException('无法读取该账号的 B 站授权');
       try {
         validateBilibiliArticle(publishVariant(variant));
@@ -225,6 +226,7 @@ export class TasksService {
       taskId: id, account: task.account, variantId: variant.id, version: variant.version,
       title: variant.title, body: variant.body, tags: variant.tags,
       assets: variant.assets.map((asset) => ({ ...asset, url: assetUrl(workspaceId, asset.assetId) })),
+      video: variant.videoAsset ? { ...variant.videoAsset, url: assetUrl(workspaceId, variant.videoAsset.id) + '/video' } : null,
     };
   }
 
@@ -336,7 +338,7 @@ export class TasksService {
       const channel = publishChannel(account, now);
       if (task.executionChannel && task.executionChannel !== account.channelKind) return false;
       if (!hasApproval(variant) || variant.contentHash !== task.variantContentHash
-        || account.platform !== variant.platform || !channel) {
+        || account.platform !== variant.platform || !channel || (variant.videoAssetId && channel === 'official')) {
         const reason = '审核快照失效或发布账号不可用';
         assertTransition(task.status, 'paused');
         await tx.publishTask.update({ where: { id }, data: { status: 'paused', lastError: reason } });

@@ -50,6 +50,7 @@ enum TaskStatus {
 
 enum AssetKind {
   manuscript_image
+  manuscript_video
   task_evidence
 }
 
@@ -183,12 +184,14 @@ model Manuscript {
   updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
   archivedAt   DateTime? @db.Timestamptz(3)
   archivedById String?
+  videoAssetId String?
 
   workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   createdBy  User      @relation("ManuscriptAuthor", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: NoAction)
   archivedBy User?     @relation("ManuscriptArchiver", fields: [archivedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
   assets     Asset[]
   variants   Variant[]
+  videoAsset Asset? @relation("ManuscriptVideo", fields: [videoAssetId], references: [id], onDelete: Restrict, onUpdate: NoAction)
 
   @@index([workspaceId, createdAt])
 }
@@ -215,6 +218,8 @@ model Asset {
   uploadedBy     User?           @relation(fields: [uploadedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
   variants       VariantAsset[]
   publishResults PublishResult[]
+  videoForManuscripts Manuscript[] @relation("ManuscriptVideo")
+  videoForVariants Variant[] @relation("VariantVideo")
 
   @@index([manuscriptId])
   @@index([taskId], map: "Asset_task_idx")
@@ -241,6 +246,8 @@ model Variant {
   promptVersion    String?
   snapshotVersion  Int              @default(0)
   sealedAt         DateTime?        @db.Timestamptz(3)
+  videoAssetId     String?
+  videoAsset       Asset? @relation("VariantVideo", fields: [videoAssetId], references: [id], onDelete: Restrict, onUpdate: NoAction)
 
   workspace  Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   manuscript Manuscript         @relation(fields: [manuscriptId], references: [id], onDelete: Restrict, onUpdate: NoAction)

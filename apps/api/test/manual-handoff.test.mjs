@@ -648,4 +648,64 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal((await call(future.path, { cookie })).data.archivedAt, null);
     assert.equal((await call(own + '/accounts', { cookie })).data.find(({ id }) => id === archivedCandidate.id).availableForHandoff, true);
   });
+
+  await t.test('一份视频可用于两个平台版本，换片时保留历史交接并暂停旧待发任务', async () => {
+    const { data: draft } = await post(own + '/manuscripts', { title: '共用视频', body: '视频简介', tags: [] });
+    const source = own + '/manuscripts/' + draft.id;
+    const { data: cover } = await post(source + '/assets', file(sourcePng));
+    function box(type, payload) {
+      const header = Buffer.alloc(8);
+      header.writeUInt32BE(header.length + payload.length);
+      header.write(type, 4, 'ascii');
+      return Buffer.concat([header, payload]);
+    }
+    const video = (value) => Buffer.concat([
+      box('ftyp', Buffer.from('isom\0\0\0\0mp42')), box('moov', Buffer.from('fixture')),
+      box('mdat', Buffer.alloc(16, value)),
+    ]);
+    async function upload(bytes, want = 200) {
+      const response = await fetch(base + source + '/video?filename=' + encodeURIComponent('共用视频.mp4'), {
+        method: 'PUT', headers: { cookie, 'content-type': 'video/mp4', 'x-video-size': String(bytes.length) }, body: bytes,
+      });
+      const result = await response.json();
+      assert.equal(response.status, want, JSON.stringify(result));
+      return result;
+    }
+    await upload(Buffer.from('fake mp4'), 415);
+    const uploaded = await upload(video(1));
+    assert.equal((await upload(video(1))).changed, false);
+    const assetPath = own + '/assets/' + uploaded.video.id + '/video';
+    const bytes = await fetch(base + assetPath, { headers: { cookie, range: 'bytes=0-7' } });
+    assert.equal(bytes.status, 206);
+    assert.deepEqual(Buffer.from(await bytes.arrayBuffer()), video(1).subarray(0, 8));
+    await call(foreign + '/assets/' + uploaded.video.id + '/video', { cookie: otherCookie, status: 404 });
+    const { data: variants } = await post(source + '/generate', { platforms: ['bilibili', 'xiaohongshu'] });
+    for (const item of variants) {
+      assert.equal(item.videoAsset.id, uploaded.video.id);
+      assert.equal(item.assets[0].assetId, cover.id);
+      await post(own + '/variants/' + item.id + '/confirm', {});
+    }
+    const accounts = await prisma.channelAccount.findMany({ where: {
+      workspaceId, channelKind: 'manual', archivedAt: null, authCheckedAt: { not: null },
+      displayName: { in: ['人工测试账号', '专栏人工账号'] },
+    } });
+    assert.equal(accounts.length, 2);
+    const { data: queued } = await post(own + '/tasks', { variantIds: variants.map(({ id }) => id),
+      accountIds: accounts.map(({ id }) => id), scheduledAt: new Date(Date.now() + 5 * 60_000).toISOString() });
+    assert.equal(queued.items.length, 2);
+    const initialTask = queued.items[0];
+    await prisma.publishTask.update({ where: { id: initialTask.id }, data: { scheduledAt: new Date(0) } });
+    assert.equal(await worker.get(TasksService).dispatchDue(), 1);
+    const replacement = await upload(video(2));
+    assert.equal(replacement.pausedTaskCount, 1);
+    const { data: revised } = await call(source, { cookie });
+    assert.equal(revised.assets.length, 1);
+    assert.equal(revised.videoAsset.id, replacement.video.id);
+    const drafts = revised.variants.filter(({ status }) => status === 'draft');
+    assert.equal(drafts.length, 2);
+    assert.ok(drafts.every(({ videoAsset }) => videoAsset.id === replacement.video.id));
+    const { data: handoff } = await call(own + '/tasks/' + initialTask.id + '/handoff', { cookie });
+    assert.equal(handoff.video.id, uploaded.video.id);
+    await assert.rejects(prisma.variant.update({ where: { id: variants[0].id }, data: { videoAssetId: replacement.video.id } }));
+  });
 });

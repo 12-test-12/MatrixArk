@@ -26,6 +26,16 @@ export class AssetsController {
     res.send(data);
   }
 
+  @Get(':id/video')
+  async video(@Param('workspaceId') workspaceId: string, @Param('id') id: string, @Res() res: Response) {
+    const asset = await this.prisma.asset.findFirst({ where: { id, workspaceId, kind: 'manuscript_video' } });
+    if (!asset) throw new NotFoundException('视频不存在');
+    res.setHeader('content-type', 'video/mp4');
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('cache-control', 'private, max-age=300');
+    res.sendFile(this.storage.videoPath(workspaceId, asset.storageKey), { acceptRanges: true });
+  }
+
   @Get(':id/thumbnail')
   async thumbnail(
     @Param('workspaceId') workspaceId: string,

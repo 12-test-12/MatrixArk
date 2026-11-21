@@ -147,7 +147,7 @@ export class NotificationsService {
       const delivery = await tx.notificationDelivery.findUnique({
         where: { id: candidate.id },
         include: { task: { include: {
-          variant: { select: { title: true, platform: true } }, account: { select: { displayName: true } },
+          variant: { select: { title: true, platform: true, videoAssetId: true } }, account: { select: { displayName: true } },
         } }, workspace: { select: { notificationSetting: true, name: true } } },
       });
       if (!delivery) return;
@@ -171,7 +171,7 @@ export class NotificationsService {
       });
       const { variant, account } = delivery.task;
       const headline = delivery.kind === 'handoff_ready' ? '发布任务待交接处理' : '发布任务交接后 4 小时仍未回填';
-      const platform = variant.platform === 'xiaohongshu' ? '小红书' : 'B 站专栏';
+      const platform = variant.platform === 'xiaohongshu' ? '小红书' : variant.videoAssetId ? 'B 站视频' : 'B 站专栏';
       const text = [`MatrixArk · ${headline}`, `${delivery.workspace.name} · ${platform} · ${account.displayName}`,
         variant.title, '请在工作台打开「发布任务 → 待回填」查看并处理。',
         ...(config.publicBaseUrl ? [config.publicBaseUrl] : [])].join('\n').replaceAll('<', '＜').replaceAll('>', '＞');
