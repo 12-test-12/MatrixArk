@@ -134,4 +134,30 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   assert.deepEqual(lastPage.items.map(({ id }) => id), [task.id]);
   assert.equal(lastPage.nextCursor, null);
   await call(own + '/tasks?status=scheduled&cursor=' + firstPage.nextCursor, { cookie, status: 400 });
+
+  await t.test('B 站专栏用同平台人工账号交接及回填', async () => {
+    const { data: bilibili } = await post(own + '/accounts', {
+      platform: 'bilibili', channelKind: 'manual', displayName: '专栏人工账号',
+    });
+    const { data: official } = await post(own + '/accounts', {
+      platform: 'bilibili', channelKind: 'official', displayName: '专栏官方账号',
+    });
+    const { data: [article] } = await post(source + '/generate', { platforms: ['bilibili'] });
+    await post(own + '/variants/' + article.id + '/confirm', {});
+    const articleSchedule = { variantIds: [article.id], accountIds: [bilibili.id], scheduledAt };
+    await post(own + '/tasks', { ...articleSchedule, accountIds: [account.id] }, 400);
+    await post(own + '/tasks', { ...articleSchedule, accountIds: [official.id] }, 409);
+    const { data: { items: [articleTask] } } = await post(own + '/tasks', articleSchedule);
+    const articlePath = own + '/tasks/' + articleTask.id;
+    assert.equal(await worker.get(TasksService).dispatchDue(), 1);
+    const { data: articleHandoff } = await call(articlePath + '/handoff', { cookie });
+    assert.equal(articleHandoff.account.platform, 'bilibili');
+    assert.equal(articleHandoff.variantId, article.id);
+    const url = 'https://example.test/article';
+    await post(articlePath + '/result', { state: 'published', remoteUrl: url }, 200);
+    const { data: articleDetail } = await call(articlePath, { cookie });
+    assert.equal(articleDetail.executionChannel, 'manual');
+    assert.equal(articleDetail.status, 'published');
+    assert.equal(articleDetail.result.remoteUrl, url);
+  });
 });

@@ -45,26 +45,15 @@ small, .small { font-size: 12px; }
 .brand strong { display: block; font-size: 20px; font-weight: 780; letter-spacing: -.7px; line-height: 1.15; }
 .brand small { display: block; color: var(--muted); margin-top: 4px; font-size: 10.5px; }
 
-.auth { min-height: 100svh; display: grid; grid-template-columns: minmax(0, 1.06fr) minmax(340px, .94fr); background: var(--paper); }
-.auth-story { min-height: 660px; padding: clamp(32px, 5vw, 84px); position: relative; overflow: hidden; display: flex; flex-direction: column; gap: 60px; color: #fff; background: radial-gradient(ellipse at 92% 0%, #5943a5 0, transparent 52%), radial-gradient(ellipse at 6% 100%, #302778 0, transparent 55%), #21194c; isolation: isolate; }
-.auth-story::before { content: ""; pointer-events: none; position: absolute; inset: 0; z-index: -1; background-image: linear-gradient(90deg, #d7c9ff0d 1px, transparent 1px), linear-gradient(#d7c9ff0d 1px, transparent 1px); background-size: 42px 42px; mask-image: linear-gradient(145deg, #000 12%, transparent 85%); }
-.auth-story::after { content: ""; pointer-events: none; position: absolute; width: 37vw; height: 37vw; left: 66%; top: -19%; z-index: -1; border: 1px solid #d2c4ff20; border-radius: 50%; box-shadow: 0 0 0 37px #e1d9ff10, 0 0 0 74px #e1d9ff0a, 0 0 0 106px #e1d9ff08; }
-.auth-story .brand strong { font-size: 24px; }
-.story-content { padding: 0 0 3vh; max-width: 600px; margin-block: auto; }
-.story-content h1 { font-size: clamp(36px, 4.2vw, 67px); font-weight: 780; line-height: 1.28; letter-spacing: -.035em; }
-.story-period { color: #ae98ff; }
-.story-content > p { margin-top: 20px; max-width: 36ch; font-size: clamp(14px, 1.3vw, 18px); color: #e0d9f7; }
-.story-flow { display: flex; align-items: center; gap: clamp(6px, 1vw, 14px); max-width: 485px; margin-top: 40px; color: #c7baf4; }
-.story-flow > div { display: grid; justify-items: center; gap: 8px; flex: 1 1 75px; min-width: 0; padding: 15px 5px; border-radius: 12px; border: 1px solid #e2d5ff2b; background: #d9cdff13; color: #eee7ff; font-size: 12px; }
-.auth-panel { display: grid; place-items: center; padding: 32px clamp(24px, 5vw, 84px); }
-.auth-form { width: min(100%, 390px); margin: auto; }
-.auth-icon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 12px; color: var(--accent); background: var(--accent-soft); margin-bottom: 19px; }
-.auth-form h2 { font-size: clamp(24px, 2.4vw, 32px); letter-spacing: -.035em; }
-.auth-form > p { margin: 8px 0 25px; color: var(--muted); }
-.auth-submit { width: 100%; justify-content: space-between; min-height: 45px; margin-top: 3px; }
-.auth-switch { text-align: center; display: flex; justify-content: center; gap: 6px; color: var(--muted); margin-top: 20px; }
+.auth-dialog { width: min(420px, calc(100% - 24px)); max-height: calc(100dvh - 24px); padding: clamp(18px, 5vw, 28px); border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); color: var(--ink); }
+.auth-dialog::backdrop { background: #1c213482; }
+body:has(.auth-dialog[open]) { overflow: hidden; }
+.auth-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 18px; }
+.auth-heading h2 { font-size: 22px; }
+.auth-fields { display: grid; gap: 12px; width: 100%; min-inline-size: 0; margin: 0; padding: 0; border: 0; }
+.auth-submit { width: 100%; justify-content: space-between; min-height: 44px; margin-top: 3px; }
+.auth-switch { text-align: center; display: flex; justify-content: center; gap: 6px; color: var(--muted); margin-top: 17px; }
 .boot { min-height: 100svh; display: grid; gap: 10px; align-content: center; justify-items: center; }
-.auth-preview { display: flex; margin: 15px auto 0; }
 
 .shell { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100svh; }
 .sidebar { position: sticky; top: 0; align-self: start; min-height: 100svh; display: flex; flex-direction: column; padding: 22px 15px 16px; gap: 22px; background: var(--paper); border-right: 1px solid var(--line); }
@@ -177,6 +166,7 @@ textarea { resize: vertical; }
 .picture-tools .text-button { font-size: 11px; }
 .source-pictures { grid-template-columns: repeat(auto-fill, minmax(65px, 1fr)); max-width: 460px; }
 .platform-icon { display: grid; place-items: center; width: 26px; height: 26px; flex: 0 0 auto; border-radius: 7px; color: #a72b46; background: #ffe9ef; font-size: 11px; font-weight: 740; }
+.platform-icon.bilibili { color: #236697; background: #e2f4fc; }
 .variant-heading { padding-top: 12px; border-top: 1px solid var(--line); }
 .variant-preview { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #faf9ff; }
 .variant-preview h3 { font-size: 16px; }
@@ -206,6 +196,8 @@ textarea { resize: vertical; }
 .filters button { min-height: 34px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); padding: 5px 10px; font-size: 12px; font-weight: 650; }
 .filters button:hover { color: var(--accent); }
 .filters button.active { border-color: #e1d9ff; background: var(--accent-soft); color: #4c37bc; }
+.platform-options { margin: 0; }
+.platform-options small { margin-left: 5px; color: var(--muted); font-size: 11px; }
 .task-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 0; padding: 10px 12px; border-radius: 8px; background: #f7f8fc; }
 .task-meta dt { color: var(--muted); font-size: 11px; }
 .task-meta dd { margin: 2px 0 0; font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
@@ -240,19 +232,6 @@ textarea { resize: vertical; }
   .page-heading { margin-bottom: 13px; }
   .page-heading p { font-size: 12px; }
   .empty-detail .empty { min-height: 225px; }
-  .auth { grid-template-columns: minmax(0, 1fr); }
-  .auth-story { min-height: auto; padding: 20px 22px 25px; gap: 22px; }
-  .auth-story::after { width: 60vw; height: 60vw; }
-  .story-content { padding: 0; }
-  .story-content h1 { font-size: clamp(25px, 6vw, 38px); }
-  .story-content h1 br { display: none; }
-  .story-content > p { margin-top: 8px; font-size: 13px; }
-  .story-flow { margin-top: 14px; }
-  .story-flow > div { display: flex; justify-content: center; align-items: center; gap: 5px; padding: 7px 3px; }
-  .story-flow > div > svg { width: 15px; height: 15px; }
-  .auth-panel { padding: 24px 20px 35px; }
-  .auth-icon { display: none; }
-  .auth-form > p { margin-bottom: 15px; }
 }
 @media (max-width: 440px) {
   .detail-heading, .detail-content, .form-card { padding: 12px; }

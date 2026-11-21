@@ -3,10 +3,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export type Role = 'owner' | 'editor' | 'reviewer' | 'operator' | 'viewer';
 export type Workspace = { id: string; name: string; role: Role };
 export type Session = { user: { id: string; name: string; email: string }; workspaces: Workspace[] };
-export type Account = { id: string; platform: 'xiaohongshu' | 'bilibili'; channelKind: string; displayName: string; operator?: string | null };
+export const platforms = ['xiaohongshu', 'bilibili'] as const;
+export type Platform = (typeof platforms)[number];
+export const platformLabel: Record<Platform, string> = { xiaohongshu: '小红书', bilibili: 'B 站专栏' };
+export const channelLabel = { manual: '人工交接', official: '官方通道 · 待接入', sandbox: '沙箱' };
+export type Account = {
+  id: string; platform: Platform; channelKind: keyof typeof channelLabel; displayName: string; operator?: string | null;
+};
 export type Approval = { approvedAt: string; snapshotHash: string | null };
 export type Picture = { assetId: string; position: number; isCover: boolean };
-export type VariantSummary = { id: string; platform: Account['platform']; status: 'draft' | 'approved' | 'superseded'; version: number };
+export type VariantSummary = { id: string; platform: Platform; status: 'draft' | 'approved' | 'superseded'; version: number };
 export type Variant = VariantSummary & {
   title: string; body: string; tags: string[]; assets: Picture[]; snapshotVersion: number;
   approval: Approval | null;
@@ -27,7 +33,7 @@ export type Result = {
 export type Task = {
   id: string; status: TaskStatus; scheduledAt: string; handedOffAt: string | null; lastError: string | null;
   executionChannel: string | null; isSandbox: boolean | null;
-  account: Account; variant: Pick<Variant, 'id' | 'title' | 'platform' | 'version'>;
+  account: Omit<Account, 'channelKind'>; variant: Pick<Variant, 'id' | 'title' | 'platform' | 'version'>;
   result: Result | null;
 };
 export type TaskDetail = Task & {

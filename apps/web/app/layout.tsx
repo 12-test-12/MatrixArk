@@ -4,7 +4,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'MatrixArk · 内容工作台',
-  description: '管理稿件、审核与小红书发布任务。',
+  description: '管理原稿、多平台审核、发布任务和回执。',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

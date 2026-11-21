@@ -13,7 +13,7 @@ export type Section = keyof typeof navigation;
 
 export const roleView: Record<Role, { sections: readonly [Section, ...Section[]]; taskStatus?: TaskStatus; description: string }> = {
   owner: { sections: ['tasks', 'manuscripts', 'accounts', 'members'], description: '查看发布进度和待核实的任务，管理工作室成员。' },
-  editor: { sections: ['manuscripts', 'tasks', 'accounts'], description: '整理原稿与配图，生成小红书版本，为已审稿件排期。' },
+  editor: { sections: ['manuscripts', 'tasks', 'accounts'], description: '整理原稿与配图，生成各平台版本，为已审稿件排期。' },
   reviewer: { sections: ['manuscripts', 'tasks'], description: '检查待审核版本的文案、配图和封面。' },
   operator: { sections: ['tasks', 'manuscripts'], taskStatus: 'handed_off', description: '取用已审交接包，发布后补填作品链接或截图。' },
   viewer: { sections: ['tasks', 'manuscripts'], taskStatus: 'published', description: '查阅原稿、发布进度和回执。' },

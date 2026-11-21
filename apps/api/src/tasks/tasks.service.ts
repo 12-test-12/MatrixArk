@@ -33,7 +33,7 @@ const publishableVariant = {
 } as const satisfies Prisma.VariantInclude;
 
 function canUseAccount(account: ChannelAccount, now: Date) {
-  return account.platform === 'xiaohongshu' && account.channelKind === 'manual'
+  return account.channelKind === 'manual'
     && !account.archivedAt && ['active', 'pending'].includes(account.authStatus)
     && (!account.rateLimitedUntil || account.rateLimitedUntil <= now);
 }
@@ -84,13 +84,13 @@ export class TasksService {
       if (!(await lockRow(tx, 'account', workspaceId, accountId))) throw new NotFoundException('账号不存在');
       const variant = await tx.variant.findUniqueOrThrow({ where: { id: variantId }, include: publishableVariant });
       const account = await tx.channelAccount.findUniqueOrThrow({ where: { id: accountId } });
-      if (variant.platform !== 'xiaohongshu' || account.platform !== variant.platform) {
-        throw new BadRequestException('请选择小红书版本及同平台账号');
+      if (account.platform !== variant.platform) {
+        throw new BadRequestException('平台版本与发布账号必须属于同一平台');
       }
       const existing = await tx.publishTask.findUnique({ where: { accountId_variantId: { accountId, variantId } } });
       if (existing) return { task: existing, disposition: 'existing' as const };
       if (!hasApproval(variant)) throw new ConflictException('版本需要有效审核');
-      if (!canUseAccount(account, await databaseTime(tx))) throw new ConflictException('小红书人工账号当前不可用');
+      if (!canUseAccount(account, await databaseTime(tx))) throw new ConflictException('该账号当前无法用于人工交接');
 
       const task = await tx.publishTask.create({
         data: {
@@ -231,8 +231,7 @@ export class TasksService {
     const candidates = await this.prisma.publishTask.findMany({
       where: {
         status: 'scheduled', scheduledAt: { lte: await databaseTime(this.prisma) },
-        variant: { platform: 'xiaohongshu' },
-        OR: [{ executionChannel: null }, { executionChannel: 'manual' }],
+        OR: [{ executionChannel: 'manual' }, { executionChannel: null, account: { channelKind: 'manual' } }],
       },
       orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
       take: 50,
@@ -261,7 +260,7 @@ export class TasksService {
       const variant = await tx.variant.findUniqueOrThrow({ where: { id: variantId }, include: publishableVariant });
       const account = await tx.channelAccount.findUniqueOrThrow({ where: { id: accountId } });
       if (!hasApproval(variant) || variant.contentHash !== task.variantContentHash || !canUseAccount(account, now)) {
-        const reason = '审核快照失效或小红书人工账号不可用';
+        const reason = '审核快照失效或人工账号不可用';
         assertTransition(task.status, 'paused');
         await tx.publishTask.update({ where: { id }, data: { status: 'paused', lastError: reason } });
         await tx.taskEvent.create({

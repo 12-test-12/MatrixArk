@@ -1,6 +1,10 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { AlertCircle, CheckCircle2, ImageOff, Layers3, LoaderCircle, X, type LucideIcon } from 'lucide-react';
-import { taskLabel, type TaskStatus } from './api';
+import { taskLabel, type Platform, type TaskStatus } from './api';
+
+export function PlatformIcon({ platform }: { platform: Platform }) {
+  return <span className={`platform-icon ${platform}`} aria-hidden="true">{platform === 'xiaohongshu' ? '红' : 'B'}</span>;
+}
 
 export function Brand({ detail = false }: { detail?: boolean }) {
   return <div className="brand">

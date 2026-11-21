@@ -4,10 +4,10 @@ import {
   ShieldCheck, Sparkles,
 } from 'lucide-react';
 import {
-  api, canEdit, canReview, fileBody, formatTime, imageUrl, post, useAction, useResource,
-  type Account, type Manuscript, type ManuscriptSummary, type Role, type Variant,
+  api, canEdit, canReview, fileBody, formatTime, imageUrl, platformLabel, platforms, post, useAction, useResource,
+  type Account, type Manuscript, type ManuscriptSummary, type Platform, type Role, type Variant,
 } from './api';
-import { Empty, Feedback, Loading, PageHeader, ReviewPicture } from './ui';
+import { Empty, Feedback, Loading, PageHeader, PlatformIcon, ReviewPicture } from './ui';
 
 function variantLabel(variant?: Pick<Variant, 'status'>) {
   return variant?.status === 'approved' ? '已审核' : variant ? '待审核' : '未生成';
@@ -30,7 +30,7 @@ function textFields({ title, body, tags }: ReturnType<typeof rawFields>) {
   };
 }
 
-export type ManuscriptDrafts = Map<string, { fields: ReturnType<typeof rawFields>; assetIds?: string[] }>;
+export type ManuscriptDrafts = Map<string, { fields: ReturnType<typeof rawFields>; assetIds?: string[]; coverAssetId?: string | null }>;
 
 function TextFields({ values, disabled }: { values?: ReturnType<typeof rawFields>; disabled: boolean }) {
   return <>
@@ -81,9 +81,17 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
   const form = useRef<HTMLFormElement>(null);
   const [initial] = useState(() => drafts.get(draftKey));
   const [assetIds, setAssetIds] = useState(() => initial?.assetIds ?? variant.assets.map((asset) => asset.assetId));
+  const firstImageIsCover = variant.platform === 'xiaohongshu';
+  const [coverAssetId, setCoverAssetId] = useState(() => initial?.coverAssetId === undefined
+    ? variant.assets.find(({ isCover }) => isCover)?.assetId ?? null : initial.coverAssetId);
+  function keepDraft(next: string[], cover: string | null) {
+    if (form.current) drafts.set(draftKey, { fields: rawFields(form.current), assetIds: next, coverAssetId: cover });
+  }
   function updatePictures(next: string[]) {
+    const nextCover = coverAssetId && next.includes(coverAssetId) ? coverAssetId : null;
     setAssetIds(next);
-    if (form.current) drafts.set(draftKey, { fields: rawFields(form.current), assetIds: next });
+    setCoverAssetId(nextCover);
+    keepDraft(next, nextCover);
   }
   function move(index: number, offset: number) {
     const next = [...assetIds];
@@ -95,7 +103,9 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
     const body = textFields(rawFields(event.currentTarget));
     const submitted = drafts.get(draftKey);
     void action.run(async () => {
-      await api(scope + '/variants/' + variant.id, { method: 'PATCH', body: { ...body, assetIds } });
+      await api(scope + '/variants/' + variant.id, {
+        method: 'PATCH', body: { ...body, assetIds, coverAssetId: firstImageIsCover ? undefined : coverAssetId },
+      });
       if (drafts.get(draftKey) === submitted) drafts.delete(draftKey);
       onSave();
     });
@@ -103,17 +113,17 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
   const available = assets.filter((asset) => !assetIds.includes(asset.id));
   return <form ref={form} className="form-stack" onSubmit={submit} onInput={(event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
-      drafts.set(draftKey, { fields: rawFields(event.currentTarget), assetIds });
+      keepDraft(assetIds, coverAssetId);
     }
   }}>
     <TextFields values={initial?.fields ?? { ...variant, tags: variant.tags.join('，') }} disabled={action.busy} />
     <div className="field-group">
       <h3>发布图片</h3>
-      <p className="muted">首图是小红书封面。调整图片会生成待审核的新版本。</p>
+      <p className="muted">{firstImageIsCover ? '首图为封面。' : ''}调整图片会生成待审核的新版本。</p>
       <div className="picture-grid editing">
         {assetIds.map((id, index) => <div className="picture" key={id}>
           <ReviewPicture src={imageUrl(scope, id)} label={`发布图片 ${index + 1}`} />
-          {index === 0 && <span className="picture-label">封面</span>}
+          {(firstImageIsCover ? index === 0 : id === coverAssetId) && <span className="picture-label">封面</span>}
           <div className="picture-tools">
             <button className="icon-button" type="button" aria-label={`上移第 ${index + 1} 张图片`} disabled={action.busy || index === 0} onClick={() => move(index, -1)}><ArrowUp size={14} aria-hidden="true" /></button>
             <button className="icon-button" type="button" aria-label={`下移第 ${index + 1} 张图片`} disabled={action.busy || index === assetIds.length - 1} onClick={() => move(index, 1)}><ArrowDown size={14} aria-hidden="true" /></button>
@@ -121,6 +131,16 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
           </div>
         </div>)}
       </div>
+      {!firstImageIsCover && assetIds.length > 0 && <label>封面
+        <select value={coverAssetId ?? ''} disabled={action.busy} onChange={(event) => {
+          const cover = event.target.value || null;
+          setCoverAssetId(cover);
+          keepDraft(assetIds, cover);
+        }}>
+          <option value="">不指定封面</option>
+          {assetIds.map((id, index) => <option key={id} value={id}>第 {index + 1} 张图</option>)}
+        </select>
+      </label>}
       {available.length > 0 && <label>从原稿添加图片
         <select value="" disabled={action.busy} onChange={(event) => updatePictures([...assetIds, event.target.value])}>
           <option value="" disabled>选择原稿图片</option>
@@ -166,7 +186,7 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
     <h3><CalendarPlus size={17} aria-hidden="true" />排期交接</h3>
     {accounts.length ? <form className="form-stack" onSubmit={submit}>
       <div className="form-row">
-        <label>小红书账号<select name="accountId" required defaultValue={accounts.length === 1 ? accounts[0]!.id : ''}>
+        <label>{platformLabel[variant.platform]}账号<select name="accountId" required defaultValue={accounts.length === 1 ? accounts[0]!.id : ''}>
           <option value="" disabled>选择人工账号</option>
           {accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}
         </select></label>
@@ -176,7 +196,8 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
       </div>
       <Feedback error={action.error} />
       <button className="button primary" disabled={action.busy}>确认排期<ChevronRight size={15} aria-hidden="true" /></button>
-    </form> : <p className="muted">排期前需要 <button type="button" className="text-button" onClick={openAccounts}>添加人工账号</button>。</p>}
+    </form> : <p className="muted">排期前需要 <button type="button" className="text-button" onClick={openAccounts}>
+      添加{platformLabel[variant.platform]}人工账号</button>。</p>}
   </div>;
 }
 
@@ -188,15 +209,24 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
   const detail = useResource<Manuscript>(scope + '/manuscripts/' + id);
   const action = useAction();
   const [editing, setEditing] = useState<boolean | null>(null);
+  const [selectedPlatform, setPlatform] = useState<Platform>();
   const manuscript = detail.data;
-  const variant = manuscript?.variants.find((item) => item.platform === 'xiaohongshu' && item.status !== 'superseded');
+  const currentVariants = manuscript?.variants.filter(({ status }) => status !== 'superseded') ?? [];
+  const pending = role === 'reviewer' ? currentVariants.find(({ status }) => status === 'draft') : undefined;
+  const platform = selectedPlatform ?? pending?.platform
+    ?? platforms.find((candidate) => currentVariants.some((variant) => variant.platform === candidate)) ?? platforms[0];
+  const variant = currentVariants.find((item) => item.platform === platform);
   const draftKey = scope + '/variants/' + variant?.id;
   const check = useResource<{ issues: { code: string; message: string }[] }>(variant ? scope + '/variants/' + variant.id + '/check' : null);
   const editable = canEdit(role);
   const approved = variant?.status === 'approved' && Boolean(variant.approval?.snapshotHash) && variant.snapshotVersion === 1;
   function refresh() { detail.refresh(); changed(); }
-  function generate() {
-    void action.run(async () => { await post(scope + '/manuscripts/' + id + '/generate', { platforms: ['xiaohongshu'] }); refresh(); }, '已生成平台版本。');
+  function generate(targets: readonly Platform[]) {
+    void action.run(async () => {
+      await post(scope + '/manuscripts/' + id + '/generate', { platforms: targets });
+      setPlatform(platform);
+      refresh();
+    }, '已生成平台版本。');
   }
   function approve() {
     if (!variant || !manuscript) return;
@@ -242,16 +272,30 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
         {manuscript.assets.map((asset) => <div className="picture" key={asset.id}>
           <ReviewPicture src={imageUrl(scope, asset.id)} label={asset.filename} />
         </div>)}
-      </div> : <p className="muted small">小红书图文至少需要 1 张配图。</p>}
+      </div> : <p className="muted small">暂无配图。小红书图文至少需要 1 张。</p>}
       <div className="section-line variant-heading">
-        <h3><span className="platform-icon" aria-hidden="true">红</span>小红书版本</h3>
+        <h3><PlatformIcon platform={platform} />{platformLabel[platform]}版本</h3>
         {variant && <span className={`badge ${approved ? 'green' : 'amber'}`}>{approved ? '已审核' : '待审核'}</span>}
+      </div>
+      <div className="filters platform-options" role="group" aria-label="按平台查看版本">
+        {platforms.map((candidate) => {
+          const current = currentVariants.find((version) => version.platform === candidate);
+          return <button type="button" key={candidate} className={platform === candidate ? 'active' : ''}
+            aria-pressed={platform === candidate} disabled={action.busy} onClick={() => {
+              if (platform === candidate) return;
+              action.reset(); setPlatform(candidate); setEditing(null);
+            }}>{platformLabel[candidate]} <small>{variantLabel(current)}</small></button>;
+        })}
       </div>
       {!variant ? <div className="sub-empty">
         <p>生成平台版本后，可检查文案、图片顺序和封面。</p>
-        {editable && <button type="button" className="button primary" disabled={action.busy} onClick={generate}>
-          <Sparkles size={16} aria-hidden="true" />生成小红书版本
-        </button>}
+        {editable && <div className="actions">
+          <button type="button" className="button primary" disabled={action.busy} onClick={() => generate([platform])}>
+            <Sparkles size={16} aria-hidden="true" />生成{platformLabel[platform]}版本
+          </button>
+          {!currentVariants.length && <button type="button" className="button" disabled={action.busy}
+            onClick={() => generate(platforms)}>一次生成两个平台版本</button>}
+        </div>}
       </div> : editable && (editing ?? drafts.has(draftKey)) ? <EditVersion key={variant.id} scope={scope} variant={variant}
         assets={manuscript.assets} drafts={drafts} draftKey={draftKey}
         onSave={() => { setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />
@@ -285,7 +329,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
           </div>
           {approved && editable && <>{accounts.loading ? <Loading /> : accounts.error ? <Feedback error={accounts.error} />
             : <Schedule key={variant.id} scope={scope} variant={variant} onSchedule={onSchedule} openAccounts={openAccounts}
-              accounts={accounts.data?.filter((account) => account.platform === 'xiaohongshu' && account.channelKind === 'manual') ?? []} />}</>}
+              accounts={accounts.data?.filter((account) => account.platform === platform && account.channelKind === 'manual') ?? []} />}</>}
         </>}
     </div>
   </section>;
@@ -304,14 +348,14 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
   const [creating, setCreating] = useState(() => canEdit(role) && drafts.has(draftKey));
   const allItems = list.data ?? [];
   const items = pendingOnly ? allItems.filter(({ variants }) =>
-    variants.some(({ platform, status }) => platform === 'xiaohongshu' && status === 'draft')) : allItems;
+    variants.some(({ status }) => status === 'draft')) : allItems;
   const selected = !pendingOnly || items.some(({ id }) => id === selection) ? selection : '';
   const active = selected || items[0]?.id || '';
   const start = () => setCreating(true);
   return <>
     <PageHeader title={pendingOnly ? '待审核原稿' : '原稿与审核'}
-      description={role === 'reviewer' ? '检查小红书版本的文案、配图和封面。' : canEdit(role)
-        ? '整理原稿与配图，确认可以交接的小红书版本。' : '查阅原稿和对应的小红书版本。'}>
+      description={role === 'reviewer' ? '按平台审核文案、配图和封面。' : canEdit(role)
+        ? '从一篇原稿生成各平台版本，分别审核并排期。' : '查阅原稿和各平台版本。'}>
       {canEdit(role) && items.length > 0 && <button className="button primary" onClick={start}><Plus size={18} aria-hidden="true" />新建原稿</button>}
     </PageHeader>
     {role === 'reviewer' && <div className="filters" aria-label="按审核状态筛选">
@@ -325,11 +369,13 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
       <section className="card item-list">
         <div className="card-heading"><h2>原稿列表</h2><span className="count">{items.length}</span></div>
         {list.loading ? <Loading /> : items.length > 0 ? items.map((item) => {
-          const variant = item.variants.find((candidate) => candidate.platform === 'xiaohongshu' && candidate.status !== 'superseded');
+          const variants = item.variants.filter(({ status }) => status !== 'superseded');
+          const pending = variants.filter(({ status }) => status === 'draft').length;
           return <button key={item.id} className={`list-item ${active === item.id && !creating ? 'selected' : ''}`}
             aria-pressed={active === item.id && !creating} onClick={() => { setSelection(item.id); setCreating(false); setReviewNotice(''); }}>
             <span className="list-icon"><FileText size={18} aria-hidden="true" /></span>
-            <span className="list-copy"><strong>{item.title}</strong><small>{item.assetCount} 张图片 · {variantLabel(variant)}</small></span>
+            <span className="list-copy"><strong>{item.title}</strong><small>{item.assetCount} 张图片 · {variants.length
+              ? `${variants.length} 个版本 · ${pending ? `${pending} 个待审核` : '已审核'}` : '未生成版本'}</small></span>
             <ChevronRight size={15} aria-hidden="true" />
           </button>;
         }) : <Empty icon={FileText} title={pendingOnly ? '暂无待审核原稿' : '暂无原稿'} />}
@@ -341,8 +387,8 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
         onSchedule={openTasks} openAccounts={openAccounts} />
         : <section className="card detail-pane empty-detail">
           {list.loading ? <Loading /> : <Empty icon={FileText} title={canEdit(role) ? '开始你的第一篇原稿' : '暂无原稿可查看'}
-            description={pendingOnly ? '编辑生成小红书版本后会出现在这里。' : canEdit(role)
-              ? '添加标题、正文和图片，然后生成可以送审的小红书图文。' : '工作室有原稿后，可在这里查看。'}>
+            description={pendingOnly ? '编辑生成平台版本后会出现在这里。' : canEdit(role)
+              ? '添加标题、正文和图片，然后生成各平台版本。' : '工作室有原稿后，可在这里查看。'}>
             {canEdit(role) && <button className="button primary" onClick={start}><Plus size={17} aria-hidden="true" />新建原稿</button>}
           </Empty>}
         </section>}
