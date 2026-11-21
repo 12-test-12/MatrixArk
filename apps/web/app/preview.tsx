@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ArrowRight, CalendarDays, ChevronRight, ClipboardCheck, FileText, Radio, Send } from 'lucide-react';
 import { roleLabel, type Role, type TaskStatus } from './api';
-import { PageHeader, TaskBadge } from './ui';
+import { Empty, PageHeader, TaskBadge } from './ui';
 import { roleView, Workbench, type Section } from './workbench';
 
 const samples = [
@@ -58,10 +58,19 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
   const items = manuscripts
     ? samples.filter((sample) => role !== 'reviewer' || !sample.approved).map((manuscript) => ({ manuscript, task: undefined }))
     : tasks.filter((task) => !status || task.status === status).map((task) => ({ manuscript: task.manuscript, task }));
-  const active = items.find(({ manuscript }) => manuscript.id === selection) ?? items[0]!;
+  const active = items.find(({ manuscript }) => manuscript.id === selection) ?? items[0];
   const Icon = manuscripts ? FileText : CalendarDays;
   const title = manuscripts ? (role === 'reviewer' ? '待审核原稿' : '原稿与审核')
     : status === 'handed_off' ? '待回填任务' : status === 'published' ? '已发布任务' : '发布任务';
+  if (!active) {
+    return <>
+      <PageHeader title={title} description={section === roleView[role].sections[0] ? description :
+        manuscripts ? '查阅原稿和对应的小红书版本。' : '查看交接进度和发布回执。'} />
+      <section className="card detail-pane empty-detail">
+        <Empty icon={Icon} title={manuscripts ? '暂无示例原稿' : '暂无示例任务'} />
+      </section>
+    </>;
+  }
   return <>
     <PageHeader title={title} description={section === roleView[role].sections[0] ? description :
       manuscripts ? '查阅原稿和对应的小红书版本。' : '查看交接进度和发布回执。'} />

@@ -63,6 +63,7 @@ small, .small { font-size: 12px; }
 .auth-form > p { margin: 8px 0 25px; color: var(--muted); }
 .auth-submit { width: 100%; justify-content: space-between; min-height: 45px; margin-top: 3px; }
 .auth-switch { text-align: center; display: flex; justify-content: center; gap: 6px; color: var(--muted); margin-top: 20px; }
+.boot { min-height: 100svh; display: grid; gap: 10px; align-content: center; justify-items: center; }
 .auth-preview { display: flex; margin: 15px auto 0; }
 
 .shell { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100svh; }

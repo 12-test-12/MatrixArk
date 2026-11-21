@@ -159,6 +159,7 @@ export default function Home() {
     return () => { controller.abort(); window.removeEventListener('matrixark-session-expired', expired); };
   }, [drafts]);
 
+  if (session === undefined) return <main className="boot"><Brand /><Loading /></main>;
   if (!session) return showSignIn
     ? <SignIn initialError={startupError} onPreview={() => setShowSignIn(false)} onSession={(next) => {
       setSession(next); setShowSignIn(false); setStartupError(''); setSection(undefined); setWorkspaceId(''); setTaskId('');

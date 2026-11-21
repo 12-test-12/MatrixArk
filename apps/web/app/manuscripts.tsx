@@ -183,7 +183,7 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
 function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApproved, onSchedule, openAccounts }: {
   scope: string; role: Role; id: string; accounts: ReturnType<typeof useResource<Account[]>>;
   drafts: ManuscriptDrafts;
-  changed: () => void; onApproved?: () => void; onSchedule: (id: string) => void; openAccounts: () => void;
+  changed: () => void; onApproved?: (title: string) => void; onSchedule: (id: string) => void; openAccounts: () => void;
 }) {
   const detail = useResource<Manuscript>(scope + '/manuscripts/' + id);
   const action = useAction();
@@ -199,12 +199,12 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
     void action.run(async () => { await post(scope + '/manuscripts/' + id + '/generate', { platforms: ['xiaohongshu'] }); refresh(); }, '已生成平台版本。');
   }
   function approve() {
-    if (!variant) return;
+    if (!variant || !manuscript) return;
     void action.run(async () => {
       await post(scope + '/variants/' + variant.id + '/confirm', {});
       check.refresh();
       refresh();
-      onApproved?.();
+      onApproved?.(manuscript.title);
     }, onApproved ? '' : '已确认当前版本。');
   }
   function upload(files: File[]) {
@@ -337,7 +337,7 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
       {creating ? <NewManuscript scope={scope} drafts={drafts} draftKey={draftKey} onCancel={() => setCreating(false)} onSave={(id) => {
         setSelection(id); setCreating(false); list.refresh();
       }} /> : active ? <ManuscriptDetail key={active} scope={scope} role={role} id={active} accounts={accounts} drafts={drafts}
-        changed={list.refresh} onApproved={pendingOnly ? () => setReviewNotice('已确认当前版本。') : undefined}
+        changed={list.refresh} onApproved={pendingOnly ? (title) => setReviewNotice(`「${title}」已确认审核。`) : undefined}
         onSchedule={openTasks} openAccounts={openAccounts} />
         : <section className="card detail-pane empty-detail">
           {list.loading ? <Loading /> : <Empty icon={FileText} title={canEdit(role) ? '开始你的第一篇原稿' : '暂无原稿可查看'}
