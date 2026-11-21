@@ -411,4 +411,58 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(simulated.status, 'published');
     assert.equal(simulated.remoteUrl, 'https://example.invalid/sandbox-1');
   });
+
+  await t.test('同一原稿跨平台排期 50 个账号，重发去重，任一账号无效时整批拒绝', async () => {
+    const { data: draft } = await post(own + '/manuscripts', { title: '批量排期', body: '同一原稿', tags: [] });
+    const draftPath = own + '/manuscripts/' + draft.id;
+    await post(draftPath + '/assets', file(sourcePng));
+    const { data: variants } = await post(draftPath + '/generate', { platforms: ['xiaohongshu', 'bilibili'] });
+    for (const variant of variants) await post(own + '/variants/' + variant.id + '/confirm', {});
+    const targets = await prisma.channelAccount.createManyAndReturn({
+      data: Array.from({ length: 51 }, (_, index) => ({
+        workspaceId, displayName: `批量账号 ${index + 1}`, externalId: `batch-fixture-${index}`,
+        authCheckedAt: new Date(), authStatus: 'active', channelKind: 'manual',
+        platform: index % 2 === 0 ? 'xiaohongshu' : 'bilibili',
+      })),
+    });
+    const url = own + '/tasks';
+    const variantIds = variants.map(({ id }) => id);
+    const accountIds = targets.slice(0, 50).map(({ id }) => id);
+    const payload = { variantIds, accountIds, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() };
+    const first = targets[0];
+    const firstVariant = variants.find(({ platform }) => platform === first.platform);
+    const firstPair = { ...payload, variantIds: [firstVariant.id], accountIds: [first.id] };
+    const { data: { items: [existing] } } = await post(url, firstPair);
+
+    await post(url, { ...payload, accountIds: [...accountIds, unverified.id] }, 409);
+    assert.equal(await prisma.publishTask.count({ where: { variantId: { in: variantIds } } }), 1);
+    await post(url, { ...payload, variantIds: [firstVariant.id] }, 400);
+    const batch = await Promise.all([payload, {
+      ...payload, variantIds: [...variantIds].reverse(), accountIds: [...accountIds].reverse(),
+    }].map((body) => fetch(base + url, {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })));
+    assert.deepEqual(batch.map(({ status }) => status).sort(), [200, 201]);
+    const created = await batch.find(({ status }) => status === 201).json();
+    const repeated = await batch.find(({ status }) => status === 200).json();
+    assert.equal(created.items.length, 50);
+    assert.equal(created.items.filter(({ disposition }) => disposition === 'created').length, 49);
+    assert.equal(created.items.find(({ disposition }) => disposition === 'existing').id, existing.id);
+    assert.deepEqual(new Set(repeated.items.map(({ id }) => id)), new Set(created.items.map(({ id }) => id)));
+    for (const task of created.items) {
+      assert.equal(variants.find(({ id }) => id === task.variantId).platform,
+        targets.find(({ id }) => id === task.accountId).platform);
+    }
+    const additional = targets[50];
+    const { data: { items: [additionalTask] } } = await post(url, {
+      ...firstPair, accountIds: [additional.id],
+      variantIds: [variants.find(({ platform }) => platform === additional.platform).id],
+    });
+    assert.equal(additionalTask.accountId, additional.id);
+    const { data: accounts } = await call(own + '/accounts', { cookie });
+    assert.equal(accounts.find(({ id }) => id === additional.id).availableForHandoff, true);
+    assert.equal(await prisma.taskEvent.count({
+      where: { kind: 'created', task: { variantId: { in: variantIds } } },
+    }), 51);
+  });
 });

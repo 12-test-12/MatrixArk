@@ -179,6 +179,13 @@ textarea { resize: vertical; }
 .sub-empty p { flex: 1 1 190px; }
 .schedule, .task-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 11px; border-top: 1px solid var(--line); padding-top: 13px; min-width: 0; }
 .schedule .form-stack > .button { justify-self: start; }
+.schedule-accounts { display: grid; gap: 4px; width: 100%; min-width: 0; margin: 0; padding: 6px 10px;
+  border: 1px solid var(--line); border-radius: 8px; }
+.schedule-accounts legend { padding-inline: 4px; font-weight: 650; }
+.schedule-accounts > button { justify-self: start; }
+.schedule-accounts > label { grid-template-columns: auto minmax(0, 1fr); align-items: center; min-height: 28px;
+  gap: 8px; overflow-wrap: anywhere; }
+.schedule-accounts input[type=checkbox] { width: 16px; min-height: 0; height: 16px; margin: 0; padding: 0; accent-color: var(--accent); }
 .account-row { display: flex; gap: 12px; align-items: center; padding: 13px 17px; border-bottom: 1px solid var(--line); }
 .account-row:last-child { border-bottom: 0; }
 .account-row > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }

@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, Controller, Get, HttpCode, NotFoundException, Param, Post, Query, Res,
+  Body, Controller, Get, HttpCode, NotFoundException, Param, Post, Query, Res,
   UploadedFile, UseGuards, UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -38,13 +38,9 @@ export class TasksController {
   ) {
     assertCan(role, 'task:schedule');
     const input = parse(scheduleTasksSchema, body);
-    const variants = [...new Set(input.variantIds)];
-    const accounts = [...new Set(input.accountIds)];
-    if (variants.length !== 1 || accounts.length !== 1) throw new BadRequestException('每次排期请选择一个版本和一个账号');
-    const { task, disposition } = await this.tasks.schedule(workspaceId, user.id, variants[0]!, accounts[0]!, input.scheduledAt);
-    const { id, accountId, variantId, status, scheduledAt } = task;
-    response.status(disposition === 'created' ? 201 : 200);
-    return { items: [{ id, accountId, variantId, status, scheduledAt, disposition }] };
+    const items = await this.tasks.schedule(workspaceId, user.id, input);
+    response.status(items.some(({ disposition }) => disposition === 'created') ? 201 : 200);
+    return { items };
   }
 
   @Get()

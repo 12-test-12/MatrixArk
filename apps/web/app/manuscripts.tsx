@@ -190,10 +190,17 @@ function localDateTime() {
   return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
-function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
-  scope: string; variant: Variant; accounts: Account[]; onSchedule: (id: string) => void; openAccounts: () => void;
+function Schedule({ scope, variants, accounts, onSchedule, openAccounts }: {
+  scope: string; variants: Variant[]; accounts: Account[]; onSchedule: (id: string) => void; openAccounts: () => void;
 }) {
   const action = useAction();
+  const targets = accounts.filter((account) => (account.availableForHandoff || account.availableForOfficial)
+    && variants.some(({ platform }) => platform === account.platform));
+  const [selection, setSelection] = useState<string[]>([]);
+  const selected = targets.length === 1 ? targets : targets.filter(({ id }) => selection.includes(id));
+  function selectAccounts(ids: string[], checked: boolean) {
+    setSelection((current) => checked ? [...new Set([...current, ...ids])] : current.filter((id) => !ids.includes(id)));
+  }
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const fields = new FormData(event.currentTarget);
@@ -201,7 +208,9 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
       const date = new Date(String(fields.get('scheduledAt')));
       if (!Number.isFinite(date.getTime())) throw new Error('请选择有效的排期时间。');
       const response = await post<{ items: { id: string }[] }>(scope + '/tasks', {
-        variantIds: [variant.id], accountIds: [String(fields.get('accountId') ?? '')], scheduledAt: date.toISOString(),
+        variantIds: variants.filter(({ platform }) => selected.some((account) => account.platform === platform)).map(({ id }) => id),
+        accountIds: selected.map(({ id }) => id),
+        scheduledAt: date.toISOString(),
       });
       if (!response.items[0]) throw new Error('未收到任务编号。');
       onSchedule(response.items[0].id);
@@ -209,21 +218,33 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
   }
   return <div className="schedule">
     <h3><CalendarPlus size={17} aria-hidden="true" />安排发布</h3>
-    {accounts.length ? <form className="form-stack" onSubmit={submit}>
-      <div className="form-row">
-        <label>{platformLabel[variant.platform]}账号<select name="accountId" required defaultValue={accounts.length === 1 ? accounts[0]!.id : ''}>
-          <option value="" disabled>选择发布账号</option>
-          {accounts.map((account) => <option key={account.id} value={account.id}>
-            {account.displayName} · {account.channelKind === 'sandbox' ? '沙箱模拟' : account.availableForOfficial ? '自动投稿' : '人工交接'}
-          </option>)}
-        </select></label>
-        <label>排期时间 <small>{Intl.DateTimeFormat().resolvedOptions().timeZone}</small>
-          <input name="scheduledAt" type="datetime-local" required defaultValue={localDateTime()} />
-        </label>
-      </div>
+    {targets.length ? <form className="form-stack" onSubmit={submit}>
+      {variants.map((variant) => {
+        const group = targets.filter(({ platform }) => platform === variant.platform);
+        if (!group.length) return null;
+        const groupIds = group.map(({ id }) => id);
+        const allSelected = group.every(({ id }) => selection.includes(id));
+        return <fieldset className="schedule-accounts" key={variant.id} disabled={action.busy}>
+          <legend>{platformLabel[variant.platform]} · V{variant.version}</legend>
+          {group.length > 1 && <button type="button" className="text-button"
+            onClick={() => selectAccounts(groupIds, !allSelected)}>
+            {allSelected ? '取消全选' : '全选'}{platformLabel[variant.platform]}账号
+          </button>}
+          {group.map((account) => <label key={account.id}>
+            <input type="checkbox" checked={selected.some(({ id }) => id === account.id)} disabled={targets.length === 1}
+              onChange={(event) => selectAccounts([account.id], event.currentTarget.checked)} />
+            <span>{account.displayName} · {account.channelKind === 'sandbox' ? '沙箱模拟' : account.availableForOfficial ? '自动投稿' : '人工交接'}</span>
+          </label>)}
+        </fieldset>;
+      })}
+      <label>排期时间 <small>{Intl.DateTimeFormat().resolvedOptions().timeZone}</small>
+        <input name="scheduledAt" type="datetime-local" required disabled={action.busy} defaultValue={localDateTime()} />
+      </label>
       <Feedback error={action.error} />
-      <button className="button primary" disabled={action.busy}>确认排期<ChevronRight size={15} aria-hidden="true" /></button>
-    </form> : <p className="muted">当前没有可排期的{platformLabel[variant.platform]}账号。<button type="button" className="text-button" onClick={openAccounts}>
+      <button className="button primary" disabled={action.busy || selected.length === 0}>
+        {selected.length ? `为 ${selected.length} 个账号排期` : '选择账号后排期'}<ChevronRight size={15} aria-hidden="true" />
+      </button>
+    </form> : <p className="muted">已审版本暂无可用账号。<button type="button" className="text-button" onClick={openAccounts}>
       查看账号与授权状态</button>。</p>}
   </div>;
 }
@@ -248,7 +269,10 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
   const check = useResource<{ issues: { code: string; message: string }[] }>(snapshot ? scope + '/variants/' + snapshot.id + '/check' : null);
   const issues = Array.isArray(check.data?.issues) ? check.data.issues : undefined;
   const editable = canEdit(role);
-  const approved = snapshot?.status === 'approved' && Boolean(snapshot.approval?.snapshotHash) && snapshot.snapshotVersion === 1;
+  const approvedVersions = currentVariants.filter(hasSnapshot).filter((item) =>
+    item.status === 'approved' && Boolean(item.approval?.snapshotHash) && item.snapshotVersion === 1);
+  const approved = approvedVersions.some((item) => item.id === snapshot?.id);
+  const editingVersion = snapshot && editable && (editing ?? drafts.has(draftKey));
   function refresh() { detail.refresh(); changed(); }
   function generate(targets: readonly Platform[]) {
     const targetPlatform = targets.length === 1 ? targets[0]! : platform;
@@ -327,7 +351,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
           {!currentVariants.length && <button type="button" className="button" disabled={action.busy}
             onClick={() => generate(platforms)}>一次生成两个平台版本</button>}
         </div>}
-      </div> : snapshot && editable && (editing ?? drafts.has(draftKey)) ? <EditVersion key={snapshot.id} scope={scope} variant={snapshot}
+      </div> : snapshot && editingVersion ? <EditVersion key={snapshot.id} scope={scope} variant={snapshot}
         assets={manuscript.assets} drafts={drafts} draftKey={draftKey}
         onSave={() => { setPlatform(snapshot.platform); setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />
         : <>
@@ -365,11 +389,10 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
               {formatTime(snapshot.approval.approvedAt)} 确认
             </span>}
           </div>
-          {snapshot && approved && editable && <>{accounts.loading ? <Loading /> : accounts.error ? <Feedback error={accounts.error} />
-            : <Schedule key={snapshot.id} scope={scope} variant={snapshot} onSchedule={onSchedule} openAccounts={openAccounts}
-              accounts={accounts.data?.filter((account) => account.platform === platform
-                && (account.availableForHandoff || account.availableForOfficial)) ?? []} />}</>}
         </>}
+      {editable && !editingVersion && approvedVersions.length > 0 && (accounts.loading ? <Loading />
+        : accounts.error ? <Feedback error={accounts.error} /> : <Schedule scope={scope} variants={approvedVersions}
+          accounts={accounts.data ?? []} onSchedule={onSchedule} openAccounts={openAccounts} />)}
     </div>
   </section>;
 }

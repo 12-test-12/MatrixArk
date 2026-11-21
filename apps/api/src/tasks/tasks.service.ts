@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, type ChannelAccount, type PublishResult, type PublishTask, type TaskStatus } from '@prisma/client';
 import { ManualHandoffAdapter, resolveAdapter, validateBilibiliArticle, type PublishInput, type PublishReceipt } from '@matrixark/adapters';
-import { assertTransition, COMMITTED_STATUSES, idempotencyKey, type recordResultSchema } from '@matrixark/shared';
+import { assertTransition, COMMITTED_STATUSES, idempotencyKey, type recordResultSchema, type scheduleTasksSchema } from '@matrixark/shared';
 import type { z } from 'zod';
 import { bilibiliCredentials, publishChannel } from '../accounts/publish-account';
 import { config } from '../config';
@@ -17,11 +17,16 @@ const lockTables = {
   task: Prisma.sql`"PublishTask"`,
 };
 
-async function lockRow(tx: Prisma.TransactionClient, table: keyof typeof lockTables, workspaceId: string, id: string) {
+async function lockRows(tx: Prisma.TransactionClient, table: keyof typeof lockTables, workspaceId: string, ids: string[]) {
   const rows = await tx.$queryRaw<{ id: string }[]>`
-    SELECT id FROM ${lockTables[table]} WHERE "workspaceId" = ${workspaceId} AND id = ${id} FOR UPDATE
+    SELECT id FROM ${lockTables[table]}
+    WHERE "workspaceId" = ${workspaceId} AND id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE
   `;
-  return rows.length !== 0;
+  return rows.length === ids.length;
+}
+
+function lockRow(tx: Prisma.TransactionClient, table: keyof typeof lockTables, workspaceId: string, id: string) {
+  return lockRows(tx, table, workspaceId, [id]);
 }
 
 const taskRelations = {
@@ -88,44 +93,71 @@ export class TasksService {
 
   constructor(private readonly prisma: PrismaService, private readonly storage: StorageService) {}
 
-  async schedule(workspaceId: string, userId: string, variantId: string, accountId: string, scheduledAt: Date) {
+  async schedule(workspaceId: string, userId: string, input: z.infer<typeof scheduleTasksSchema>) {
+    const variantIds = [...new Set(input.variantIds)];
+    const accountIds = [...new Set(input.accountIds)];
     return this.prisma.$transaction(async (tx) => {
-      const source = await tx.variant.findFirst({ where: { id: variantId, workspaceId }, select: { manuscriptId: true } });
-      if (!source || !(await lockRow(tx, 'manuscript', workspaceId, source.manuscriptId))
-        || !(await lockRow(tx, 'variant', workspaceId, variantId))) throw new NotFoundException('版本不存在');
-      if (!(await lockRow(tx, 'account', workspaceId, accountId))) throw new NotFoundException('账号不存在');
-      const variant = await tx.variant.findUniqueOrThrow({ where: { id: variantId }, include: publishableVariant });
-      const account = await tx.channelAccount.findUniqueOrThrow({ where: { id: accountId } });
-      if (account.platform !== variant.platform) {
-        throw new BadRequestException('平台版本与发布账号必须属于同一平台');
+      const variantScope = { workspaceId, id: { in: variantIds } };
+      const accountScope = { workspaceId, id: { in: accountIds } };
+      const sources = await tx.variant.findMany({ where: variantScope, select: { manuscriptId: true } });
+      const manuscriptIds = [...new Set(sources.map(({ manuscriptId }) => manuscriptId))];
+      if (sources.length !== variantIds.length || !(await lockRows(tx, 'manuscript', workspaceId, manuscriptIds))
+        || !(await lockRows(tx, 'variant', workspaceId, variantIds))) throw new NotFoundException('版本不存在');
+      if (!(await lockRows(tx, 'account', workspaceId, accountIds))) throw new NotFoundException('账号不存在');
+      const variants = await tx.variant.findMany({ where: variantScope, include: publishableVariant });
+      const accounts = await tx.channelAccount.findMany({ where: accountScope });
+      const platforms = new Set(variants.map(({ platform }) => platform));
+      const accountPlatforms = new Set(accounts.map(({ platform }) => platform));
+      if (platforms.size !== accountPlatforms.size || [...platforms].some((platform) => !accountPlatforms.has(platform))) {
+        throw new BadRequestException('每个平台版本都需要同平台账号，每个账号也需要同平台版本');
       }
-      const existing = await tx.publishTask.findUnique({ where: { accountId_variantId: { accountId, variantId } } });
-      if (existing) return { task: existing, disposition: 'existing' as const };
-      if (!hasApproval(variant)) throw new ConflictException('版本需要有效审核');
-      if (!account.externalId || !account.authCheckedAt) throw new ConflictException('账号尚未通过平台身份核验。');
-      const channel = publishChannel(account, await databaseTime(tx));
-      if (!channel) throw new ConflictException('该账号当前不可用于排期，请检查授权和通道配置');
-      if (channel === 'official') {
-        if (!bilibiliCredentials(account)) throw new ConflictException('无法读取该账号的 B 站授权');
-        try {
-          validateBilibiliArticle(publishVariant(variant));
-        } catch (error) {
-          throw new BadRequestException((error as Error).message);
+
+      const previous = await tx.publishTask.findMany({
+        where: { workspaceId, variantId: { in: variantIds }, accountId: { in: accountIds } },
+      });
+      const existingPairs = new Set(previous.map(({ accountId, variantId }) => `${accountId}:${variantId}`));
+      const now = await databaseTime(tx);
+      const pending: Prisma.PublishTaskCreateManyInput[] = [];
+      for (const variant of variants) {
+        const targets = accounts.filter(({ id, platform }) =>
+          platform === variant.platform && !existingPairs.has(`${id}:${variant.id}`));
+        if (targets.length === 0) continue;
+        if (!hasApproval(variant)) throw new ConflictException('版本需要有效审核');
+        for (const account of targets) {
+          this.requireAvailableAccount(account, variant, now);
+          pending.push({
+            workspaceId, accountId: account.id, variantId: variant.id, scheduledAt: input.scheduledAt, createdById: userId,
+            variantContentHash: variant.contentHash,
+            idempotencyKey: idempotencyKey({ accountId: account.id, variantId: variant.id, hash: variant.contentHash }),
+          });
         }
       }
 
-      const task = await tx.publishTask.create({
-        data: {
-          workspaceId, accountId, variantId, scheduledAt, createdById: userId,
-          variantContentHash: variant.contentHash,
-          idempotencyKey: idempotencyKey({ accountId, variantId, hash: variant.contentHash }),
-        },
+      const created = pending.length ? await tx.publishTask.createManyAndReturn({ data: pending }) : [];
+      if (created.length) await tx.taskEvent.createMany({
+        data: created.map(({ id }) => ({ workspaceId, taskId: id, kind: 'created', actorId: userId, toStatus: 'scheduled' })),
       });
-      await tx.taskEvent.create({
-        data: { workspaceId, taskId: task.id, kind: 'created', actorId: userId, toStatus: 'scheduled' },
-      });
-      return { task, disposition: 'created' as const };
+      const items = [
+        ...created.map((task) => ({ task, disposition: 'created' as const })),
+        ...previous.map((task) => ({ task, disposition: 'existing' as const })),
+      ];
+      return items.map(({ task: { id, accountId, variantId, status, scheduledAt }, disposition }) =>
+        ({ id, accountId, variantId, status, scheduledAt, disposition }));
     }, { isolationLevel: 'ReadCommitted' });
+  }
+
+  private requireAvailableAccount(account: ChannelAccount, variant: PublishableVariant, now: Date) {
+    if (!account.externalId || !account.authCheckedAt) throw new ConflictException(`账号「${account.displayName}」尚未通过平台身份核验`);
+    const channel = publishChannel(account, now);
+    if (!channel) throw new ConflictException(`账号「${account.displayName}」当前不可排期，请检查授权和通道配置`);
+    if (channel === 'official') {
+      if (!bilibiliCredentials(account)) throw new ConflictException('无法读取该账号的 B 站授权');
+      try {
+        validateBilibiliArticle(publishVariant(variant));
+      } catch (error) {
+        throw new BadRequestException((error as Error).message);
+      }
+    }
   }
 
   async list(workspaceId: string, { status, accountId, manuscriptId, cursor, limit }: TaskFilters) {
