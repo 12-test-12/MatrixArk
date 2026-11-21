@@ -23,7 +23,7 @@ export type ManuscriptSummary = {
   id: string; title: string; assetCount: number; updatedAt: string; variants: VariantSummary[];
 };
 export type Manuscript = {
-  id: string; title: string; body: string; tags: string[];
+  id: string; title: string; body: string; tags: string[]; archivedAt?: string | null;
   assets: { id: string; filename: string }[]; variants: ManuscriptVariant[];
 };
 export type TaskStatus = 'scheduled' | 'dispatching' | 'paused' | 'handed_off' | 'submitted'

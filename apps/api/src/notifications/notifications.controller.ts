@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import type { Role } from '@prisma/client';
 import { z } from 'zod';
 import { CurrentRole, CurrentUser } from '../auth/decorators';
@@ -31,5 +31,12 @@ export class NotificationsController {
     @CurrentUser() user: SessionUser, @Body() body: unknown) {
     assertCan(role, 'workspace:settings');
     return this.notifications.updateSetting(workspaceId, user.id, parse(settingSchema, body));
+  }
+
+  @Post('test')
+  @HttpCode(200)
+  test(@Param('workspaceId') workspaceId: string, @CurrentRole() role: Role) {
+    assertCan(role, 'workspace:settings');
+    return this.notifications.testDelivery(workspaceId);
   }
 }

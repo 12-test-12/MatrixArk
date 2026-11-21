@@ -5,6 +5,7 @@ import {
   contentHash,
   generateVariantDraft,
   validateVariant,
+  type updateManuscriptSchema,
   type updateVariantSchema,
 } from '@matrixark/shared';
 import type { z } from 'zod';
@@ -41,13 +42,43 @@ export function inspectSnapshot(variant: Snapshot) {
 export class ContentService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async lockManuscript(tx: Prisma.TransactionClient, workspaceId: string, id: string) {
+  async lockManuscript(tx: Prisma.TransactionClient, workspaceId: string, id: string, allowArchived = false) {
     const [manuscript] = await tx.$queryRaw<Manuscript[]>`
       SELECT * FROM "Manuscript" WHERE "workspaceId" = ${workspaceId} AND id = ${id} FOR UPDATE
     `;
     if (!manuscript) throw new NotFoundException('稿件不存在');
-    if (manuscript.archivedAt) throw new ConflictException('稿件已归档');
+    if (manuscript.archivedAt && !allowArchived) throw new ConflictException('请先恢复已归档稿件');
     return manuscript;
+  }
+
+  async updateManuscript(workspaceId: string, id: string, input: z.infer<typeof updateManuscriptSchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockManuscript(tx, workspaceId, id);
+      return tx.manuscript.update({ where: { id }, data: input });
+    });
+  }
+
+  async archiveManuscript(workspaceId: string, id: string, userId: string, archive: boolean) {
+    return this.prisma.$transaction(async (tx) => {
+      const manuscript = await this.lockManuscript(tx, workspaceId, id, true);
+      if (archive === Boolean(manuscript.archivedAt)) return { ok: true };
+      await tx.manuscript.update({ where: { id }, data: {
+        archivedAt: archive ? new Date() : null, archivedById: archive ? userId : null,
+      } });
+      if (archive) {
+        const reason = '原稿已归档，待发任务已暂停';
+        const paused = await tx.publishTask.updateManyAndReturn({
+          where: { workspaceId, status: 'scheduled', variant: { manuscriptId: id } },
+          data: { status: 'paused', lastError: reason },
+          select: { id: true },
+        });
+        if (paused.length) await tx.taskEvent.createMany({
+          data: paused.map(({ id: taskId }) => ({ workspaceId, taskId, kind: 'paused',
+            fromStatus: 'scheduled', toStatus: 'paused', actorId: userId, reason })),
+        });
+      }
+      return { ok: true };
+    });
   }
 
   private async lockCurrentVariant(tx: Prisma.TransactionClient, workspaceId: string, id: string) {

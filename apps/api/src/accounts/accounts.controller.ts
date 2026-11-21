@@ -9,10 +9,11 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { z } from 'zod';
-import type { Role } from '@prisma/client';
+import { Prisma, type Role } from '@prisma/client';
 import { CurrentMembership, CurrentUser } from '../auth/decorators';
 import type { SessionUser } from '../auth/session.service';
 import { assertCan } from '../common/permissions';
@@ -33,9 +34,9 @@ export class AccountsController {
   constructor(private readonly prisma: PrismaService, private readonly xiaohongshu: XiaohongshuIdentityService) {}
 
   @Get()
-  async list(@Param('workspaceId') workspaceId: string) {
+  async list(@Param('workspaceId') workspaceId: string, @Query('archived') archived?: string) {
     const accounts = await this.prisma.channelAccount.findMany({
-      where: { workspaceId },
+      where: { workspaceId, archivedAt: archived === 'true' ? { not: null } : null },
       orderBy: { createdAt: 'asc' },
       include: { _count: { select: { tasks: true } } },
     });
@@ -55,6 +56,7 @@ export class AccountsController {
         hasCredentials: Boolean(account.credentialsCiphertext || account.credentials),
         taskCount: account._count.tasks,
         createdAt: account.createdAt,
+        archivedAt: account.archivedAt,
       };
     });
   }
@@ -111,15 +113,46 @@ export class AccountsController {
     @CurrentMembership() membership: { role: Role },
     @Param('workspaceId') workspaceId: string,
     @Param('id') id: string,
+    @CurrentUser() user: SessionUser,
   ) {
     assertCan(membership.role, 'account:manage');
-    const existing = await this.prisma.channelAccount.findFirst({ where: { id, workspaceId } });
-    if (!existing) throw new NotFoundException('账号不存在');
-    const active = await this.prisma.publishTask.count({
-      where: { accountId: id, status: { in: ['scheduled', 'dispatching', 'handed_off', 'submitted', 'under_review'] } },
+    return this.prisma.$transaction(async (tx) => {
+      const [account] = await tx.$queryRaw<{ archivedAt: Date | null }[]>`
+        SELECT "archivedAt" FROM "ChannelAccount" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE
+      `;
+      if (!account) throw new NotFoundException('账号不存在');
+      if (account.archivedAt) return { ok: true };
+      const active = await tx.publishTask.findFirst({
+        where: { workspaceId, accountId: id, status: { in: ['scheduled', 'dispatching', 'handed_off', 'submitted', 'under_review'] } },
+        select: { id: true },
+      });
+      if (active) throw new ConflictException('该账号还有未完成的发布任务，请处理后再归档');
+      await tx.channelAccount.update({ where: { id }, data: { archivedAt: new Date(), archivedById: user.id } });
+      return { ok: true };
     });
-    if (active > 0) throw new NotFoundException('该账号还有未完成的任务，先处理完再删除');
-    await this.prisma.channelAccount.delete({ where: { id } });
-    return { ok: true };
+  }
+
+  @Patch(':id/restore')
+  async restore(@CurrentMembership() membership: { role: Role },
+    @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
+    assertCan(membership.role, 'account:manage');
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+        const [account] = await tx.$queryRaw<{ archivedAt: Date | null }[]>`
+          SELECT "archivedAt" FROM "ChannelAccount" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE
+        `;
+        if (!account) throw new NotFoundException('账号不存在');
+        if (account.archivedAt) {
+          await tx.channelAccount.update({ where: { id }, data: { archivedAt: null, archivedById: null } });
+        }
+        return { ok: true };
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException('已有启用的同名账号或同一平台身份，请先处理冲突账号');
+      }
+      throw error;
+    }
   }
 }

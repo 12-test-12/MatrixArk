@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, normalize, resolve, sep } from 'node:path';
 import { BadRequestException, Injectable, NotFoundException, UnsupportedMediaTypeException } from '@nestjs/common';
 import { config } from '../config';
@@ -54,6 +54,10 @@ export class StorageService {
     await mkdir(join(target, '..'), { recursive: true });
     await writeFile(target, data);
     return { key };
+  }
+
+  async remove(key: string) {
+    await rm(this.absolute(key), { force: true });
   }
 
   async readImage(workspaceId: string, key: string) {

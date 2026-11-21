@@ -19,7 +19,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   process.env.BILIBILI_CLIENT_ID = 'bilibili-fixture';
   process.env.BILIBILI_CLIENT_SECRET = 'bilibili-fixture-secret';
   process.env.BILIBILI_CREDENTIALS_KEY = 'a'.repeat(64);
-  process.env.NOTIFICATION_CREDENTIALS_KEY = 'b'.repeat(64);
+  process.env.NOTIFICATION_CREDENTIALS_KEY = '';
   const { AppModule } = await import('../dist/app.module.js');
   const { PrismaService } = await import('../dist/prisma/prisma.service.js');
   const { TasksService } = await import('../dist/tasks/tasks.service.js');
@@ -486,6 +486,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       enabled: true, webhookConfigured: true, signatureConfigured: true, encryptionReady: true,
     });
     const stored = await prisma.notificationSetting.findUniqueOrThrow({ where: { workspaceId } });
+    assert.equal(stored.webhookKeyId, 'notification-local-v1');
+    assert.equal(stored.signSecretKeyId, 'notification-local-v1');
     for (const value of [webhook, secret]) assert.ok(!JSON.stringify(stored).includes(value));
 
     const sends = [];
@@ -573,5 +575,71 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     const recovered = await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: interrupted.id } });
     assert.equal(recovered.status, 'failed');
     assert.match(recovered.lastError, /投递结果未知/u);
+
+    await call(path + '/test', { method: 'POST', cookie: otherCookie, body: {}, status: 403 });
+    await post(path + '/test', {}, 400);
+    behavior = 'success';
+    assert.deepEqual((await post(path + '/test', {}, 200)).data, { sent: true });
+    assert.match(sends.at(-1), /MatrixArk 测试提醒/u);
+  });
+
+  await t.test('登录用户可更正姓名和邮箱，换邮箱校验当前密码', async () => {
+    await call('/auth/me', { method: 'PATCH', body: { name: '改名', email: owner.user.email }, status: 401 });
+    const edit = (body, status = 200) => call('/auth/me', { method: 'PATCH', cookie, body, status });
+    const changed = { name: '新的负责人姓名', email: 'changed-owner@example.test' };
+    await edit(changed, 400);
+    await edit({ ...changed, currentPassword: 'incorrect' }, 400);
+    await edit({ ...changed, email: other.user.email, currentPassword: 'fixture-password' }, 409);
+    const { data: saved } = await edit({ ...changed, currentPassword: 'fixture-password' });
+    assert.deepEqual(saved, { id: owner.user.id, ...changed });
+    assert.deepEqual((await call('/auth/me', { cookie })).data.user, saved);
+    assert.equal((await call('/auth/me', { cookie: otherCookie })).data.user.email, other.user.email);
+  });
+
+  await t.test('稿件和账号归档可恢复，暂停待发任务并保留历史版本及回执', async () => {
+    const platform = 'bilibili';
+    const archivedCandidate = await prisma.channelAccount.create({
+      data: { workspaceId, platform, channelKind: 'manual', displayName: '归档夹具账号',
+        externalId: 'archive-account-fixture', authCheckedAt: new Date(), authStatus: 'active' },
+    });
+    async function createTask(title, at) {
+      const { data: draft } = await post(own + '/manuscripts', { title, body: '归档测试正文', tags: [] });
+      const path = own + '/manuscripts/' + draft.id;
+      const { data: asset } = await post(path + '/assets', file(sourcePng));
+      const { data: [variant] } = await post(path + '/generate', { platforms: [platform] });
+      await post(own + '/variants/' + variant.id + '/confirm', {});
+      const { data: { items: [task] } } = await post(own + '/tasks', {
+        variantIds: [variant.id], accountIds: [archivedCandidate.id], scheduledAt: at,
+      });
+      return { draft, variant, task, asset, path };
+    }
+    const historical = await createTask('历史发布稿', scheduledAt);
+    assert.equal(await worker.get(TasksService).dispatchDue(), 1);
+    const historyPath = own + '/tasks/' + historical.task.id;
+    await post(historyPath + '/result', { state: 'published', remoteUrl: 'https://example.test/archive-history' }, 200);
+    const future = await createTask('放弃待发原稿', new Date(Date.now() + 60_000).toISOString());
+    const accountPath = own + '/accounts/' + archivedCandidate.id;
+    await call(accountPath, { method: 'DELETE', cookie, status: 409 });
+    await call(future.path, { method: 'DELETE', cookie });
+    await call(future.path, { method: 'DELETE', cookie });
+    const { data: paused } = await call(own + '/tasks/' + future.task.id, { cookie });
+    assert.equal(paused.status, 'paused');
+    assert.equal(paused.events.filter(({ kind }) => kind === 'paused').length, 1);
+    await call(future.path, { method: 'PATCH', cookie, body: { title: '归档稿件不可编辑' }, status: 409 });
+    await post(future.path + '/assets', file(sourcePng), 409);
+    await call(historical.path, { method: 'DELETE', cookie });
+    await call(accountPath, { method: 'DELETE', cookie });
+    assert.equal((await call(own + '/accounts', { cookie })).data.some(({ id }) => id === archivedCandidate.id), false);
+    assert.equal((await call(own + '/accounts?archived=true', { cookie })).data.some(({ id }) => id === archivedCandidate.id), true);
+    assert.equal((await call(own + '/manuscripts', { cookie })).data.some(({ id }) => id === historical.draft.id), false);
+    assert.equal((await call(own + '/manuscripts?archived=true', { cookie })).data.some(({ id }) => id === historical.draft.id), true);
+    assert.equal((await call(historyPath, { cookie })).data.result.remoteUrl, 'https://example.test/archive-history');
+    const { data: handoff } = await call(historyPath + '/handoff', { cookie });
+    assert.equal(handoff.assets[0].assetId, historical.asset.id);
+    await call(future.path + '/restore', { method: 'PATCH', cookie });
+    await call(accountPath + '/restore', { method: 'PATCH', cookie });
+    assert.equal((await call(own + '/tasks/' + future.task.id, { cookie })).data.status, 'paused');
+    assert.equal((await call(future.path, { cookie })).data.archivedAt, null);
+    assert.equal((await call(own + '/accounts', { cookie })).data.find(({ id }) => id === archivedCandidate.id).availableForHandoff, true);
   });
 });

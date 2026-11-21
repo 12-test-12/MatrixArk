@@ -33,7 +33,7 @@ function presentSetting(setting: NotificationSetting | null) {
     enabled: setting?.enabled ?? false,
     webhookConfigured: Boolean(setting?.webhookCiphertext),
     signatureConfigured: Boolean(setting?.signSecretCiphertext),
-    encryptionReady: Boolean(config.notificationKey),
+    encryptionReady: true,
   };
 }
 
@@ -50,12 +50,9 @@ export class NotificationsService {
       await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
       const where = { workspaceId };
       const previous = await tx.notificationSetting.findUnique({ where });
-      if ((input.enabled || input.webhook || input.signSecret) && !config.notificationKey) {
-        throw new ServiceUnavailableException('请先在 API 和 Worker 配置飞书凭据加密密钥');
-      }
-      const webhook = input.webhook ? encryptFeishu(workspaceId, 'webhook', input.webhook) : undefined;
+      const webhook = input.webhook ? this.encryptSetting(workspaceId, 'webhook', input.webhook) : undefined;
       if (input.enabled && !webhook && !previous?.webhookCiphertext) throw new BadRequestException('请填写飞书机器人地址');
-      const signSecret = input.signSecret ? encryptFeishu(workspaceId, 'signSecret', input.signSecret) : undefined;
+      const signSecret = input.signSecret ? this.encryptSetting(workspaceId, 'signSecret', input.signSecret) : undefined;
       const credentials = {
         ...(webhook && { webhookCiphertext: webhook.ciphertext, webhookKeyId: webhook.keyId }),
         ...(input.signSecret !== undefined && {
@@ -67,6 +64,25 @@ export class NotificationsService {
         : await tx.notificationSetting.create({ data: { workspaceId, ...data } });
       return presentSetting(saved);
     });
+  }
+
+  private encryptSetting(...args: Parameters<typeof encryptFeishu>) {
+    try {
+      return encryptFeishu(...args);
+    } catch {
+      throw new ServiceUnavailableException('暂时无法安全保存机器人配置，请联系工作台管理员');
+    }
+  }
+
+  async testDelivery(workspaceId: string) {
+    const workspace = await this.prisma.workspace.findUnique({
+      where: { id: workspaceId }, select: { name: true, notificationSetting: true },
+    });
+    if (!workspace?.notificationSetting?.webhookCiphertext) throw new BadRequestException('请先保存群机器人地址');
+    const name = workspace.name.replaceAll('<', '＜').replaceAll('>', '＞');
+    const result = await this.send(workspace.notificationSetting, `MatrixArk 测试提醒\n「${name}」的飞书群机器人可以接收消息。`);
+    if (result.status !== 'sent') throw new BadRequestException(result.reason);
+    return { sent: true };
   }
 
   async enqueueHandoff(tx: Prisma.TransactionClient, workspaceId: string, taskId: string, at: Date) {

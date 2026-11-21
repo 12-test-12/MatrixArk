@@ -7,6 +7,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -33,9 +34,9 @@ export class ManuscriptsController {
   ) {}
 
   @Get()
-  async list(@Param('workspaceId') workspaceId: string) {
+  async list(@Param('workspaceId') workspaceId: string, @Query('archived') archived?: string) {
     const manuscripts = await this.prisma.manuscript.findMany({
-      where: { workspaceId },
+      where: { workspaceId, archivedAt: archived === 'true' ? { not: null } : null },
       orderBy: { createdAt: 'desc' },
       take: 100,
       include: {
@@ -52,6 +53,7 @@ export class ManuscriptsController {
       title: m.title,
       createdAt: m.createdAt,
       updatedAt: m.updatedAt,
+      archivedAt: m.archivedAt,
       assetCount: m._count.assets,
       variants: m.variants.map((v) => ({
         id: v.id,
@@ -96,6 +98,7 @@ export class ManuscriptsController {
       tags: manuscript.tags,
       createdAt: manuscript.createdAt,
       updatedAt: manuscript.updatedAt,
+      archivedAt: manuscript.archivedAt,
       imageCount,
       assets: manuscript.assets.map((asset) => ({ ...asset, filename: imageDisplayName(asset.filename) })),
       variants: manuscript.variants.map((v) => ({
@@ -134,9 +137,7 @@ export class ManuscriptsController {
   ) {
     assertCan(membership.role, 'content:write');
     const input = parse(updateManuscriptSchema, body);
-    const existing = await this.prisma.manuscript.findFirst({ where: { id, workspaceId } });
-    if (!existing) throw new NotFoundException('稿件不存在');
-    return this.prisma.manuscript.update({ where: { id }, data: input });
+    return this.content.updateManuscript(workspaceId, id, input);
   }
 
   @Delete(':id')
@@ -144,12 +145,17 @@ export class ManuscriptsController {
     @CurrentMembership() membership: { role: Role },
     @Param('workspaceId') workspaceId: string,
     @Param('id') id: string,
+    @CurrentUser() user: SessionUser,
   ) {
     assertCan(membership.role, 'content:write');
-    const existing = await this.prisma.manuscript.findFirst({ where: { id, workspaceId } });
-    if (!existing) throw new NotFoundException('稿件不存在');
-    await this.prisma.manuscript.delete({ where: { id } });
-    return { ok: true };
+    return this.content.archiveManuscript(workspaceId, id, user.id, true);
+  }
+
+  @Patch(':id/restore')
+  restore(@CurrentMembership() membership: { role: Role }, @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string, @CurrentUser() user: SessionUser) {
+    assertCan(membership.role, 'content:write');
+    return this.content.archiveManuscript(workspaceId, id, user.id, false);
   }
 
   @Post(':id/generate')
@@ -181,20 +187,16 @@ export class ManuscriptsController {
   ) {
     assertCan(membership.role, 'content:write');
     const { file, filename, mimeType } = validateImageUpload(upload);
-    const manuscript = await this.prisma.manuscript.findFirst({ where: { id, workspaceId } });
-    if (!manuscript) throw new NotFoundException('稿件不存在');
-
-    const { key } = await this.storage.save(workspaceId, filename, file.buffer);
-    return this.prisma.asset.create({
-      data: {
-        workspaceId,
-        manuscriptId: id,
-        kind: 'manuscript_image',
-        storageKey: key,
-        filename,
-        mimeType,
-        size: file.size,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      await this.content.lockManuscript(tx, workspaceId, id);
+      const { key } = await this.storage.save(workspaceId, filename, file.buffer);
+      try {
+        return await tx.asset.create({ data: { workspaceId, manuscriptId: id, kind: 'manuscript_image',
+          storageKey: key, filename, mimeType, size: file.size } });
+      } catch (error) {
+        await this.storage.remove(key).catch(() => undefined);
+        throw error;
+      }
     });
   }
 }

@@ -34,6 +34,13 @@ const people: { name: string; role: Role }[] = [
 function PreviewContent({ role, section }: { role: Role; section: Section }) {
   const [selection, setSelection] = useState('');
   const description = roleView[role].description;
+  if (section === 'notifications') return <>
+    <PageHeader title="飞书提醒" description="连接工作室的飞书群，接收任务交接和未回填提醒。" />
+    <section className="card form-card form-stack">
+      <h2>连接群机器人</h2>
+      <p className="muted">登录后，工作室负责人可以保存机器人地址并发送测试消息。</p>
+    </section>
+  </>;
   if (section === 'members') return <>
     <PageHeader title="团队成员" description="负责人可以添加已注册的成员，并为每个人分配工作室角色。" />
     <section className="card" aria-label="示例团队成员">

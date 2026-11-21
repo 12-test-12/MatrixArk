@@ -133,7 +133,11 @@ textarea { resize: vertical; }
 .form-stack > label, .form-stack > .form-row, .form-stack > .field-group, .form-stack > .feedback { width: 100%; }
 .form-stack .checkbox-field { grid-template-columns: auto minmax(0, 1fr); align-items: center; min-height: 28px; }
 .checkbox-field input[type=checkbox] { width: 16px; min-height: 0; height: 16px; margin: 0; padding: 0; accent-color: var(--accent); }
-.feishu-form { width: 100%; max-width: 32rem; }
+.notification-settings { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 16px; align-items: start; max-width: 920px; }
+.notification-steps { display: grid; gap: 8px; padding-inline-start: 1.3rem; color: var(--muted); }
+.profile-settings { max-width: 34rem; }
+.notification-settings aside a { text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 850px) { .notification-settings { grid-template-columns: minmax(0, 1fr); } }
 .form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .form-card:not(.detail-pane) { margin-bottom: 17px; }
 .feedback { display: flex; align-items: start; gap: 7px; padding: 8px 11px; margin: 0 0 11px; border: 1px solid #e4e2f3; border-radius: 8px; background: #f6f4fd; color: #4d3e90; font-size: 13px; overflow-wrap: anywhere; }
@@ -191,6 +195,7 @@ textarea { resize: vertical; }
 .schedule-accounts input[type=checkbox] { width: 16px; min-height: 0; height: 16px; margin: 0; padding: 0; accent-color: var(--accent); }
 .account-row { display: flex; gap: 12px; align-items: center; padding: 13px 17px; border-bottom: 1px solid var(--line); }
 .account-row:last-child { border-bottom: 0; }
+.account-management-row { flex-wrap: wrap; }
 .account-row > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .account-row small { display: block; color: var(--muted); }
 .member-role { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }

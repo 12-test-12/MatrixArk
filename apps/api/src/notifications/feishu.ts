@@ -1,28 +1,60 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { config } from '../config';
 
 const keyId = 'notification-v1';
+const localKeyId = 'notification-local-v1';
 export const feishuWebhook = /^https:\/\/open\.feishu\.cn\/open-apis\/bot\/v2\/hook\/[\w-]{1,200}$/u;
 
 type SecretField = 'webhook' | 'signSecret';
 
+function localKey(create = false): Buffer {
+  const directory = config.storage.localDir;
+  const path = join(directory, '.notification-key');
+  if (create) {
+    try {
+      return localKey();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    mkdirSync(directory, { recursive: true });
+    const temporary = join(directory, `.notification-key-${randomBytes(12).toString('hex')}`);
+    writeFileSync(temporary, randomBytes(32), { mode: 0o600, flag: 'wx' });
+    try {
+      // Publish the complete key atomically so the API and Worker never use different keys.
+      linkSync(temporary, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    } finally {
+      unlinkSync(temporary);
+    }
+  }
+  const key = readFileSync(path);
+  if (key.length !== 32) throw new Error('飞书凭据密钥文件无效');
+  return key;
+}
+
 export function encryptFeishu(workspaceId: string, field: SecretField, value: string) {
-  if (!config.notificationKey) throw new Error('飞书凭据加密密钥未配置');
+  const key = config.notificationKey ? Buffer.from(config.notificationKey, 'hex') : localKey(true);
   const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', Buffer.from(config.notificationKey, 'hex'), iv);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(Buffer.from(JSON.stringify([workspaceId, field])));
   const data = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
-  return { keyId, ciphertext: [iv, cipher.getAuthTag(), data].map((part) => part.toString('base64url')).join('.') };
+  return { keyId: config.notificationKey ? keyId : localKeyId,
+    ciphertext: [iv, cipher.getAuthTag(), data].map((part) => part.toString('base64url')).join('.') };
 }
 
 export function decryptFeishu(workspaceId: string, field: SecretField, ciphertext: string, storedKeyId: string | null) {
-  if (!config.notificationKey || storedKeyId !== keyId) throw new Error('无法读取飞书凭据');
+  const key = storedKeyId === localKeyId ? localKey()
+    : storedKeyId === keyId && config.notificationKey ? Buffer.from(config.notificationKey, 'hex') : null;
+  if (!key) throw new Error('无法读取飞书凭据');
   const [nonce, tag, data, extra] = ciphertext.split('.');
   if (!nonce || !tag || !data || extra !== undefined) throw new Error('飞书凭据格式无效');
   const iv = Buffer.from(nonce, 'base64url');
   const authTag = Buffer.from(tag, 'base64url');
   if (iv.length !== 12 || authTag.length !== 16) throw new Error('飞书凭据格式无效');
-  const cipher = createDecipheriv('aes-256-gcm', Buffer.from(config.notificationKey, 'hex'), iv);
+  const cipher = createDecipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(Buffer.from(JSON.stringify([workspaceId, field])));
   cipher.setAuthTag(authTag);
   return Buffer.concat([cipher.update(Buffer.from(data, 'base64url')), cipher.final()]).toString('utf8');

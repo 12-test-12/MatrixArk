@@ -268,12 +268,22 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
   const draftKey = scope + '/variants/' + variant?.id;
   const check = useResource<{ issues: { code: string; message: string }[] }>(snapshot ? scope + '/variants/' + snapshot.id + '/check' : null);
   const issues = Array.isArray(check.data?.issues) ? check.data.issues : undefined;
-  const editable = canEdit(role);
+  const editable = canEdit(role) && !manuscript?.archivedAt;
   const approvedVersions = currentVariants.filter(hasSnapshot).filter((item) =>
     item.status === 'approved' && Boolean(item.approval?.snapshotHash) && item.snapshotVersion === 1);
   const approved = approvedVersions.some((item) => item.id === snapshot?.id);
   const editingVersion = snapshot && editable && (editing ?? drafts.has(draftKey));
   function refresh() { detail.refresh(); changed(); }
+  function archive() {
+    if (!manuscript) return;
+    const restoring = Boolean(manuscript.archivedAt);
+    if (!restoring && !window.confirm(`归档「${manuscript.title}」？待发任务会暂停，历史任务和稿件资料仍可查看。`)) return;
+    void action.run(async () => {
+      const path = scope + '/manuscripts/' + id;
+      await api(restoring ? path + '/restore' : path, { method: restoring ? 'PATCH' : 'DELETE' });
+      refresh();
+    }, restoring ? '稿件已恢复。' : '稿件已归档。');
+  }
   function generate(targets: readonly Platform[]) {
     const targetPlatform = targets.length === 1 ? targets[0]! : platform;
     setPlatform(targetPlatform);
@@ -304,7 +314,11 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
   return <section className="card detail-pane manuscript-detail">
     <div className="detail-heading">
       <div className="detail-icon"><FileText size={22} aria-hidden="true" /></div>
-      <div><h2>{manuscript.title}</h2><p>{manuscript.assets.length} 张原稿图片</p></div>
+      <div><h2>{manuscript.title}</h2><p>{manuscript.assets.length} 张原稿图片
+        {manuscript.archivedAt && ` · 归档于 ${formatTime(manuscript.archivedAt)}`}</p></div>
+      {canEdit(role) && <button type="button" className="button compact" disabled={action.busy} onClick={archive}>
+        {manuscript.archivedAt ? '恢复稿件' : '归档稿件'}
+      </button>}
     </div>
     <div className="detail-content">
       <Feedback error={action.error || detail.error} notice={action.notice} />
@@ -381,7 +395,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
             {snapshot && editable && <button type="button" className="button" disabled={action.busy} onClick={() => setEditing(true)}>
               <PencilLine size={16} aria-hidden="true" />编辑版本
             </button>}
-            {snapshot && canReview(role) && !approved && <button type="button" className="button primary"
+            {snapshot && !manuscript.archivedAt && canReview(role) && !approved && <button type="button" className="button primary"
               disabled={action.busy || !issues || issues.length !== 0} onClick={approve}>
               <ShieldCheck size={17} aria-hidden="true" />确认审核
             </button>}
@@ -402,7 +416,8 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
   drafts: ManuscriptDrafts;
   openTasks: (id: string) => void; openAccounts: () => void;
 }) {
-  const list = useResource<ManuscriptSummary[]>(scope + '/manuscripts');
+  const [showArchived, setShowArchived] = useState(false);
+  const list = useResource<ManuscriptSummary[]>(scope + '/manuscripts' + (showArchived ? '?archived=true' : ''));
   const [selection, setSelection] = useState('');
   const [pendingOnly, setPendingOnly] = useState(role === 'reviewer');
   const [reviewNotice, setReviewNotice] = useState('');
@@ -411,14 +426,19 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
   const allItems = list.data ?? [];
   const items = pendingOnly ? allItems.filter(({ variants }) =>
     variants.some(({ status }) => status === 'draft')) : allItems;
-  const selected = !pendingOnly || items.some(({ id }) => id === selection) ? selection : '';
+  const selected = items.some(({ id }) => id === selection) ? selection : '';
   const active = selected || items[0]?.id || '';
   const start = () => setCreating(true);
   return <>
     <PageHeader title={pendingOnly ? '待审核原稿' : '原稿与审核'}
       description={role === 'reviewer' ? '按平台审核文案、配图和封面。' : canEdit(role)
         ? '从一篇原稿生成各平台版本，分别审核并排期。' : '查阅原稿和各平台版本。'}>
-      {canEdit(role) && items.length > 0 && <button className="button primary" onClick={start}><Plus size={18} aria-hidden="true" />新建原稿</button>}
+      {canEdit(role) && <>
+        <button type="button" className="button" aria-pressed={showArchived} onClick={() => {
+          setShowArchived(!showArchived); setSelection(''); setCreating(false);
+        }}>{showArchived ? '查看在用稿件' : '查看已归档'}</button>
+        {!showArchived && items.length > 0 && <button className="button primary" onClick={start}><Plus size={18} aria-hidden="true" />新建原稿</button>}
+      </>}
     </PageHeader>
     {role === 'reviewer' && <div className="filters" aria-label="按审核状态筛选">
       <button type="button" className={pendingOnly ? 'active' : ''} aria-pressed={pendingOnly}
@@ -429,7 +449,7 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
     <Feedback error={list.error} notice={pendingOnly ? reviewNotice : undefined} />
     <div className="split-panel">
       <section className="card item-list">
-        <div className="card-heading"><h2>原稿列表</h2><span className="count">{items.length}</span></div>
+        <div className="card-heading"><h2>{showArchived ? '已归档原稿' : '原稿列表'}</h2><span className="count">{items.length}</span></div>
         {list.loading ? <Loading /> : items.length > 0 ? items.map((item) => {
           const variants = item.variants.filter(({ status }) => status !== 'superseded');
           const pending = variants.filter(({ status }) => status === 'draft').length;
@@ -438,9 +458,9 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
             <span className="list-icon"><FileText size={18} aria-hidden="true" /></span>
             <span className="list-copy"><strong>{item.title}</strong><small>{item.assetCount} 张图片 · {variants.length
               ? `${variants.length} 个版本 · ${pending ? `${pending} 个待审核` : '已审核'}` : '未生成版本'}</small></span>
-            <ChevronRight size={15} aria-hidden="true" />
+            <ChevronRight className="row-chevron" size={15} aria-hidden="true" />
           </button>;
-        }) : <Empty icon={FileText} title={pendingOnly ? '暂无待审核原稿' : '暂无原稿'} />}
+        }) : <Empty icon={FileText} title={showArchived ? '暂无已归档稿件' : pendingOnly ? '暂无待审核原稿' : '暂无原稿'} />}
       </section>
       {creating ? <NewManuscript scope={scope} drafts={drafts} draftKey={draftKey} onCancel={() => setCreating(false)} onSave={(id) => {
         setSelection(id); setCreating(false); list.refresh();
@@ -448,10 +468,10 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
         changed={list.refresh} onApproved={pendingOnly ? (title) => setReviewNotice(`「${title}」已确认审核。`) : undefined}
         onSchedule={openTasks} openAccounts={openAccounts} />
         : <section className="card detail-pane empty-detail">
-          {list.loading ? <Loading /> : <Empty icon={FileText} title={canEdit(role) ? '开始你的第一篇原稿' : '暂无原稿可查看'}
-            description={pendingOnly ? '编辑生成平台版本后会出现在这里。' : canEdit(role)
+          {list.loading ? <Loading /> : <Empty icon={FileText} title={showArchived ? '暂无归档记录' : canEdit(role) ? '开始你的第一篇原稿' : '暂无原稿可查看'}
+            description={showArchived ? '归档的原稿可以在这里查看和恢复。' : pendingOnly ? '编辑生成平台版本后会出现在这里。' : canEdit(role)
               ? '添加标题、正文和图片，然后生成各平台版本。' : '工作室有原稿后，可在这里查看。'}>
-            {canEdit(role) && <button className="button primary" onClick={start}><Plus size={17} aria-hidden="true" />新建原稿</button>}
+            {canEdit(role) && !showArchived && <button className="button primary" onClick={start}><Plus size={17} aria-hidden="true" />新建原稿</button>}
           </Empty>}
         </section>}
     </div>

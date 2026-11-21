@@ -9,7 +9,9 @@ import {
 } from './api';
 import { Manuscripts, type ManuscriptDrafts } from './manuscripts';
 import { Members } from './members';
+import { FeishuSettings } from './notifications';
 import { Preview } from './preview';
+import { Profile } from './profile';
 import { Tasks } from './tasks';
 import { Brand, Empty, Feedback, Loading, PageHeader, PlatformIcon } from './ui';
 import { roleView, Workbench, type Section } from './workbench';
@@ -69,61 +71,27 @@ function SignIn({ onSession, onClose, initialError }: {
   </dialog>;
 }
 
-function FeishuSettings({ scope }: { scope: string }) {
-  const path = scope + '/notifications/feishu';
-  const resource = useResource<{
-    enabled: boolean; webhookConfigured: boolean; signatureConfigured: boolean; encryptionReady: boolean;
-  }>(path);
-  const action = useAction();
-  const setting = resource.data;
-  function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const fields = new FormData(form);
-    const webhook = String(fields.get('webhook') ?? '').trim();
-    const signSecret = String(fields.get('signSecret') ?? '').trim();
-    void action.run(async () => {
-      await api(path, { method: 'PATCH', body: {
-        enabled: fields.has('enabled'), webhook: webhook || undefined,
-        signSecret: signSecret || (fields.has('clearSignature') ? null : undefined),
-      } });
-      form.reset();
-      resource.refresh();
-    }, '飞书提醒设置已保存。');
-  }
-  return <section className="card form-card form-stack" aria-labelledby="feishu-settings-title">
-    <h2 id="feishu-settings-title">飞书提醒</h2>
-    <p className="muted small">人工任务到点交接时提醒一次，交接后 4 小时仍待回填再提醒一次。</p>
-    {resource.loading && !setting && <Loading />}
-    <Feedback error={action.error || resource.error} notice={action.notice} />
-    {setting && !setting.encryptionReady && <p className="muted">配置服务端加密密钥后可以保存机器人。</p>}
-    {setting && (setting.encryptionReady || setting.enabled) && <form key={JSON.stringify(setting)} className="form-stack feishu-form" onSubmit={save}>
-      <label className="checkbox-field"><input name="enabled" type="checkbox" defaultChecked={setting.enabled}
-        disabled={action.busy || (!setting.encryptionReady && !setting.enabled)} />启用工作室飞书提醒</label>
-      {setting.encryptionReady && <>
-        <label>Webhook 地址 <small>{setting.webhookConfigured ? '已保存，留空保留' : '启用时必填'}</small>
-          <input name="webhook" type="password" autoComplete="off" maxLength={250} spellCheck={false} disabled={action.busy} />
-        </label>
-        <label>签名密钥 <small>{setting.signatureConfigured ? '已保存，留空保留' : '机器人开启签名校验时填写'}</small>
-          <input name="signSecret" type="password" autoComplete="new-password" maxLength={256} disabled={action.busy} />
-        </label>
-        {setting.signatureConfigured && <label className="checkbox-field">
-          <input name="clearSignature" type="checkbox" disabled={action.busy} />清除已保存的签名密钥
-        </label>}
-      </>}
-      <button className="button primary" disabled={action.busy}>{action.busy ? '正在保存…' : '保存提醒设置'}</button>
-    </form>}
-  </section>;
-}
-
-function Accounts({ scope, canManage, canConfigure, resource }: {
-  scope: string; canManage: boolean; canConfigure: boolean; resource: ReturnType<typeof useResource<Account[]>>;
+function Accounts({ scope, canManage, resource }: {
+  scope: string; canManage: boolean; resource: ReturnType<typeof useResource<Account[]>>;
 }) {
   const [authorization, setAuthorization] = useState<{ id: string; userCode: string; image: string }>();
   const [status, setStatus] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
   const action = useAction();
-  const accounts = resource.data ?? [];
+  const archiveAction = useAction();
+  const archived = useResource<Account[]>(showArchived ? scope + '/accounts?archived=true' : null);
+  const visible = showArchived ? archived : resource;
+  const accounts = visible.data ?? [];
   const path = scope + '/accounts/xiaohongshu/authorize';
+  function archive(account: Account) {
+    if (!showArchived && !window.confirm(`归档「${account.displayName}」？归档后，账号会从排期列表移除，历史任务可以继续查看。`)) return;
+    void archiveAction.run(async () => {
+      const accountPath = scope + '/accounts/' + account.id;
+      await api(showArchived ? accountPath + '/restore' : accountPath, { method: showArchived ? 'PATCH' : 'DELETE' });
+      resource.refresh();
+      archived.refresh();
+    }, showArchived ? '账号已恢复。' : '账号已归档。');
+  }
   function connect() {
     setStatus('');
     void action.run(async () => {
@@ -155,7 +123,7 @@ function Accounts({ scope, canManage, canConfigure, resource }: {
         <ScanLine size={17} aria-hidden="true" />连接小红书账号
       </button>}
     </PageHeader>
-    <Feedback error={action.error || resource.error} notice={authorization ? undefined : status} />
+    <Feedback error={action.error || visible.error} notice={authorization ? undefined : status} />
     {authorization && <section className="card form-card form-stack" aria-labelledby="xiaohongshu-auth-title">
       <h2 id="xiaohongshu-auth-title">用小红书 App 扫码授权</h2>
       <img src={authorization.image} width={192} height={192} alt={`小红书账号授权二维码，授权码 ${authorization.userCode}`} />
@@ -167,21 +135,30 @@ function Accounts({ scope, canManage, canConfigure, resource }: {
         }}>关闭</button>
       </div>
     </section>}
+    <Feedback error={archiveAction.error} notice={archiveAction.notice} />
     <section className="card">
-      <div className="card-heading"><h2>账号列表</h2></div>
-      {resource.loading ? <Loading /> : accounts.length ? accounts.map((account) => <div className="account-row" key={account.id}>
+      <div className="card-heading"><h2>{showArchived ? '已归档账号' : '账号列表'}</h2>
+        {canManage && <button type="button" className="button compact" aria-pressed={showArchived}
+          onClick={() => { setShowArchived(!showArchived); archiveAction.reset(); }} disabled={archiveAction.busy}>
+          {showArchived ? '查看在用账号' : '查看已归档'}
+        </button>}
+      </div>
+      {visible.loading ? <Loading /> : accounts.length ? accounts.map((account) => <div className="account-row account-management-row" key={account.id}>
         <PlatformIcon platform={account.platform} />
         <div><strong>{account.displayName}</strong><small>{platformLabel[account.platform]}{account.identityCheckedAt
           ? ` · 核验于 ${formatTime(account.identityCheckedAt)}` : ''}</small></div>
-        <span className={`badge ${account.identityVerified ? 'green' : 'gray'}`}>{account.identityVerified
+        <span className={`badge ${account.identityVerified && !showArchived ? 'green' : 'gray'}`}>{showArchived ? '已归档' : account.identityVerified
           ? account.channelKind === 'sandbox' ? '身份已核验 · 沙箱模拟'
             : account.availableForOfficial ? '身份已核验 · 官方自动投稿'
             : account.availableForHandoff ? '身份已核验 · 人工交接' : '身份已核验 · 未开通发布'
           : '历史账号 · 未核验'}</span>
-      </div>) : !resource.error && <Empty icon={UsersRound} title="还没有发布账号"
-        description="先连接小红书完成扫码授权，或通过 B 站官方授权绑定账号。" />}
+        {canManage && <button type="button" className="button compact" onClick={() => archive(account)}
+          disabled={archiveAction.busy} aria-label={`${showArchived ? '恢复' : '归档'}${account.displayName}`}>
+          {showArchived ? '恢复' : '归档'}
+        </button>}
+      </div>) : !visible.error && <Empty icon={UsersRound} title={showArchived ? '暂无已归档账号' : '还没有发布账号'}
+        description={showArchived ? undefined : '先连接小红书完成扫码授权，或通过 B 站官方授权绑定账号。'} />}
     </section>
-    {canConfigure && <FeishuSettings scope={scope} />}
   </>;
 }
 
@@ -190,12 +167,13 @@ function WorkspaceBody({ workspace, section, taskId, drafts, openTasks, openAcco
   drafts: ManuscriptDrafts;
 }) {
   const scope = scopeFor(workspace.id);
-  const accounts = useResource<Account[]>(section !== 'members' ? scope + '/accounts' : null);
+  const accounts = useResource<Account[]>(section === 'accounts' || section === 'manuscripts' ? scope + '/accounts' : null);
   if (section === 'manuscripts') return <Manuscripts scope={scope} role={workspace.role} accounts={accounts} drafts={drafts}
     openTasks={openTasks} openAccounts={openAccounts} />;
   if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={taskId} />;
   if (section === 'members') return <Members scope={scope} />;
-  return <Accounts scope={scope} canManage={canEdit(workspace.role)} canConfigure={workspace.role === 'owner'} resource={accounts} />;
+  if (section === 'notifications') return <FeishuSettings scope={scope} />;
+  return <Accounts scope={scope} canManage={canEdit(workspace.role)} resource={accounts} />;
 }
 
 export default function Home() {
@@ -231,7 +209,7 @@ export default function Home() {
   </>;
   const workspace = session.workspaces.find(({ id }) => id === workspaceId)
     ?? session.workspaces.find(({ role }) => role !== 'owner') ?? session.workspaces[0];
-  const sections: readonly Section[] = workspace ? roleView[workspace.role].sections : [];
+  const sections: readonly Section[] = workspace ? [...roleView[workspace.role].sections, 'profile'] : ['profile'];
   const section = activeSection && sections.includes(activeSection) ? activeSection : sections[0];
   return <Workbench sections={sections} section={section} onSection={(next) => { setSection(next); setTaskId(''); }}
     workspacePicker={<label className="workspace-picker">
@@ -259,7 +237,8 @@ export default function Home() {
       </div>
       <Feedback error={logout.error} /></>}
     topbar={workspace && <span className="workspace-role"><CircleUserRound size={15} aria-hidden="true" />{roleLabel[workspace.role]}</span>}>
-    {workspace && section ? <WorkspaceBody key={workspace.id} workspace={workspace} section={section} taskId={taskId} drafts={drafts}
+    {section === 'profile' ? <Profile user={session.user} onSave={(user) => setSession((current) => current ? { ...current, user } : current)} />
+      : workspace && section ? <WorkspaceBody key={workspace.id} workspace={workspace} section={section} taskId={taskId} drafts={drafts}
       openTasks={(id) => { setTaskId(id); setSection('tasks'); }} openAccounts={() => setSection('accounts')} />
       : <section className="card"><Empty icon={Check} title="暂无可访问的工作室" description="加入工作室后可查看稿件和任务。" /></section>}
   </Workbench>;
