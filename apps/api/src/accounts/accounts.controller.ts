@@ -51,7 +51,7 @@ export class AccountsController {
         identityVerified: Boolean(account.externalId && account.authCheckedAt),
         identityCheckedAt: account.authCheckedAt,
         availableForHandoff: channel === 'manual',
-        availableForOfficial: channel === 'official',
+        availableForOfficial: channel === 'official' || channel === 'sandbox',
         hasCredentials: Boolean(account.credentialsCiphertext || account.credentials),
         taskCount: account._count.tasks,
         createdAt: account.createdAt,

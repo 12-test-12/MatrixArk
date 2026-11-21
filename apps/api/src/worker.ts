@@ -13,13 +13,13 @@ async function main() {
   process.once('SIGTERM', () => stopped.abort());
   const app = await NestFactory.createApplicationContext(TasksModule, { abortOnError: false });
   const tasks = app.get(TasksService);
-  logger.log('小红书人工交接 Worker 已启动');
+  logger.log('发布任务 Worker 已启动');
   try {
     while (!stopped.signal.aborted) {
       try {
         await tasks.dispatchDue();
       } catch (error) {
-        logger.error('交接轮询失败，下轮重试', error instanceof Error ? error.stack : String(error));
+        logger.error('任务派发轮询失败，下轮重试', error instanceof Error ? error.stack : String(error));
       }
       try {
         await tasks.pollAutomaticResults();
@@ -36,6 +36,6 @@ async function main() {
 }
 
 main().catch((error: unknown) => {
-  logger.error('人工交接 Worker 启动失败', error instanceof Error ? error.stack : String(error));
+  logger.error('发布任务 Worker 启动失败', error instanceof Error ? error.stack : String(error));
   process.exitCode = 1;
 });

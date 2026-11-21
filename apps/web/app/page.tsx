@@ -127,11 +127,12 @@ function Accounts({ scope, canManage, resource }: {
         <div><strong>{account.displayName}</strong><small>{platformLabel[account.platform]}{account.identityCheckedAt
           ? ` · 核验于 ${formatTime(account.identityCheckedAt)}` : ''}</small></div>
         <span className={`badge ${account.identityVerified ? 'green' : 'gray'}`}>{account.identityVerified
-          ? account.availableForOfficial ? '身份已核验 · 官方自动投稿'
+          ? account.channelKind === 'sandbox' ? '身份已核验 · 沙箱模拟'
+            : account.availableForOfficial ? '身份已核验 · 官方自动投稿'
             : account.availableForHandoff ? '身份已核验 · 人工交接' : '身份已核验 · 未开通发布'
           : '历史账号 · 未核验'}</span>
       </div>) : !resource.error && <Empty icon={UsersRound} title="还没有发布账号"
-        description="先连接小红书，授权成功后会显示平台返回的账号。B 站账号暂待开放平台授权。" />}
+        description="先连接小红书完成扫码授权，或通过 B 站官方授权绑定账号。" />}
     </section>
   </>;
 }

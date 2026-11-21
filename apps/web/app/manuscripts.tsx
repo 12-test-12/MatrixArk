@@ -214,7 +214,7 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
         <label>{platformLabel[variant.platform]}账号<select name="accountId" required defaultValue={accounts.length === 1 ? accounts[0]!.id : ''}>
           <option value="" disabled>选择发布账号</option>
           {accounts.map((account) => <option key={account.id} value={account.id}>
-            {account.displayName} · {account.availableForOfficial ? '自动投稿' : '人工交接'}
+            {account.displayName} · {account.channelKind === 'sandbox' ? '沙箱模拟' : account.availableForOfficial ? '自动投稿' : '人工交接'}
           </option>)}
         </select></label>
         <label>排期时间 <small>{Intl.DateTimeFormat().resolvedOptions().timeZone}</small>

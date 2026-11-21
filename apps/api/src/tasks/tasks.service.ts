@@ -362,8 +362,13 @@ export class TasksService {
     try {
       if (channel === 'official') input.variant.images = await this.readPublishImages(variant);
       await adapter.preflight(input);
-    } catch {
-      failure = { status: 'failed', message: '投稿前检查失败，文章尚未提交。请检查授权、专栏字段和图片格式' };
+    } catch (error) {
+      failure = {
+        status: 'failed',
+        message: error instanceof Error && error.message
+          ? error.message
+          : '投稿前检查失败，文章尚未提交。请检查授权、专栏字段和图片格式',
+      };
     }
     const receipt = failure ?? await adapter.publish(input).catch((): PublishReceipt => ({
       status: 'unknown', message: '提交结果未确认，请核实平台记录',
