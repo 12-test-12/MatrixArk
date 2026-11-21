@@ -5,7 +5,7 @@ import { SandboxAdapter } from './sandbox.js';
 import { ChannelNotConfiguredError, type ChannelAdapter } from './types.js';
 
 export * from './types.js';
-export { BilibiliAdapter } from './bilibili.js';
+export { BilibiliAdapter, validateBilibiliArticle } from './bilibili.js';
 export { ManualHandoffAdapter } from './manual.js';
 export { SandboxAdapter } from './sandbox.js';
 

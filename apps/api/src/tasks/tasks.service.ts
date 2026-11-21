@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, type ChannelAccount, type PublishResult, type PublishTask, type TaskStatus } from '@prisma/client';
-import { ManualHandoffAdapter } from '@matrixark/adapters';
+import { ManualHandoffAdapter, resolveAdapter, validateBilibiliArticle, type PublishInput, type PublishReceipt } from '@matrixark/adapters';
 import { assertTransition, COMMITTED_STATUSES, idempotencyKey, type recordResultSchema } from '@matrixark/shared';
 import type { z } from 'zod';
+import { bilibiliCredentials, publishChannel } from '../accounts/publish-account';
+import { config } from '../config';
 import { inspectSnapshot, variantSnapshot } from '../content/content.service';
+import { StorageService } from '../content/storage.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 const lockTables = {
@@ -22,7 +25,7 @@ async function lockRow(tx: Prisma.TransactionClient, table: keyof typeof lockTab
 }
 
 const taskRelations = {
-  account: { select: { id: true, platform: true, displayName: true, operator: true } },
+  account: { select: { id: true, platform: true, displayName: true, operator: true, channelKind: true } },
   variant: { select: { id: true, manuscriptId: true, platform: true, version: true, title: true } },
   result: true,
 } as const satisfies Prisma.PublishTaskInclude;
@@ -32,13 +35,17 @@ const publishableVariant = {
   manuscript: { select: { archivedAt: true } },
 } as const satisfies Prisma.VariantInclude;
 
-function canUseAccount(account: ChannelAccount, now: Date) {
-  return account.channelKind === 'manual'
-    && !account.archivedAt && ['active', 'pending'].includes(account.authStatus)
-    && (!account.rateLimitedUntil || account.rateLimitedUntil <= now);
-}
+type PublishableVariant = Prisma.VariantGetPayload<{ include: typeof publishableVariant }>;
 
-function hasApproval(variant: Prisma.VariantGetPayload<{ include: typeof publishableVariant }>) {
+type AutomaticClaim = {
+  task: PublishTask;
+  variant: PublishableVariant;
+  account: ChannelAccount;
+  channel: 'official' | 'sandbox';
+  leaseId: string;
+};
+
+function hasApproval(variant: PublishableVariant) {
   return !variant.manuscript.archivedAt && variant.status === 'approved'
     && variant.approval?.workspaceId === variant.workspaceId
     && variant.approval.snapshotHash === variant.contentHash
@@ -55,6 +62,11 @@ function presentTask<T extends PublishTask & { result?: PublishResult | null }>(
 
 function assetUrl(workspaceId: string, assetId: string) {
   return `/api/workspaces/${encodeURIComponent(workspaceId)}/assets/${encodeURIComponent(assetId)}`;
+}
+
+function publishVariant(variant: PublishableVariant): PublishInput['variant'] {
+  return { ...variant, imageCount: variant.assets.length,
+    imageUrls: variant.assets.map(({ assetId }) => assetUrl(variant.workspaceId, assetId)) };
 }
 
 async function databaseTime(tx: Prisma.TransactionClient) {
@@ -74,7 +86,7 @@ type TaskFilters = {
 export class TasksService {
   private readonly manual = new ManualHandoffAdapter();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly storage: StorageService) {}
 
   async schedule(workspaceId: string, userId: string, variantId: string, accountId: string, scheduledAt: Date) {
     return this.prisma.$transaction(async (tx) => {
@@ -91,7 +103,16 @@ export class TasksService {
       if (existing) return { task: existing, disposition: 'existing' as const };
       if (!hasApproval(variant)) throw new ConflictException('版本需要有效审核');
       if (!account.externalId || !account.authCheckedAt) throw new ConflictException('账号尚未通过平台身份核验。');
-      if (!canUseAccount(account, await databaseTime(tx))) throw new ConflictException('该账号当前无法用于人工交接');
+      const channel = publishChannel(account, await databaseTime(tx));
+      if (!channel) throw new ConflictException('该账号当前不可用于排期，请检查授权和通道配置');
+      if (channel === 'official') {
+        if (!bilibiliCredentials(account)) throw new ConflictException('无法读取该账号的 B 站授权');
+        try {
+          validateBilibiliArticle(publishVariant(variant));
+        } catch (error) {
+          throw new BadRequestException((error as Error).message);
+        }
+      }
 
       const task = await tx.publishTask.create({
         data: {
@@ -229,24 +250,32 @@ export class TasksService {
   }
 
   async dispatchDue() {
+    await this.recoverExpiredClaims();
+    const enabledChannels: Array<'manual' | 'official' | 'sandbox'> = ['manual'];
+    if (config.bilibili.enabled) enabledChannels.push('official');
+    if (config.sandboxChannel) enabledChannels.push('sandbox');
     const candidates = await this.prisma.publishTask.findMany({
       where: {
         status: 'scheduled', scheduledAt: { lte: await databaseTime(this.prisma) },
-        OR: [{ executionChannel: 'manual' }, { executionChannel: null, account: { channelKind: 'manual' } }],
+        account: { channelKind: { in: enabledChannels } },
+        OR: [{ executionChannel: null }, { executionChannel: { in: enabledChannels } }],
       },
       orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
       take: 50,
       select: { id: true, workspaceId: true, accountId: true, variantId: true, variant: { select: { manuscriptId: true } } },
     });
-    let handedOff = 0;
+    let dispatched = 0;
     for (const candidate of candidates) {
-      if (await this.dispatch(candidate)) handedOff++;
+      const outcome = await this.claim(candidate);
+      if (!outcome) continue;
+      if (outcome !== true) await this.submitClaim(outcome);
+      dispatched++;
     }
-    return handedOff;
+    return dispatched;
   }
 
-  private async dispatch(candidate: Pick<PublishTask, 'id' | 'workspaceId' | 'accountId' | 'variantId'>
-    & { variant: { manuscriptId: string } }) {
+  private async claim(candidate: Pick<PublishTask, 'id' | 'workspaceId' | 'accountId' | 'variantId'>
+    & { variant: { manuscriptId: string } }): Promise<boolean | AutomaticClaim> {
     const { id, workspaceId, accountId, variantId, variant: { manuscriptId } } = candidate;
     return this.prisma.$transaction(async (tx) => {
       if (!(await lockRow(tx, 'manuscript', workspaceId, manuscriptId))
@@ -256,13 +285,15 @@ export class TasksService {
       const task = await tx.publishTask.findUniqueOrThrow({ where: { id } });
       const now = await databaseTime(tx);
       if (task.status !== 'scheduled' || task.scheduledAt > now || task.accountId !== accountId
-        || task.variantId !== variantId || (task.executionChannel && task.executionChannel !== 'manual')) return false;
+        || task.variantId !== variantId) return false;
 
       const variant = await tx.variant.findUniqueOrThrow({ where: { id: variantId }, include: publishableVariant });
       const account = await tx.channelAccount.findUniqueOrThrow({ where: { id: accountId } });
+      const channel = publishChannel(account, now);
+      if (task.executionChannel && task.executionChannel !== account.channelKind) return false;
       if (!hasApproval(variant) || variant.contentHash !== task.variantContentHash
-        || account.platform !== variant.platform || !canUseAccount(account, now)) {
-        const reason = '审核快照失效或人工账号不可用';
+        || account.platform !== variant.platform || !channel) {
+        const reason = '审核快照失效或发布账号不可用';
         assertTransition(task.status, 'paused');
         await tx.publishTask.update({ where: { id }, data: { status: 'paused', lastError: reason } });
         await tx.taskEvent.create({
@@ -271,22 +302,28 @@ export class TasksService {
         return false;
       }
       if (await tx.publishTask.findFirst({
-        where: { accountId, status: 'dispatching', leaseExpiresAt: { gt: now } },
+        where: { accountId, status: 'dispatching' },
         select: { id: true },
       })) return false;
 
-      // 人工适配器只生成本地回执，领取与交接在一个事务提交。
       const leaseId = randomUUID();
       assertTransition(task.status, 'dispatching');
       await tx.publishTask.update({
         where: { id },
         data: {
-          status: 'dispatching', executionChannel: 'manual', claimedAt: now,
-          attempts: { increment: 1 }, leaseId, leaseExpiresAt: new Date(now.getTime() + 45_000),
+          status: 'dispatching', executionChannel: channel, claimedAt: now,
+          attempts: { increment: 1 }, leaseId, leaseExpiresAt: new Date(now.getTime() + 90_000),
         },
       });
+      await tx.taskEvent.create({
+        data: { workspaceId, taskId: id, kind: 'claimed', fromStatus: 'scheduled', toStatus: 'dispatching',
+          leaseId, details: { executionChannel: channel } },
+      });
+      if (channel !== 'manual') return { task, variant, account, channel, leaseId };
+
+      // 人工交接只产生本地回执，与领取在同一事务提交。
       const receipt = await this.manual.publish({
-        variant: { ...variant, imageUrls: variant.assets.map(({ assetId }) => assetUrl(workspaceId, assetId)) },
+        variant: publishVariant(variant),
         account: { id: accountId, displayName: account.displayName, platform: account.platform, channelKind: 'manual' },
         slot: { scheduledAt: task.scheduledAt.toISOString(), idempotencyKey: task.idempotencyKey },
       });
@@ -296,15 +333,156 @@ export class TasksService {
         where: { id },
         data: { status: receipt.status, handedOffAt: now, leaseId: null, leaseExpiresAt: null, lastError: null },
       });
-      await tx.taskEvent.createMany({
-        data: [
-          { workspaceId, taskId: id, kind: 'claimed', fromStatus: 'scheduled', toStatus: 'dispatching',
-            leaseId, details: { executionChannel: 'manual' } },
-          { workspaceId, taskId: id, kind: 'handed_off', fromStatus: 'dispatching', toStatus: 'handed_off',
-            leaseId, reason: receipt.message },
-        ],
+      await tx.taskEvent.create({
+        data: { workspaceId, taskId: id, kind: 'handed_off', fromStatus: 'dispatching', toStatus: 'handed_off',
+          leaseId, reason: receipt.message },
       });
       return true;
     }, { isolationLevel: 'ReadCommitted' });
+  }
+
+  private async submitClaim({ task, variant, account, channel, leaseId }: AutomaticClaim) {
+    const adapter = resolveAdapter(account.platform, channel, { bilibili: config.bilibili });
+    const input: PublishInput = {
+      variant: publishVariant(variant),
+      account: { ...account, credentials: channel === 'official' ? bilibiliCredentials(account) : undefined },
+      slot: { scheduledAt: task.scheduledAt.toISOString(), idempotencyKey: task.idempotencyKey },
+      beforeSubmit: async () => Boolean(await this.prisma.publishTask.findFirst({
+        where: { id: task.id, status: 'dispatching', leaseId, leaseExpiresAt: { gt: await databaseTime(this.prisma) },
+          account: { archivedAt: null, authStatus: 'active', credentialsUpdatedAt: account.credentialsUpdatedAt,
+            authExpiresAt: { gt: new Date() }, OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lte: new Date() } }] } },
+        select: { id: true },
+      })),
+    };
+    let failure: PublishReceipt | undefined;
+    try {
+      if (channel === 'official') input.variant.images = await this.readPublishImages(variant);
+      await adapter.preflight(input);
+    } catch {
+      failure = { status: 'failed', message: '投稿前检查失败，文章尚未提交。请检查授权、专栏字段和图片格式' };
+    }
+    const receipt = failure ?? await adapter.publish(input).catch((): PublishReceipt => ({
+      status: 'unknown', message: '提交结果未确认，请核实平台记录',
+    }));
+    await this.prisma.$transaction(async (tx) => {
+      if (!(await lockRow(tx, 'task', task.workspaceId, task.id))) return;
+      const current = await tx.publishTask.findUniqueOrThrow({ where: { id: task.id } });
+      const now = await databaseTime(tx);
+      if (current.status !== 'dispatching' || current.leaseId !== leaseId
+        || !current.leaseExpiresAt || current.leaseExpiresAt <= now) {
+        await tx.taskEvent.create({
+          data: { taskId: task.id, workspaceId: task.workspaceId, kind: 'late_receipt', leaseId,
+            reason: receipt.message, details: this.receiptDetails(receipt) },
+        });
+        return;
+      }
+      await this.storeAutomaticResult(tx, current, receipt, now);
+    });
+  }
+
+  private async readPublishImages(variant: PublishableVariant) {
+    const { workspaceId, manuscriptId, assets } = variant;
+    const files = await this.prisma.asset.findMany({
+      where: { id: { in: assets.map(({ assetId }) => assetId) }, workspaceId, manuscriptId, kind: 'manuscript_image' },
+      select: { id: true, storageKey: true, size: true },
+    });
+    const byId = new Map(files.map((file) => [file.id, file]));
+    const images: { file: Blob; isCover: boolean }[] = [];
+    for (const asset of assets) {
+      const file = byId.get(asset.assetId);
+      if (!file || file.size > 5 * 1024 * 1024) throw new Error('文章图片缺失或超出 B 站大小限制');
+      const image = await this.storage.readImage(workspaceId, file.storageKey);
+      images.push({ file: new Blob([new Uint8Array(image.data)], { type: image.mimeType }), isCover: asset.isCover });
+    }
+    return images;
+  }
+
+  private async recoverExpiredClaims() {
+    const now = await databaseTime(this.prisma);
+    const expired = await this.prisma.publishTask.findMany({
+      where: { status: 'dispatching', executionChannel: { in: ['official', 'sandbox'] }, leaseExpiresAt: { lte: now } },
+      orderBy: { leaseExpiresAt: 'asc' },
+      take: 50,
+      select: { id: true, workspaceId: true },
+    });
+    for (const { id, workspaceId } of expired) {
+      await this.prisma.$transaction(async (tx) => {
+        if (!(await lockRow(tx, 'task', workspaceId, id))) return;
+        const current = await tx.publishTask.findUniqueOrThrow({ where: { id } });
+        if (current.status !== 'dispatching' || !current.leaseExpiresAt || current.leaseExpiresAt > now) return;
+        await this.storeAutomaticResult(tx, current, { status: 'unknown', message: '领取已超时，请核实平台记录' }, now);
+      });
+    }
+  }
+
+  async pollAutomaticResults() {
+    const channels: Array<'official' | 'sandbox'> = [];
+    if (config.bilibili.enabled) channels.push('official');
+    if (config.sandboxChannel) channels.push('sandbox');
+    if (!channels.length) return;
+    const now = await databaseTime(this.prisma);
+    const pending = await this.prisma.publishTask.findMany({
+      where: {
+        status: { in: ['submitted', 'under_review'] }, executionChannel: { in: channels },
+        updatedAt: { lte: new Date(now.getTime() - 10_000) },
+        result: { remoteId: { not: null } }, account: { platform: 'bilibili' },
+      },
+      orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+      include: { account: true, result: true },
+      take: 5,
+    });
+    await Promise.all(pending.map(async (task) => {
+      // Advance the polling timestamp once across Worker replicas before the read-only network request.
+      const { count } = await this.prisma.publishTask.updateMany({
+        where: { id: task.id, status: task.status, updatedAt: task.updatedAt },
+        data: { updatedAt: now },
+      });
+      if (!count || !task.result?.remoteId || !task.executionChannel
+        || publishChannel(task.account, now) !== task.executionChannel) return;
+      const credentials = task.executionChannel === 'official' ? bilibiliCredentials(task.account) : undefined;
+      if (task.executionChannel === 'official' && !credentials) return;
+      const adapter = resolveAdapter(task.account.platform, task.executionChannel, { bilibili: config.bilibili });
+      const receipt = await adapter.fetchStatus(
+        { status: task.result.state, remoteId: task.result.remoteId }, { ...task.account, credentials },
+      );
+      if (receipt.status === task.status) return;
+      await this.prisma.$transaction(async (tx) => {
+        if (!(await lockRow(tx, 'task', task.workspaceId, task.id))) return;
+        const current = await tx.publishTask.findUniqueOrThrow({ where: { id: task.id }, include: { result: true } });
+        if (current.status !== task.status || current.result?.remoteId !== task.result!.remoteId) return;
+        await this.storeAutomaticResult(tx, current, receipt, await databaseTime(tx));
+      });
+    }));
+  }
+
+  private receiptDetails(receipt: PublishReceipt) {
+    return {
+      state: receipt.status, remoteId: receipt.remoteId ?? null, remoteUrl: receipt.remoteUrl ?? null,
+      ...(receipt.raw ? { platform: receipt.raw as Prisma.InputJsonObject } : {}),
+    };
+  }
+
+  private async storeAutomaticResult(tx: Prisma.TransactionClient, task: PublishTask, receipt: PublishReceipt, now: Date) {
+    const state = receipt.status;
+    if (state === 'handed_off') throw new Error('自动通道返回了人工交接回执');
+    assertTransition(task.status, state);
+    const result = {
+      state, remoteId: receipt.remoteId, remoteUrl: receipt.remoteUrl,
+      platformPublishedAt: receipt.platformPublishedAt ? new Date(receipt.platformPublishedAt) : undefined,
+      note: receipt.message ?? null, recordedAt: now,
+    };
+    await tx.publishResult.upsert({
+      where: { taskId: task.id }, update: result,
+      create: { ...result, workspaceId: task.workspaceId, taskId: task.id },
+    });
+    await tx.publishTask.update({
+      where: { id: task.id },
+      data: { status: state, leaseId: null, leaseExpiresAt: null,
+        lastError: state === 'failed' || state === 'unknown' ? receipt.message : null },
+    });
+    await tx.taskEvent.create({
+      data: { workspaceId: task.workspaceId, taskId: task.id, kind: 'result', fromStatus: task.status,
+        toStatus: state, leaseId: task.leaseId, reason: receipt.message, details: this.receiptDetails(receipt) },
+    });
   }
 }

@@ -24,6 +24,8 @@ function rawFields(form: HTMLFormElement) {
     title: String(fields.get('title') ?? ''),
     body: String(fields.get('body') ?? ''),
     tags: String(fields.get('tags') ?? ''),
+    category: String(fields.get('category') ?? ''),
+    summary: String(fields.get('summary') ?? ''),
   };
 }
 
@@ -37,7 +39,7 @@ function textFields({ title, body, tags }: ReturnType<typeof rawFields>) {
 
 export type ManuscriptDrafts = Map<string, { fields: ReturnType<typeof rawFields>; assetIds?: string[]; coverAssetId?: string | null }>;
 
-function TextFields({ values, disabled }: { values?: ReturnType<typeof rawFields>; disabled: boolean }) {
+function TextFields({ values, disabled }: { values?: Pick<ReturnType<typeof rawFields>, 'title' | 'body' | 'tags'>; disabled: boolean }) {
   return <>
     <label>标题<input name="title" autoFocus required disabled={disabled} maxLength={200} defaultValue={values?.title} placeholder="输入稿件标题" /></label>
     <label>正文<textarea name="body" required disabled={disabled} maxLength={50000} rows={7} defaultValue={values?.body} placeholder="粘贴或撰写图文正文" /></label>
@@ -105,11 +107,14 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
   }
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const body = textFields(rawFields(event.currentTarget));
+    const fields = rawFields(event.currentTarget);
+    const body = textFields(fields);
     const submitted = drafts.get(draftKey);
     void action.run(async () => {
       await api(scope + '/variants/' + variant.id, {
-        method: 'PATCH', body: { ...body, assetIds, coverAssetId: firstImageIsCover ? undefined : coverAssetId },
+        method: 'PATCH', body: { ...body, assetIds, coverAssetId: firstImageIsCover ? undefined : coverAssetId,
+          platformFields: variant.platform === 'bilibili'
+            ? { ...variant.platformFields, category: fields.category.trim(), summary: fields.summary.trim() } : undefined },
       });
       if (drafts.get(draftKey) === submitted) drafts.delete(draftKey);
       onSave();
@@ -122,6 +127,13 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
     }
   }}>
     <TextFields values={initial?.fields ?? { ...variant, tags: variant.tags.join('，') }} disabled={action.busy} />
+    {variant.platform === 'bilibili' && <div className="field-group">
+      <h3>B 站官方投稿</h3>
+      <label>专栏子分类 ID<input name="category" inputMode="numeric" pattern="[0-9]+" maxLength={20}
+        disabled={action.busy} defaultValue={initial?.fields.category ?? String(variant.platformFields?.category ?? '')} /></label>
+      <label>专栏摘要 <small>官方投稿至少 200 字</small><textarea name="summary" rows={4} disabled={action.busy}
+        defaultValue={initial?.fields.summary ?? String(variant.platformFields?.summary ?? '')} /></label>
+    </div>}
     <div className="field-group">
       <h3>发布图片</h3>
       <p className="muted">{firstImageIsCover ? '首图为封面。' : ''}调整图片会生成待审核的新版本。</p>
@@ -179,7 +191,7 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
     const fields = new FormData(event.currentTarget);
     void action.run(async () => {
       const date = new Date(String(fields.get('scheduledAt')));
-      if (!Number.isFinite(date.getTime())) throw new Error('请选择有效的交接时间。');
+      if (!Number.isFinite(date.getTime())) throw new Error('请选择有效的排期时间。');
       const response = await post<{ items: { id: string }[] }>(scope + '/tasks', {
         variantIds: [variant.id], accountIds: [String(fields.get('accountId') ?? '')], scheduledAt: date.toISOString(),
       });
@@ -188,14 +200,16 @@ function Schedule({ scope, variant, accounts, onSchedule, openAccounts }: {
     });
   }
   return <div className="schedule">
-    <h3><CalendarPlus size={17} aria-hidden="true" />排期交接</h3>
+    <h3><CalendarPlus size={17} aria-hidden="true" />安排发布</h3>
     {accounts.length ? <form className="form-stack" onSubmit={submit}>
       <div className="form-row">
         <label>{platformLabel[variant.platform]}账号<select name="accountId" required defaultValue={accounts.length === 1 ? accounts[0]!.id : ''}>
-          <option value="" disabled>选择人工账号</option>
-          {accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}
+          <option value="" disabled>选择发布账号</option>
+          {accounts.map((account) => <option key={account.id} value={account.id}>
+            {account.displayName} · {account.availableForOfficial ? '自动投稿' : '人工交接'}
+          </option>)}
         </select></label>
-        <label>交接时间 <small>{Intl.DateTimeFormat().resolvedOptions().timeZone}</small>
+        <label>排期时间 <small>{Intl.DateTimeFormat().resolvedOptions().timeZone}</small>
           <input name="scheduledAt" type="datetime-local" required defaultValue={localDateTime()} />
         </label>
       </div>
@@ -312,6 +326,11 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
           <div className="variant-preview">
             <div className="section-line"><h3>{variant.title}</h3><span className="version">V{variant.version}</span></div>
             <p className="content-text">{variant.body}</p>
+            {variant.platform === 'bilibili' && typeof variant.platformFields?.summary === 'string' && variant.platformFields.summary &&
+              <div className="field-group">
+                <h4>专栏摘要 · 分类 {String(variant.platformFields.category ?? '')}</h4>
+                <p className="content-text">{variant.platformFields.summary}</p>
+              </div>}
             {variant.tags.length > 0 && <div className="tag-row">{variant.tags.map((tag, index) => <span key={index}>#{tag}</span>)}</div>}
             {snapshot && snapshot.assets.length > 0 && <div className="picture-grid">
               {snapshot.assets.map((asset) => <div className="picture" key={asset.assetId}>
@@ -340,7 +359,8 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
           </div>
           {snapshot && approved && editable && <>{accounts.loading ? <Loading /> : accounts.error ? <Feedback error={accounts.error} />
             : <Schedule key={snapshot.id} scope={scope} variant={snapshot} onSchedule={onSchedule} openAccounts={openAccounts}
-              accounts={accounts.data?.filter((account) => account.platform === platform && account.availableForHandoff) ?? []} />}</>}
+              accounts={accounts.data?.filter((account) => account.platform === platform
+                && (account.availableForHandoff || account.availableForOfficial)) ?? []} />}</>}
         </>}
     </div>
   </section>;

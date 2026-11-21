@@ -69,8 +69,8 @@ function SignIn({ onSession, onClose, initialError }: {
   </dialog>;
 }
 
-function Accounts({ scope, resource }: {
-  scope: string; resource: ReturnType<typeof useResource<Account[]>>;
+function Accounts({ scope, canManage, resource }: {
+  scope: string; canManage: boolean; resource: ReturnType<typeof useResource<Account[]>>;
 }) {
   const [authorization, setAuthorization] = useState<{ id: string; userCode: string; image: string }>();
   const [status, setStatus] = useState('');
@@ -104,9 +104,9 @@ function Accounts({ scope, resource }: {
   }
   return <>
     <PageHeader title="发布账号" description="通过平台授权核验真实账号。账号身份和发布权限分别显示。">
-      <button className="button primary" onClick={connect} disabled={action.busy || Boolean(authorization)}>
+      {canManage && <button className="button primary" onClick={connect} disabled={action.busy || Boolean(authorization)}>
         <ScanLine size={17} aria-hidden="true" />连接小红书账号
-      </button>
+      </button>}
     </PageHeader>
     <Feedback error={action.error || resource.error} notice={authorization ? undefined : status} />
     {authorization && <section className="card form-card form-stack" aria-labelledby="xiaohongshu-auth-title">
@@ -127,7 +127,8 @@ function Accounts({ scope, resource }: {
         <div><strong>{account.displayName}</strong><small>{platformLabel[account.platform]}{account.identityCheckedAt
           ? ` · 核验于 ${formatTime(account.identityCheckedAt)}` : ''}</small></div>
         <span className={`badge ${account.identityVerified ? 'green' : 'gray'}`}>{account.identityVerified
-          ? account.availableForHandoff ? '身份已核验 · 人工交接' : '身份已核验 · 未开通发布'
+          ? account.availableForOfficial ? '身份已核验 · 官方自动投稿'
+            : account.availableForHandoff ? '身份已核验 · 人工交接' : '身份已核验 · 未开通发布'
           : '历史账号 · 未核验'}</span>
       </div>) : !resource.error && <Empty icon={UsersRound} title="还没有发布账号"
         description="先连接小红书，授权成功后会显示平台返回的账号。B 站账号暂待开放平台授权。" />}
@@ -140,12 +141,12 @@ function WorkspaceBody({ workspace, section, taskId, drafts, openTasks, openAcco
   drafts: ManuscriptDrafts;
 }) {
   const scope = scopeFor(workspace.id);
-  const accounts = useResource<Account[]>(canEdit(workspace.role) && section !== 'members' ? scope + '/accounts' : null);
+  const accounts = useResource<Account[]>(section !== 'members' ? scope + '/accounts' : null);
   if (section === 'manuscripts') return <Manuscripts scope={scope} role={workspace.role} accounts={accounts} drafts={drafts}
     openTasks={openTasks} openAccounts={openAccounts} />;
   if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={taskId} />;
   if (section === 'members') return <Members scope={scope} />;
-  return <Accounts scope={scope} resource={accounts} />;
+  return <Accounts scope={scope} canManage={canEdit(workspace.role)} resource={accounts} />;
 }
 
 export default function Home() {

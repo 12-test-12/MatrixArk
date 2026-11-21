@@ -45,7 +45,7 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
     </section>
   </>;
   if (section === 'accounts') return <>
-    <PageHeader title="发布账号" description="按平台管理接收人工交接任务的账号。" />
+    <PageHeader title="发布账号" description="通过平台授权核验真实账号。账号身份和发布权限分别显示。" />
     <section className="card">
       <div className="card-heading"><h2>账号列表</h2></div>
       {platforms.map((platform) => <div className="account-row" key={platform}>

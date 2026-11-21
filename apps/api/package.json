@@ -7,6 +7,7 @@
     "dev": "nest start --watch",
     "start": "node dist/main.js",
     "start:worker": "node dist/worker.js",
+    "bind:bilibili": "node dist/accounts/bind-bilibili.js",
     "typecheck": "tsc --noEmit",
     "db:generate": "node scripts/prisma.mjs generate",
     "db:migrate": "node scripts/prisma.mjs migrate dev",

@@ -19,6 +19,7 @@ import { assertCan } from '../common/permissions';
 import { parse } from '../common/zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
+import { publishChannel } from './publish-account';
 import { XiaohongshuIdentityService } from './xiaohongshu-identity.service';
 
 const updateAccountSchema = z.object({
@@ -38,6 +39,7 @@ export class AccountsController {
       orderBy: { createdAt: 'asc' },
       include: { _count: { select: { tasks: true } } },
     });
+    const now = new Date();
     return accounts.map((account) => ({
       id: account.id,
       platform: account.platform,
@@ -46,10 +48,9 @@ export class AccountsController {
       operator: account.operator,
       identityVerified: Boolean(account.externalId && account.authCheckedAt),
       identityCheckedAt: account.authCheckedAt,
-      availableForHandoff: Boolean(account.externalId && account.authCheckedAt && account.channelKind === 'manual'
-        && !account.archivedAt && ['active', 'pending'].includes(account.authStatus)
-        && (!account.rateLimitedUntil || account.rateLimitedUntil <= new Date())),
-      hasCredentials: Boolean(account.credentials),
+      availableForHandoff: publishChannel(account, now) === 'manual',
+      availableForOfficial: publishChannel(account, now) === 'official',
+      hasCredentials: Boolean(account.credentialsCiphertext || account.credentials),
       taskCount: account._count.tasks,
       createdAt: account.createdAt,
     }));

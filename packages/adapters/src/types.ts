@@ -11,6 +11,9 @@ export interface PublishInput {
     body: string;
     tags: readonly string[];
     imageUrls: readonly string[];
+    platformFields?: unknown;
+    images?: readonly { file: Blob; isCover: boolean }[];
+    imageCount?: number;
   };
   account: {
     id: string;
@@ -24,6 +27,7 @@ export interface PublishInput {
     scheduledAt: string;
     idempotencyKey: string;
   };
+  beforeSubmit?: () => Promise<boolean>;
 }
 
 export interface PublishReceipt {
@@ -33,6 +37,7 @@ export interface PublishReceipt {
   remoteUrl?: string;
   message?: string;
   raw?: unknown;
+  platformPublishedAt?: string;
 }
 
 /** 通道未配置好：不是业务失败，是环境问题，不能算成「发布失败」 */

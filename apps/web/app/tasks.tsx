@@ -11,13 +11,15 @@ import { Empty, Feedback, Loading, PageHeader, TaskBadge } from './ui';
 import { roleView } from './workbench';
 
 const filters = [
-  { value: '', label: '全部' }, { value: 'scheduled', label: '待交接' }, { value: 'handed_off', label: '待回填' },
+  { value: '', label: '全部' }, { value: 'scheduled', label: '待执行' }, { value: 'handed_off', label: '待回填' },
+  { value: 'under_review', label: '平台审核中' },
   { value: 'published', label: '已发布' }, { value: 'unknown', label: '待核实' },
 ] as const;
 
 const eventLabels: Record<string, string> = {
   created: '创建排期', claimed: '领取任务', handed_off: '完成人工交接', result: '回填发布结果', paused: '暂停任务',
   rescheduled: '调整排期', verified: '核对结果', canceled: '取消任务', retried: '重试任务', corrected: '更正结果',
+  late_receipt: '迟到的回执',
 };
 
 function externalUrl(value: string | null) {
@@ -108,6 +110,7 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
 
   const result = task.result;
   const resultUrl = externalUrl(result?.remoteUrl ?? null);
+  const automated = (task.executionChannel ?? task.account.channelKind) !== 'manual';
   function actorName(actorId: string | null) {
     return actorId ? people.get(actorId) ?? '工作室成员' : '系统';
   }
@@ -121,11 +124,15 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
       <Feedback error={detail.error || task.lastError || undefined} />
       {task.isSandbox && <p className="feedback">沙箱任务</p>}
       <dl className="task-meta">
-        <div><dt>计划交接</dt><dd>{formatTime(task.scheduledAt)}</dd></div>
-        <div><dt>实际交接</dt><dd>{task.handedOffAt ? formatTime(task.handedOffAt) : '待交接'}</dd></div>
+        <div><dt>计划时间</dt><dd>{formatTime(task.scheduledAt)}</dd></div>
+        {automated
+          ? <div><dt>开始处理</dt><dd>{task.claimedAt ? formatTime(task.claimedAt) : '待执行'}</dd></div>
+          : <div><dt>实际交接</dt><dd>{task.handedOffAt ? formatTime(task.handedOffAt) : '待交接'}</dd></div>}
       </dl>
       {(task.status === 'scheduled' || task.status === 'dispatching') && <div className="sub-empty">
-        <Clock3 size={19} aria-hidden="true" /><p>到计划时间后，Worker 会生成已审交接包。</p>
+        <Clock3 size={19} aria-hidden="true" /><p>{automated
+          ? '到计划时间后，系统将提交已审版本，并查询平台回执。'
+          : '到计划时间后，系统将生成已审交接包。'}</p>
       </div>}
       <Feedback error={handoff.error} />
       {handoff.loading ? <Loading /> : handoff.data && <Package data={handoff.data} />}
@@ -137,8 +144,10 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
         <div className="section-line"><h3><ClipboardCheck size={17} aria-hidden="true" />发布回执</h3><TaskBadge status={result.state} /></div>
         <p className="muted small">{actorName(result.recordedById)} · {formatTime(result.recordedAt)}</p>
         {result.note && <p className="content-text">{result.note}</p>}
+        {result.remoteId && automated && <p className="muted small">文章 ID {result.remoteId}</p>}
+        {result.platformPublishedAt && <p className="muted small">发表时间 {formatTime(result.platformPublishedAt)}</p>}
         <div className="actions">
-          {resultUrl && <a href={resultUrl} target="_blank" rel="noreferrer" className="button compact"><ExternalLink size={15} aria-hidden="true" />打开作品</a>}
+          {resultUrl && !task.isSandbox && <a href={resultUrl} target="_blank" rel="noreferrer" className="button compact"><ExternalLink size={15} aria-hidden="true" />打开作品</a>}
           {result.evidenceAssetId && <a href={'/api' + path + '/evidence'} target="_blank" rel="noreferrer" className="button compact">
             <Images size={15} aria-hidden="true" />查看截图
           </a>}
@@ -149,7 +158,8 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
         <ol className="timeline">
           {task.events.map((event) => <li key={event.id}>
             <span className="timeline-dot" />
-            <div><strong>{eventLabels[event.kind] ?? (event.toStatus ? taskLabel[event.toStatus] : '任务更新')}</strong>
+            <div><strong>{automated && event.kind === 'result' && event.toStatus ? taskLabel[event.toStatus]
+              : eventLabels[event.kind] ?? (event.toStatus ? taskLabel[event.toStatus] : '任务更新')}</strong>
               <div className="muted small">{actorName(event.actorId)} · {formatTime(event.createdAt)}</div>
               {event.reason && <p>{event.reason}</p>}
             </div>

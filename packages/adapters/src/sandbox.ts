@@ -8,8 +8,6 @@ export class SandboxAdapter implements ChannelAdapter {
   readonly kind = 'sandbox' as const;
   readonly platforms = ['bilibili', 'xiaohongshu'] as const;
 
-  private readonly statusCalls = new Map<string, number>();
-
   async preflight(): Promise<void> {}
 
   async publish(input: PublishInput): Promise<PublishReceipt> {
@@ -24,19 +22,17 @@ export class SandboxAdapter implements ChannelAdapter {
       case 2:
         return { status: 'failed', remoteId, message: '沙箱：平台返回审核不通过（模拟）' };
       default:
-        return { status: 'unknown', remoteId, message: '沙箱：提交超时，需核对结果' };
+        return { status: 'unknown', message: '沙箱：提交超时且无文章 ID，需核对结果' };
     }
   }
 
   async fetchStatus(receipt: PublishReceipt): Promise<PublishReceipt> {
-    const key = receipt.remoteId ?? 'unknown';
-    const calls = (this.statusCalls.get(key) ?? 0) + 1;
-    this.statusCalls.set(key, calls);
-
-    // 第一次查到「审核中」，第二次才给结论 —— 逼着调用方真的做轮询而不是一把梭
-    if (calls === 1) {
+    const key = receipt.remoteId;
+    if (!key) return receipt;
+    if (receipt.status === 'submitted') {
       return { ...receipt, status: 'under_review', message: '沙箱：平台审核中' };
     }
+    if (receipt.status !== 'under_review') return receipt;
     return {
       ...receipt,
       status: 'published',

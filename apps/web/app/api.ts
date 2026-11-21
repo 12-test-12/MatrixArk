@@ -8,12 +8,12 @@ export type Platform = (typeof platforms)[number];
 export const platformLabel: Record<Platform, string> = { xiaohongshu: '小红书', bilibili: 'B 站专栏' };
 export type Account = {
   id: string; platform: Platform; channelKind: 'manual' | 'official' | 'sandbox'; displayName: string; operator?: string | null;
-  identityVerified: boolean; identityCheckedAt: string | null; availableForHandoff: boolean;
+  identityVerified: boolean; identityCheckedAt: string | null; availableForHandoff: boolean; availableForOfficial: boolean;
 };
 export type Approval = { approvedAt: string; snapshotHash: string | null };
 export type Picture = { assetId: string; position: number; isCover: boolean };
 export type VariantSummary = { id: string; platform: Platform; status: 'draft' | 'approved' | 'superseded'; version: number };
-type VariantText = VariantSummary & { title: string; body: string; tags: string[] };
+type VariantText = VariantSummary & { title: string; body: string; tags: string[]; platformFields?: Record<string, unknown> };
 export type Variant = VariantText & {
   assets: Picture[]; snapshotVersion: number;
   approval: Approval | null;
@@ -29,13 +29,14 @@ export type Manuscript = {
 export type TaskStatus = 'scheduled' | 'dispatching' | 'paused' | 'handed_off' | 'submitted'
   | 'under_review' | 'published' | 'failed' | 'unknown' | 'verified' | 'canceled';
 export type Result = {
-  state: TaskStatus; remoteUrl: string | null; recordedById: string | null; recordedAt: string;
+  state: TaskStatus; remoteUrl: string | null; remoteId: string | null; recordedById: string | null; recordedAt: string;
+  platformPublishedAt: string | null;
   note: string | null; evidenceAssetId: string | null;
 };
 export type Task = {
-  id: string; status: TaskStatus; scheduledAt: string; handedOffAt: string | null; lastError: string | null;
+  id: string; status: TaskStatus; scheduledAt: string; handedOffAt: string | null; claimedAt: string | null; lastError: string | null;
   executionChannel: string | null; isSandbox: boolean | null;
-  account: Pick<Account, 'id' | 'platform' | 'displayName' | 'operator'>;
+  account: Pick<Account, 'id' | 'platform' | 'displayName' | 'operator' | 'channelKind'>;
   variant: Pick<Variant, 'id' | 'title' | 'platform' | 'version'>;
   result: Result | null;
 };

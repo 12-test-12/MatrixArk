@@ -5,7 +5,7 @@ import { NestFactory } from '@nestjs/core';
 import { TasksModule } from './tasks/tasks.module';
 import { TasksService } from './tasks/tasks.service';
 
-const logger = new Logger('ManualHandoffWorker');
+const logger = new Logger('PublishWorker');
 
 async function main() {
   const stopped = new AbortController();
@@ -20,6 +20,11 @@ async function main() {
         await tasks.dispatchDue();
       } catch (error) {
         logger.error('交接轮询失败，下轮重试', error instanceof Error ? error.stack : String(error));
+      }
+      try {
+        await tasks.pollAutomaticResults();
+      } catch (error) {
+        logger.error('平台回执轮询失败，下轮重试', error instanceof Error ? error.stack : String(error));
       }
       await delay(5_000, undefined, { signal: stopped.signal }).catch((error: unknown) => {
         if (!stopped.signal.aborted) throw error;
