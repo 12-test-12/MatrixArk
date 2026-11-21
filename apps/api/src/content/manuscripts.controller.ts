@@ -21,7 +21,7 @@ import type { Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
 import { ContentService, variantSnapshot } from './content.service';
-import { IMAGE_UPLOAD_LIMIT, StorageService, validateImageUpload } from './storage.service';
+import { IMAGE_UPLOAD_LIMIT, StorageService, imageDisplayName, validateImageUpload } from './storage.service';
 
 @Controller('workspaces/:workspaceId/manuscripts')
 @UseGuards(WorkspaceGuard)
@@ -97,7 +97,7 @@ export class ManuscriptsController {
       createdAt: manuscript.createdAt,
       updatedAt: manuscript.updatedAt,
       imageCount,
-      assets: manuscript.assets,
+      assets: manuscript.assets.map((asset) => ({ ...asset, filename: imageDisplayName(asset.filename) })),
       variants: manuscript.variants.map((v) => ({
         id: v.id,
         platform: v.platform,
@@ -180,18 +180,18 @@ export class ManuscriptsController {
     @UploadedFile() upload: Express.Multer.File | undefined,
   ) {
     assertCan(membership.role, 'content:write');
-    const { file, mimeType } = validateImageUpload(upload);
+    const { file, filename, mimeType } = validateImageUpload(upload);
     const manuscript = await this.prisma.manuscript.findFirst({ where: { id, workspaceId } });
     if (!manuscript) throw new NotFoundException('稿件不存在');
 
-    const { key } = await this.storage.save(workspaceId, file.originalname, file.buffer);
+    const { key } = await this.storage.save(workspaceId, filename, file.buffer);
     return this.prisma.asset.create({
       data: {
         workspaceId,
         manuscriptId: id,
         kind: 'manuscript_image',
         storageKey: key,
-        filename: file.originalname,
+        filename,
         mimeType,
         size: file.size,
       },

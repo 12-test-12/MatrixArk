@@ -73,12 +73,12 @@ export class TasksController {
     @UploadedFile() upload: Express.Multer.File | undefined,
   ) {
     assertCan(role, 'task:result');
-    const { file, mimeType } = validateImageUpload(upload);
+    const { file, filename, mimeType } = validateImageUpload(upload);
     const task = await this.tasks.evidenceTarget(workspaceId, id);
     this.tasks.requireHandoff(task);
-    const { key } = await this.storage.save(workspaceId, file.originalname, file.buffer);
+    const { key } = await this.storage.save(workspaceId, filename, file.buffer);
     return this.tasks.attachEvidence(workspaceId, id, user.id, {
-      storageKey: key, filename: file.originalname, size: file.size, mimeType,
+      storageKey: key, filename, size: file.size, mimeType,
     });
   }
 

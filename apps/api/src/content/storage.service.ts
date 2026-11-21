@@ -5,6 +5,23 @@ import { BadRequestException, Injectable, NotFoundException, UnsupportedMediaTyp
 import { config } from '../config';
 
 export const IMAGE_UPLOAD_LIMIT = 20 * 1024 * 1024;
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+function decodeUploadName(filename: string) {
+  // Multer reads the browser's UTF-8 filename parameter as Latin-1.
+  if (/[^\u0000-\u00ff]/u.test(filename)) return filename;
+  try {
+    return utf8.decode(Buffer.from(filename, 'latin1'));
+  } catch {
+    return filename;
+  }
+}
+
+export function imageDisplayName(filename: string) {
+  const decoded = decodeUploadName(filename);
+  // Recover old Chinese names or byte sequences that left C1 controls in the stored name.
+  return /[\u0080-\u009f]/u.test(filename) || /\p{Script=Han}/u.test(decoded) ? decoded : filename;
+}
 
 function imageType(data: Buffer) {
   if (data.length >= 24 && data.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
@@ -19,7 +36,7 @@ export function validateImageUpload(file: Express.Multer.File | undefined) {
   if (!file) throw new BadRequestException('没有收到文件');
   const mimeType = imageType(file.buffer);
   if (!mimeType) throw new UnsupportedMediaTypeException('只接受 JPEG、PNG 或 WebP 图片');
-  return { file, mimeType };
+  return { file, mimeType, filename: decodeUploadName(file.originalname) };
 }
 
 /**

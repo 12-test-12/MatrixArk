@@ -10,6 +10,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   assert(url && new URL(url).pathname === '/matrixark_upgrade_test' && process.env.STORAGE_LOCAL_DIR,
     'Use infra/ci/check-database.sh');
   const { AppModule } = await import('../dist/app.module.js');
+  const { PrismaService } = await import('../dist/prisma/prisma.service.js');
   const { TasksService } = await import('../dist/tasks/tasks.service.js');
   const { TasksModule } = await import('../dist/tasks/tasks.module.js');
   const api = await NestFactory.create(AppModule, { logger: ['error'], abortOnError: false });
@@ -42,9 +43,9 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   const post = (path, body, status = 201) => call(path, { cookie, method: 'POST', body, status });
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5+0AAAAASUVORK5CYII=', 'base64');
   const sourcePng = await sharp({ create: { width: 640, height: 960, channels: 3, background: '#4839b9' } }).png().toBuffer();
-  const file = (bytes = png) => {
+  const file = (bytes = png, filename = 'sample.png') => {
     const form = new FormData();
-    form.set('file', new Blob([bytes], { type: 'image/png' }), 'sample.png');
+    form.set('file', new Blob([bytes], { type: 'image/png' }), filename);
     return form;
   };
 
@@ -53,7 +54,15 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   });
   const { data: manuscript } = await post(own + '/manuscripts', { title: '审核标题', body: '已审核正文', tags: ['样例'] });
   const source = own + '/manuscripts/' + manuscript.id;
-  const { data: image } = await post(source + '/assets', file(sourcePng));
+  const filename = '稿件封面 Café 🌿.png';
+  const { data: image } = await post(source + '/assets', file(sourcePng, filename));
+  assert.equal(image.filename, filename);
+  const prisma = api.get(PrismaService);
+  const legacyName = Buffer.from(filename, 'utf8').toString('latin1');
+  await prisma.asset.update({ where: { id: image.id }, data: { filename: legacyName } });
+  const { data: withLegacyImage } = await call(source, { cookie });
+  assert.equal(withLegacyImage.assets[0].filename, filename);
+  assert.equal((await prisma.asset.findUniqueOrThrow({ where: { id: image.id } })).filename, legacyName);
   const { data: [variant] } = await post(source + '/generate', { platforms: ['xiaohongshu'] });
   const scheduledAt = new Date(Date.now() - 10_000).toISOString();
   const schedule = { accountIds: [account.id], variantIds: [variant.id], scheduledAt };
@@ -112,7 +121,9 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   const mislabeled = new FormData();
   mislabeled.set('file', new Blob(['<svg></svg>'], { type: 'image/png' }), 'fake.png');
   await post(path + '/evidence', mislabeled, 415);
-  const { data: { assetId } } = await post(path + '/evidence', file());
+  const evidenceName = '发布回执.png';
+  const { data: { assetId } } = await post(path + '/evidence', file(png, evidenceName));
+  assert.equal((await prisma.asset.findUniqueOrThrow({ where: { id: assetId } })).filename, evidenceName);
   const { data: result } = await post(path + '/result', { state: 'published', evidenceAssetId: assetId }, 200);
   assert.equal(result.recordedById, owner.user.id);
   assert.equal(result.evidenceAssetId, assetId);
