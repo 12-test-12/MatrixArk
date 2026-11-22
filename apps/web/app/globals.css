@@ -1,5 +1,6 @@
 :root {
   color-scheme: light;
+  accent-color: var(--accent);
   --canvas: #f8f9fc;
   --paper: #ffffff;
   --ink: #181d2f;
@@ -24,26 +25,28 @@
 
 * {
   box-sizing: border-box;
-  scrollbar-width: thin;
+  scrollbar-width: auto;
   scrollbar-color: #cbd2e3 transparent;
 }
 
-*::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
+@supports not (scrollbar-color: auto) {
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
 
-*::-webkit-scrollbar-track {
-  background: transparent;
-}
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
 
-*::-webkit-scrollbar-thumb {
-  background: #cbd2e3;
-  border-radius: 999px;
-}
+  *::-webkit-scrollbar-thumb {
+    background: #cbd2e3;
+    border-radius: 999px;
+  }
 
-*::-webkit-scrollbar-thumb:hover {
-  background: #aab3cb;
+  *::-webkit-scrollbar-thumb:hover {
+    background: #aab3cb;
+  }
 }
 
 ::selection {
@@ -269,6 +272,15 @@ small, .small {
   font-weight: 500;
 }
 
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
 .auth-dialog {
   width: min(420px, calc(100% - 24px));
   max-height: calc(100dvh - 24px);
@@ -283,10 +295,6 @@ small, .small {
 .auth-dialog::backdrop {
   background: rgba(24, 29, 47, 0.45);
   backdrop-filter: blur(2px);
-}
-
-body:has(.auth-dialog[open]) {
-  overflow: hidden;
 }
 
 .auth-heading {
@@ -871,6 +879,20 @@ input:focus, textarea:focus, select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
   outline: none;
+}
+
+input:not([type=file]):not([type=range]):user-invalid,
+textarea:user-invalid,
+select:user-invalid {
+  border-color: #d93025;
+  background-color: #fff8f8;
+}
+
+input:not([type=file]):not([type=range]):user-invalid:focus,
+textarea:user-invalid:focus,
+select:user-invalid:focus {
+  border-color: #d93025;
+  box-shadow: 0 0 0 3px rgba(217, 48, 37, 0.15);
 }
 
 textarea {

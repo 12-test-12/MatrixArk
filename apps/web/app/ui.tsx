@@ -51,12 +51,26 @@ export function ReviewPicture({ src, label }: { src: string; label: string }) {
   }, [open]);
 
   return <>
-    <button type="button" className="picture-button" aria-label={`查看完整图片：${label}`}
+    <button type="button" className="picture-button" aria-haspopup="dialog" aria-label={`查看完整图片：${label}`}
       onClick={() => { setOriginalFailed(false); setOpen(true); }}>
       {thumbnailFailed ? <span className="picture-fallback"><ImageOff size={18} aria-hidden="true" />查看原图</span>
         : <img src={src + '/thumbnail'} alt="" loading="lazy" decoding="async" onError={() => setThumbnailFailed(true)} />}
     </button>
-    {open && <dialog ref={dialog} aria-labelledby={titleId} className="image-dialog" onClose={() => setOpen(false)}>
+    {open && <dialog ref={dialog} aria-labelledby={titleId} className="image-dialog" onClose={() => setOpen(false)}
+      {...({ closedby: 'any' } as any)}
+      onClick={(event) => {
+        if (!dialog.current) return;
+        if (!('closedBy' in HTMLDialogElement.prototype)) {
+          const rect = dialog.current.getBoundingClientRect();
+          const isInside = (
+            rect.top <= event.clientY &&
+            event.clientY <= rect.top + rect.height &&
+            rect.left <= event.clientX &&
+            event.clientX <= rect.left + rect.width
+          );
+          if (!isInside) dialog.current.close();
+        }
+      }}>
       <div className="image-dialog-header">
         <h2 id={titleId}>{label}</h2>
         <button type="button" className="icon-button" aria-label="关闭图片预览" onClick={() => dialog.current?.close()}>

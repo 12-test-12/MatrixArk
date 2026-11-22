@@ -42,7 +42,20 @@ function SignIn({ onSession, onClose, initialError }: {
     setRegistering(!registering);
   }
   return <dialog ref={dialog} className="auth-dialog" aria-labelledby="auth-title" onClose={onClose}
-    onClick={(event) => { if (event.target === dialog.current && !action.busy) dialog.current.close(); }}
+    {...({ closedby: action.busy ? 'none' : 'any' } as any)}
+    onClick={(event) => {
+      if (action.busy || !dialog.current) return;
+      if (!('closedBy' in HTMLDialogElement.prototype)) {
+        const rect = dialog.current.getBoundingClientRect();
+        const isInside = (
+          rect.top <= event.clientY &&
+          event.clientY <= rect.top + rect.height &&
+          rect.left <= event.clientX &&
+          event.clientX <= rect.left + rect.width
+        );
+        if (!isInside) dialog.current.close();
+      }
+    }}
     onCancel={(event) => { if (action.busy) event.preventDefault(); }}>
     <div className="auth-heading">
       <h2 id="auth-title">{registering ? '创建工作室账号' : '登录工作台'}</h2>
