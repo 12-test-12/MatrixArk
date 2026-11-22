@@ -186,26 +186,47 @@ export class BilibiliAdapter implements ChannelAdapter {
   }
 
   async fetchStatus(receipt: PublishReceipt, account: PublishInput['account']): Promise<PublishReceipt> {
-    if (!receipt.remoteId || !receiptIdPattern.test(receipt.remoteId)) return receipt;
-    const form = new FormData();
-    form.set('ids', receipt.remoteId);
-    const response = await this.call(statusPath, 'GET', form, account).catch(() => undefined);
-    if (!response || response.status !== 200 || response.reply.code !== 0) return receipt;
-    const data = record(record(response.reply.data)[receipt.remoteId]);
-    if (articleId(data.id) !== receipt.remoteId || typeof data.state !== 'number') return receipt;
-    const raw = receiptDetails(response.reply, { platformState: data.state });
+    if (!receipt.remoteId) return receipt;
+    const article = await this.readArticleStats(receipt.remoteId, account);
+    if (!article) return receipt;
+    const { data, reply } = article;
+    const state = data.state;
+    if (typeof state !== 'number') return receipt;
+    const raw = receiptDetails(reply, { platformState: state });
     const publishedAt = typeof data.publish_time === 'number' && data.publish_time > 0 && data.publish_time < 8_640_000_000_000
       ? new Date(data.publish_time * 1000) : undefined;
-    if (data.state === 0 && publishedAt) {
+    if (state === 0 && publishedAt) {
       return { status: 'published', remoteId: receipt.remoteId, raw,
         remoteUrl: `https://www.bilibili.com/read/cv${receipt.remoteId}`, platformPublishedAt: publishedAt.toISOString() };
     }
-    if (data.state !== 0 && typeof data.reason === 'string' && data.reason.trim() && !publishedAt) {
+    if (state !== 0 && typeof data.reason === 'string' && data.reason.trim() && !publishedAt) {
       return { status: 'failed', remoteId: receipt.remoteId, raw, message: 'B 站回执显示文章已被打回' };
     }
     return receipt.status === 'submitted'
       ? { status: 'under_review', remoteId: receipt.remoteId, raw, message: '文章尚未确认发表' }
       : receipt;
+  }
+
+  async fetchArticleMetrics(remoteId: string, account: Pick<PublishInput['account'], 'credentials'>) {
+    const article = await this.readArticleStats(remoteId, account);
+    if (!article) return undefined;
+    const stats = record(article.data.stats);
+    const count = (value: unknown) => typeof value === 'number' && Number.isInteger(value)
+      && value >= 0 && value <= 2_147_483_647 ? value : null;
+    const metrics = { views: count(stats.view), likes: count(stats.like), comments: count(stats.reply),
+      favorites: count(stats.favorite), shares: count(stats.share) };
+    if (Object.values(metrics).every((value) => value === null)) return undefined;
+    return metrics;
+  }
+
+  private async readArticleStats(remoteId: string, account: Pick<PublishInput['account'], 'credentials'>) {
+    if (!receiptIdPattern.test(remoteId)) return undefined;
+    const form = new FormData();
+    form.set('ids', remoteId);
+    const response = await this.call(statusPath, 'GET', form, account).catch(() => undefined);
+    if (!response || response.status !== 200 || response.reply.code !== 0) return undefined;
+    const data = record(record(response.reply.data)[remoteId]);
+    return articleId(data.id) === remoteId ? { data, reply: response.reply } : undefined;
   }
 
   private call(path: string, method: 'GET' | 'POST', form: FormData | undefined,

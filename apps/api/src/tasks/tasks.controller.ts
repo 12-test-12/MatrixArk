@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Get, HttpCode, NotFoundException, Param, Post, Query, Res,
+  Body, Controller, Get, HttpCode, NotFoundException, Param, Patch, Post, Query, Res,
   UploadedFile, UseGuards, UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -22,6 +22,15 @@ const listSchema = z.object({
   cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+
+const performanceSchema = listSchema.pick({ accountId: true, cursor: true, limit: true }).extend({
+  platform: z.enum(['bilibili', 'xiaohongshu']).optional(),
+  content: z.enum(['article', 'video']).optional(),
+});
+const metricCount = z.number().int().min(0).max(2_147_483_647).nullable().default(null);
+const metricsSchema = z.object({
+  views: metricCount, likes: metricCount, comments: metricCount, favorites: metricCount, shares: metricCount,
+}).strict().refine((value) => Object.values(value).some((count) => count !== null), '请填写至少一项成效数据');
 
 @Controller('workspaces/:workspaceId/tasks')
 @UseGuards(WorkspaceGuard)
@@ -46,6 +55,11 @@ export class TasksController {
   @Get()
   list(@Param('workspaceId') workspaceId: string, @Query() query: unknown) {
     return this.tasks.list(workspaceId, parse(listSchema, query));
+  }
+
+  @Get('performance')
+  performance(@Param('workspaceId') workspaceId: string, @Query() query: unknown) {
+    return this.tasks.list(workspaceId, { ...parse(performanceSchema, query), performance: true });
   }
 
   @Get(':id')
@@ -107,5 +121,25 @@ export class TasksController {
   ) {
     assertCan(role, 'task:result');
     return this.tasks.recordResult(workspaceId, id, user.id, parse(recordResultSchema, body));
+  }
+
+  @Patch(':id/metrics')
+  recordMetrics(@CurrentRole() role: Role, @CurrentUser() user: SessionUser, @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string, @Body() body: unknown) {
+    assertCan(role, 'task:result');
+    return this.tasks.saveMetrics(workspaceId, id, user.id, parse(metricsSchema, body));
+  }
+
+  @Get(':id/metrics/history')
+  metricHistory(@Param('workspaceId') workspaceId: string, @Param('id') id: string) {
+    return this.tasks.metricHistory(workspaceId, id);
+  }
+
+  @Post(':id/metrics/sync')
+  @HttpCode(200)
+  syncMetrics(@CurrentRole() role: Role, @CurrentUser() user: SessionUser, @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string) {
+    assertCan(role, 'task:result');
+    return this.tasks.syncMetrics(workspaceId, id, user.id);
   }
 }

@@ -10,6 +10,7 @@ import {
 import { Manuscripts, type ManuscriptDrafts } from './manuscripts';
 import { Members } from './members';
 import { FeishuSettings } from './notifications';
+import { Performance } from './performance';
 import { Preview } from './preview';
 import { Profile } from './profile';
 import { Tasks } from './tasks';
@@ -71,18 +72,20 @@ function SignIn({ onSession, onClose, initialError }: {
   </dialog>;
 }
 
-function WorkspaceBody({ workspace, section, taskId, drafts, openTasks, openAccounts }: {
+function WorkspaceBody({ workspace, section, taskId, performanceAccountId, drafts, openTasks, openAccounts, openPerformance }: {
   workspace: Workspace; section: Section; taskId: string; openTasks: (id: string) => void; openAccounts: () => void;
-  drafts: ManuscriptDrafts;
+  drafts: ManuscriptDrafts; performanceAccountId: string; openPerformance: (id: string) => void;
 }) {
   const scope = scopeFor(workspace.id);
   const accounts = useResource<Account[]>(section === 'accounts' || section === 'manuscripts' ? scope + '/accounts' : null);
   if (section === 'manuscripts') return <Manuscripts scope={scope} role={workspace.role} accounts={accounts} drafts={drafts}
     openTasks={openTasks} openAccounts={openAccounts} />;
   if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={taskId} />;
+  if (section === 'performance') return <Performance scope={scope} role={workspace.role} initialAccount={performanceAccountId} openTask={openTasks} />;
   if (section === 'members') return <Members scope={scope} />;
   if (section === 'notifications') return <FeishuSettings scope={scope} />;
-  return <Accounts scope={scope} canManage={canEdit(workspace.role)} canConfigure={workspace.role === 'owner'} resource={accounts} />;
+  return <Accounts scope={scope} canManage={canEdit(workspace.role)} canConfigure={workspace.role === 'owner'} resource={accounts}
+    openPerformance={openPerformance} />;
 }
 
 export default function Home() {
@@ -92,6 +95,7 @@ export default function Home() {
   const [workspaceId, setWorkspaceId] = useState('');
   const [activeSection, setSection] = useState<Section>();
   const [taskId, setTaskId] = useState('');
+  const [performanceAccountId, setPerformanceAccountId] = useState('');
   const [drafts] = useState<ManuscriptDrafts>(() => new Map());
   const logout = useAction();
 
@@ -113,19 +117,19 @@ export default function Home() {
   if (!session) return <>
     <Preview onLogin={() => { setStartupError(''); setShowSignIn(true); }} />
     {showSignIn && <SignIn initialError={startupError} onClose={() => { setShowSignIn(false); setStartupError(''); }} onSession={(next) => {
-      setSession(next); setShowSignIn(false); setStartupError(''); setSection(undefined); setWorkspaceId(''); setTaskId('');
+      setSession(next); setShowSignIn(false); setStartupError(''); setSection(undefined); setWorkspaceId(''); setTaskId(''); setPerformanceAccountId('');
     }} />}
   </>;
   const workspace = session.workspaces.find(({ id }) => id === workspaceId)
     ?? session.workspaces.find(({ role }) => role !== 'owner') ?? session.workspaces[0];
   const sections: readonly Section[] = workspace ? [...roleView[workspace.role].sections, 'profile'] : ['profile'];
   const section = activeSection && sections.includes(activeSection) ? activeSection : sections[0];
-  return <Workbench sections={sections} section={section} onSection={(next) => { setSection(next); setTaskId(''); }}
+  return <Workbench sections={sections} section={section} onSection={(next) => { setSection(next); setTaskId(''); setPerformanceAccountId(''); }}
     workspacePicker={<label className="workspace-picker">
         <span className="workspace-icon"><Radio size={19} aria-hidden="true" /></span>
         <span><small>当前工作室</small>
           <select aria-label="切换工作室" value={workspace?.id ?? ''} onChange={(event) => {
-            setWorkspaceId(event.target.value); setSection(undefined); setTaskId('');
+            setWorkspaceId(event.target.value); setSection(undefined); setTaskId(''); setPerformanceAccountId('');
           }}>
             {session.workspaces.length ? session.workspaces.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)
               : <option value="">暂无工作室</option>}
@@ -148,6 +152,7 @@ export default function Home() {
     topbar={workspace && <span className="workspace-role"><CircleUserRound size={15} aria-hidden="true" />{roleLabel[workspace.role]}</span>}>
     {section === 'profile' ? <Profile user={session.user} onSave={(user) => setSession((current) => current ? { ...current, user } : current)} />
       : workspace && section ? <WorkspaceBody key={workspace.id} workspace={workspace} section={section} taskId={taskId} drafts={drafts}
+      performanceAccountId={performanceAccountId} openPerformance={(id) => { setPerformanceAccountId(id); setSection('performance'); }}
       openTasks={(id) => { setTaskId(id); setSection('tasks'); }} openAccounts={() => setSection('accounts')} />
       : <section className="card"><Empty icon={Check} title="暂无可访问的工作室" description="加入工作室后可查看稿件和任务。" /></section>}
   </Workbench>;

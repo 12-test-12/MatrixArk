@@ -100,8 +100,9 @@ function BilibiliConnection({ path, onConnected }: { path: string; onConnected: 
   </>;
 }
 
-export function Accounts({ scope, canManage, canConfigure, resource }: {
+export function Accounts({ scope, canManage, canConfigure, resource, openPerformance }: {
   scope: string; canManage: boolean; canConfigure: boolean; resource: ReturnType<typeof useResource<Account[]>>;
+  openPerformance: (accountId: string) => void;
 }) {
   const [platformFilter, setPlatformFilter] = useState<Platform | 'all'>('all');
   const [search, setSearch] = useState('');
@@ -231,6 +232,8 @@ export function Accounts({ scope, canManage, canConfigure, resource }: {
                     ? `核验于 ${formatTime(account.identityCheckedAt)}` : '尚未完成平台核验'}</small>
                 </div>
                 <span className={`badge ${badge.tone}`}>{badge.label}</span>
+                {account.channelKind !== 'sandbox' && <button type="button" className="button compact" onClick={() => openPerformance(account.id)}
+                  aria-label={`查看成效 · ${account.displayName}`}>查看成效</button>}
                 {canManage && <button type="button" className="button compact" onClick={() => archive(account)}
                   disabled={archiveAction.busy} aria-label={`${showArchived ? '恢复' : '归档'}${account.displayName}`}>
                   {showArchived ? '恢复' : '归档'}

@@ -165,6 +165,42 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   assert.equal(lastPage.nextCursor, null);
   await call(own + '/tasks?status=scheduled&cursor=' + firstPage.nextCursor, { cookie, status: 400 });
 
+  await t.test('作品成效只统计已发布的真实作品，区分零与缺失，并限制写权限', async () => {
+    const metricsPath = path + '/metrics';
+    const performancePath = own + '/tasks/performance';
+    await call(metricsPath, { method: 'PATCH', cookie, body: {}, status: 400 });
+    await call(metricsPath, { method: 'PATCH', cookie, body: { views: -1 }, status: 400 });
+    await call(own + '/tasks/' + future.items[0].id + '/metrics', { method: 'PATCH', cookie, body: { views: 2 }, status: 409 });
+    await call(foreign + '/tasks/' + task.id + '/metrics', { method: 'PATCH', cookie: otherCookie, body: { views: 2 }, status: 404 });
+    const membership = await prisma.membership.create({ data: { workspaceId, userId: other.user.id, role: 'viewer' } });
+    try {
+      await call(metricsPath, { method: 'PATCH', cookie: otherCookie, body: { views: 2 }, status: 403 });
+      const { data: metrics } = await call(metricsPath, { method: 'PATCH', cookie, body: { views: 0, likes: 3 } });
+      assert.equal(metrics.source, 'manual');
+      assert.equal(metrics.views, 0);
+      assert.equal(metrics.comments, null);
+      assert.equal(metrics.recordedById, owner.user.id);
+      const { data: performance } = await call(performancePath + '?platform=xiaohongshu&accountId=' + account.id, { cookie: otherCookie });
+      assert.deepEqual(performance.items.map(({ id }) => id), [task.id]);
+      assert.equal(performance.items[0].result.metrics.views, 0);
+      assert.deepEqual(performance.summary, [
+        { content: 'article', published: 1, tracked: 1, views: 0, likes: 3, comments: null, favorites: null, shares: null },
+        { content: 'video', published: 0, tracked: 0, views: null, likes: null, comments: null, favorites: null, shares: null },
+      ]);
+      assert.equal((await call(performancePath + '?content=video', { cookie })).data.items.length, 0);
+      assert.equal((await call(performancePath + '?platform=bilibili', { cookie })).data.items.length, 0);
+      await call(metricsPath, { method: 'PATCH', cookie, body: { views: 19, likes: 6 } });
+      const { data: history } = await call(metricsPath + '/history', { cookie: otherCookie });
+      assert.deepEqual(history.map(({ views, comments, source }) => [views, comments, source]),
+        [[0, null, 'manual'], [19, null, 'manual']]);
+      assert.ok(history[0].recordedAt <= history[1].recordedAt);
+      await call(foreign + '/tasks/' + task.id + '/metrics/history', { cookie: otherCookie, status: 404 });
+      await post(metricsPath + '/sync', {}, 409);
+    } finally {
+      await prisma.membership.delete({ where: { id: membership.id } });
+    }
+  });
+
   await t.test('B 站专栏用同平台人工账号交接及回填', async () => {
     const bilibili = await fixtureAccount('bilibili', 'manual', '专栏人工账号');
     const official = await fixtureAccount('bilibili', 'official', '专栏官方账号');
@@ -346,7 +382,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
                 assert.equal(method, 'GET');
                 assert.equal(form.get('ids'), '5467');
                 pollCount++;
-                data = { '5467': { id: 5467, state: pollCount === 1 ? 1 : 0, publish_time: pollCount === 1 ? 0 : 1638521942 } };
+                data = { '5467': { id: 5467, state: pollCount === 1 ? 1 : 0, publish_time: pollCount === 1 ? 0 : 1638521942,
+                  stats: { view: 1500, reply: 0, like: 12, favorite: 7 } } };
                 break;
               default: assert.fail('Unexpected Bilibili request');
             }
@@ -412,6 +449,15 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(published.result.remoteUrl, 'https://www.bilibili.com/read/cv5467');
     assert.equal(published.result.platformPublishedAt, '2021-12-03T08:59:02.000Z');
     assert.equal(submissionCount, 1);
+    const { data: stats } = await post(path + '/metrics/sync', {}, 200);
+    assert.equal(stats.source, 'platform');
+    assert.equal(stats.views, 1500);
+    assert.equal(stats.comments, 0);
+    assert.equal(stats.shares, null);
+    assert.equal((await call(path + '/metrics/history', { cookie })).data[0].source, 'platform');
+    const { data: performance } = await call(own + '/tasks/performance?platform=bilibili&content=article', { cookie });
+    assert.equal(performance.items.find((item) => item.id === task.id).result.metrics.favorites, 7);
+    assert.equal(performance.summary[0].views, 1500);
 
     const unknown = await scheduleArticle('缺少文章 ID');
     incomplete = true;

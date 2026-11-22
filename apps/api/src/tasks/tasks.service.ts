@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, type ChannelAccount, type PublishResult, type PublishTask, type TaskStatus } from '@prisma/client';
-import { ManualHandoffAdapter, resolveAdapter, validateBilibiliArticle, type PublishInput, type PublishReceipt } from '@matrixark/adapters';
+import { BadGatewayException, BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma, type ChannelAccount, type MetricsSource, type Platform, type PublicationMetrics, type PublishResult, type PublishTask, type TaskStatus } from '@prisma/client';
+import { BilibiliAdapter, ManualHandoffAdapter, resolveAdapter, validateBilibiliArticle, type PublishInput, type PublishReceipt } from '@matrixark/adapters';
 import { assertTransition, COMMITTED_STATUSES, idempotencyKey, type recordResultSchema, type scheduleTasksSchema } from '@matrixark/shared';
 import type { z } from 'zod';
 import { platformKeyId } from '../accounts/platform-app';
@@ -87,7 +87,20 @@ type TaskFilters = {
   manuscriptId?: string;
   cursor?: string;
   limit: number;
+  performance?: true;
+  platform?: Platform;
+  content?: 'article' | 'video';
 };
+
+export type WorkMetrics = Pick<PublicationMetrics, 'views' | 'likes' | 'comments' | 'favorites' | 'shares'>;
+
+function requirePublishedWork(task: Pick<PublishTask, 'status' | 'executionChannel'>, result: PublishResult | null) {
+  if (!result || result.state !== 'published' || task.status !== 'published'
+    || (task.executionChannel !== 'official' && task.executionChannel !== 'manual')) {
+    throw new ConflictException('只有已确认发布的真实作品可以记录成效');
+  }
+  return result;
+}
 
 @Injectable()
 export class TasksService {
@@ -164,8 +177,10 @@ export class TasksService {
     }
   }
 
-  async list(workspaceId: string, { status, accountId, manuscriptId, cursor, limit }: TaskFilters) {
-    const scope = JSON.stringify([workspaceId, status, accountId, manuscriptId]);
+  async list(workspaceId: string, { status, accountId, manuscriptId, cursor, limit, performance, platform, content }: TaskFilters) {
+    const scope = JSON.stringify(performance
+      ? [workspaceId, 'performance', accountId, platform, content]
+      : [workspaceId, status, accountId, manuscriptId]);
     let after: Prisma.PublishTaskWhereInput = {};
     if (cursor) {
       try {
@@ -178,20 +193,86 @@ export class TasksService {
         throw new BadRequestException('任务分页游标无效');
       }
     }
-    const rows = await this.prisma.publishTask.findMany({
-      where: { workspaceId, status, accountId, variant: manuscriptId ? { manuscriptId } : undefined, ...after },
-      include: taskRelations,
+    const where: Prisma.PublishTaskWhereInput = performance ? {
+      workspaceId, accountId, status: 'published', executionChannel: { in: ['manual', 'official'] },
+      result: { state: 'published' },
+      variant: { platform, videoAssetId: content === 'video' ? { not: null } : content === 'article' ? null : undefined },
+    } : { workspaceId, status, accountId, variant: manuscriptId ? { manuscriptId } : undefined };
+    const [rows, summary] = await Promise.all([this.prisma.publishTask.findMany({
+      where: { ...where, ...after },
+      include: { ...taskRelations, result: performance ? { include: { metrics: true } } : true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
-    });
+    }), performance ? this.performanceSummary(where, content) : undefined]);
     const items = rows.slice(0, limit).map(presentTask);
     const last = items.at(-1);
     return {
       items,
+      ...(summary && { summary }),
       nextCursor: rows.length > limit && last
         ? Buffer.from(JSON.stringify([scope, last.createdAt.toISOString(), last.id])).toString('base64url')
         : null,
     };
+  }
+
+  private performanceSummary(where: Prisma.PublishTaskWhereInput, content: TaskFilters['content']) {
+    const kinds = content ? [content] : ['article', 'video'] as const;
+    return Promise.all(kinds.map(async (kind) => {
+      const tasks = { AND: [where, { variant: { videoAssetId: kind === 'video' ? { not: null } : null } }] };
+      const [published, metrics] = await Promise.all([
+        this.prisma.publishTask.count({ where: tasks }),
+        this.prisma.publicationMetrics.aggregate({
+          where: { result: { task: tasks } }, _count: { _all: true },
+          _sum: { views: true, likes: true, comments: true, favorites: true, shares: true },
+        }),
+      ]);
+      return { content: kind, published, tracked: metrics._count._all, ...metrics._sum };
+    }));
+  }
+
+  async saveMetrics(workspaceId: string, id: string, userId: string, metrics: WorkMetrics,
+    source: MetricsSource = 'manual', remoteId?: string) {
+    return this.prisma.$transaction(async (tx) => {
+      if (!(await lockRow(tx, 'task', workspaceId, id))) throw new NotFoundException('任务不存在');
+      const task = await tx.publishTask.findUniqueOrThrow({ where: { id }, include: { result: true } });
+      const result = requirePublishedWork(task, task.result);
+      if (remoteId !== undefined && result.remoteId !== remoteId) throw new ConflictException('作品已变更，请重新同步');
+      const data = { ...metrics, source, recordedById: userId, recordedAt: await databaseTime(tx) };
+      await tx.publicationMetricSnapshot.create({ data: { taskId: id, ...data }, select: { id: true } });
+      return tx.publicationMetrics.upsert({ where: { taskId: id }, create: { taskId: id, ...data }, update: data });
+    }, { isolationLevel: 'ReadCommitted' });
+  }
+
+  async metricHistory(workspaceId: string, id: string) {
+    const task = await this.prisma.publishTask.findFirst({ where: { id, workspaceId }, include: { result: true } });
+    if (!task) throw new NotFoundException('任务不存在');
+    requirePublishedWork(task, task.result);
+    const snapshots = await this.prisma.publicationMetricSnapshot.findMany({
+      where: { taskId: id }, orderBy: [{ recordedAt: 'desc' }, { id: 'desc' }], take: 120,
+      select: { id: true, views: true, likes: true, comments: true, favorites: true, shares: true, source: true, recordedAt: true },
+    });
+    return snapshots.reverse();
+  }
+
+  async syncMetrics(workspaceId: string, id: string, userId: string) {
+    const task = await this.prisma.publishTask.findFirst({
+      where: { workspaceId, id },
+      include: { ...taskRelations, account: true },
+    });
+    if (!task) throw new NotFoundException('任务不存在');
+    const { remoteId } = requirePublishedWork(task, task.result);
+    if (task.executionChannel !== 'official' || task.variant.platform !== 'bilibili' || task.variant.videoAssetId || !remoteId) {
+      throw new ConflictException('此作品暂不支持同步平台数据，可以手动录入');
+    }
+    const credentials = bilibiliCredentials(task.account);
+    if (!credentials || publishChannel(task.account, await databaseTime(this.prisma)) !== 'official') {
+      throw new ConflictException('B 站账号授权当前不可用，请重新连接账号或手动录入');
+    }
+    const app = await bilibiliAppOptions(this.prisma, task.account);
+    if (!app) throw new ConflictException('请先配置 B 站开放平台应用凭据');
+    const metrics = await new BilibiliAdapter(app).fetchArticleMetrics(remoteId, { credentials });
+    if (!metrics) throw new BadGatewayException('B 站未返回成效数据，请检查接口权限后重试');
+    return this.saveMetrics(workspaceId, id, userId, metrics, 'platform', remoteId);
   }
 
   async detail(workspaceId: string, id: string) {

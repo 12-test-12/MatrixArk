@@ -123,6 +123,8 @@ model User {
   tasks                PublishTask[]         @relation("TaskAuthor")
   canceledTasks        PublishTask[]         @relation("TaskCanceler")
   recordedResults      PublishResult[]
+  publicationMetrics   PublicationMetrics[]
+  metricSnapshots      PublicationMetricSnapshot[]
   taskEvents           TaskEvent[]
   variantRejections    VariantRejection[]
   notificationSettings NotificationSetting[]
@@ -365,8 +367,48 @@ model PublishResult {
   workspace     Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   evidenceAsset Asset?      @relation(fields: [evidenceAssetId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "PublishResult_evidence_fkey")
   recordedBy    User?       @relation(fields: [recordedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  metrics       PublicationMetrics?
+  metricSnapshots PublicationMetricSnapshot[]
 
   @@index([workspaceId, recordedAt(sort: Desc)], map: "PublishResult_workspace_idx")
+}
+
+enum MetricsSource {
+  manual
+  platform
+}
+
+model PublicationMetrics {
+  taskId       String        @id
+  views        Int?
+  likes        Int?
+  comments     Int?
+  favorites    Int?
+  shares       Int?
+  source       MetricsSource
+  recordedAt   DateTime      @default(now()) @db.Timestamptz(3)
+  recordedById String
+
+  result     PublishResult @relation(fields: [taskId], references: [taskId], onDelete: Restrict, onUpdate: NoAction, map: "PublicationMetrics_result_fkey")
+  recordedBy User          @relation(fields: [recordedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+}
+
+model PublicationMetricSnapshot {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId       String
+  views        Int?
+  likes        Int?
+  comments     Int?
+  favorites    Int?
+  shares       Int?
+  source       MetricsSource
+  recordedAt   DateTime      @db.Timestamptz(3)
+  recordedById String
+
+  result     PublishResult @relation(fields: [taskId], references: [taskId], onDelete: Restrict, onUpdate: NoAction, map: "PublicationMetricSnapshot_result_fkey")
+  recordedBy User          @relation(fields: [recordedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@index([taskId, recordedAt(sort: Desc), id(sort: Desc)], map: "PublicationMetricSnapshot_task_time_idx")
 }
 
 model VariantAsset {

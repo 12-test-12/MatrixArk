@@ -19,10 +19,12 @@ BEGIN
   GRANT USAGE ON SCHEMA public TO matrixark_app;
   GRANT SELECT, INSERT, UPDATE ON TABLE public."User", public."Workspace", public."Manuscript",
     public."Asset", public."Variant", public."Approval", public."ChannelAccount", public."PublishTask",
-    public."PublishResult", public."NotificationSetting", public."NotificationDelivery", public."PlatformAppSetting" TO matrixark_app;
+    public."PublishResult", public."NotificationSetting", public."NotificationDelivery", public."PlatformAppSetting",
+    public."PublicationMetrics" TO matrixark_app;
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."Session", public."Membership", public."OAuthState"
     TO matrixark_app;
-  GRANT SELECT, INSERT ON TABLE public."TaskEvent", public."VariantAsset", public."VariantRejection"
+  GRANT SELECT, INSERT ON TABLE public."TaskEvent", public."VariantAsset", public."VariantRejection",
+    public."PublicationMetricSnapshot"
     TO matrixark_app;
   GRANT USAGE ON SEQUENCE public."TaskEvent_id_seq" TO matrixark_app;
   REVOKE DELETE, TRUNCATE ON TABLE public."Workspace" FROM PUBLIC, matrixark_app;

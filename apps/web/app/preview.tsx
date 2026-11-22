@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowRight, CalendarDays, ChevronRight, ClipboardCheck, FileText, Radio, Send } from 'lucide-react';
+import { ArrowRight, BarChart3, CalendarDays, ChevronRight, ClipboardCheck, FileText, Radio, Send } from 'lucide-react';
 import { platformLabel, platforms, roleLabel, type Platform, type Role, type TaskStatus } from './api';
 import { Empty, PageHeader, PlatformIcon, TaskBadge } from './ui';
 import { roleView, Workbench, type Section } from './workbench';
@@ -138,6 +138,8 @@ export function Preview({ onLogin }: { onLogin: () => void }) {
     topbar={<div className="preview-actions"><span className="badge gray">示例数据 · 只读</span>
       <button type="button" className="button primary compact" aria-haspopup="dialog" onClick={onLogin}>登录工作台<ArrowRight size={15} aria-hidden="true" /></button>
     </div>}>
-    <PreviewContent key={`${role}:${section}`} role={role} section={section} />
+    {section === 'performance'
+      ? <section className="card"><Empty icon={BarChart3} title="登录后查看作品成效" description="按平台、账号和内容类型查看真实作品的数据。" /></section>
+      : <PreviewContent key={`${role}:${section}`} role={role} section={section} />}
   </Workbench>;
 }
