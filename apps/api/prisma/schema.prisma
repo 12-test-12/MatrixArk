@@ -126,6 +126,7 @@ model User {
   taskEvents           TaskEvent[]
   variantRejections    VariantRejection[]
   notificationSettings NotificationSetting[]
+  platformAppSettings   PlatformAppSetting[]
   oauthStates          OAuthState[]
 }
 
@@ -156,6 +157,7 @@ model Workspace {
   variantRejections      VariantRejection[]
   notificationSetting    NotificationSetting?
   notificationDeliveries NotificationDelivery[]
+  platformAppSettings    PlatformAppSetting[]
   oauthStates            OAuthState[]
 }
 
@@ -415,6 +417,20 @@ model TaskEvent {
 
   @@index([taskId, id], map: "TaskEvent_task_id_idx")
   @@index([workspaceId, createdAt(sort: Desc)], map: "TaskEvent_workspace_created_idx")
+}
+
+model PlatformAppSetting {
+  workspaceId      String
+  platform         Platform
+  appId            String
+  secretCiphertext String
+  updatedById      String
+  updatedAt        DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  updatedBy User      @relation(fields: [updatedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@id([workspaceId, platform])
 }
 
 model NotificationSetting {

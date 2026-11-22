@@ -65,6 +65,10 @@ BEGIN
   ASSERT NOT has_table_privilege('matrixark_app', '"Workspace"', 'DELETE'), 'Workspace delete must be denied';
   ASSERT has_table_privilege('matrixark_app', '"TaskEvent"', 'INSERT')
     AND NOT has_table_privilege('matrixark_app', '"TaskEvent"', 'UPDATE'), 'Task events must be append only';
+  ASSERT has_table_privilege('matrixark_app', '"PlatformAppSetting"', 'SELECT')
+    AND has_table_privilege('matrixark_app', '"PlatformAppSetting"', 'INSERT')
+    AND has_table_privilege('matrixark_app', '"PlatformAppSetting"', 'UPDATE')
+    AND NOT has_table_privilege('matrixark_app', '"PlatformAppSetting"', 'DELETE'), 'Platform settings permissions are incorrect';
   IF current_database() = 'matrixark_upgrade_test' THEN
     ASSERT EXISTS (SELECT 1 FROM "PublishTask" t JOIN "TaskEvent" e ON e."taskId" = t.id
       WHERE t.id = 'legacy-task' AND t.status = 'paused' AND t."idempotencyKey" = 'legacy-key'

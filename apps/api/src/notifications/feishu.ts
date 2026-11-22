@@ -1,6 +1,5 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
-import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { localKey } from '../common/local-key';
 import { config } from '../config';
 
 const keyId = 'notification-v1';
@@ -9,34 +8,9 @@ export const feishuWebhook = /^https:\/\/open\.feishu\.cn\/open-apis\/bot\/v2\/h
 
 type SecretField = 'webhook' | 'signSecret';
 
-function localKey(create = false): Buffer {
-  const directory = config.storage.localDir;
-  const path = join(directory, '.notification-key');
-  if (create) {
-    try {
-      return localKey();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    mkdirSync(directory, { recursive: true });
-    const temporary = join(directory, `.notification-key-${randomBytes(12).toString('hex')}`);
-    writeFileSync(temporary, randomBytes(32), { mode: 0o600, flag: 'wx' });
-    try {
-      // Publish the complete key atomically so the API and Worker never use different keys.
-      linkSync(temporary, path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    } finally {
-      unlinkSync(temporary);
-    }
-  }
-  const key = readFileSync(path);
-  if (key.length !== 32) throw new Error('飞书凭据密钥文件无效');
-  return key;
-}
-
 export function encryptFeishu(workspaceId: string, field: SecretField, value: string) {
-  const key = config.notificationKey ? Buffer.from(config.notificationKey, 'hex') : localKey(true);
+  const key = config.notificationKey ? Buffer.from(config.notificationKey, 'hex')
+    : localKey(config.storage.localDir, '.notification-key', true);
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(Buffer.from(JSON.stringify([workspaceId, field])));
@@ -46,7 +20,7 @@ export function encryptFeishu(workspaceId: string, field: SecretField, value: st
 }
 
 export function decryptFeishu(workspaceId: string, field: SecretField, ciphertext: string, storedKeyId: string | null) {
-  const key = storedKeyId === localKeyId ? localKey()
+  const key = storedKeyId === localKeyId ? localKey(config.storage.localDir, '.notification-key')
     : storedKeyId === keyId && config.notificationKey ? Buffer.from(config.notificationKey, 'hex') : null;
   if (!key) throw new Error('无法读取飞书凭据');
   const [nonce, tag, data, extra] = ciphertext.split('.');

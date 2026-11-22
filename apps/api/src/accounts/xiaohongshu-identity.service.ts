@@ -3,6 +3,7 @@ import { BadGatewayException, ConflictException, Injectable, NotFoundException }
 import { z } from 'zod';
 import { config } from '../config';
 import { PrismaService } from '../prisma/prisma.service';
+import { readPlatformApp, workspacePlatformApp } from './platform-app';
 
 const origin = 'https://openaccount.xiaohongshu.com';
 const envelope = z.object({ code: z.number().int(), success: z.boolean(), data: z.unknown() });
@@ -51,6 +52,7 @@ async function request(endpoint: string, body: object, accessToken?: string) {
 }
 
 type Authorization = {
+  appId: string;
   id: string; code: string; verificationUrl: string; userCode: string; expiresAt: number; interval: number;
   nextPollAt: number; busy: boolean; status: 'pending' | 'scanned' | 'expired' | 'denied' | 'connected';
   grant?: z.infer<typeof token>;
@@ -64,20 +66,14 @@ export class XiaohongshuIdentityService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  private app() {
-    const { appId, appSecret } = config.xiaohongshu;
-    if (!appId || !appSecret) {
-      throw new ConflictException('小红书授权未配置，需要开放平台应用开通 Web 扫码授权。');
-    }
-    return { app_id: appId, app_secret: appSecret };
-  }
-
   async start(workspaceId: string, userId: string) {
-    const app = this.app();
     const key = JSON.stringify([workspaceId, userId]);
     if (this.starting.has(key) || this.pending.get(key)?.busy) throw new ConflictException('正在处理授权，请稍后重试。');
     this.starting.add(key);
     try {
+      const { appId, appSecret } = await readPlatformApp(this.prisma, workspaceId, 'xiaohongshu') ?? config.xiaohongshu;
+      if (!appId || !appSecret) throw new ConflictException('请先在发布账号页保存小红书开放平台应用 ID 和密钥。');
+      const app = { app_id: appId, app_secret: appSecret };
       const response = await request('device/code', {
         ...app, scopes: ['basic_info'], scene: 'web', client_name: 'MatrixArk',
       });
@@ -85,6 +81,7 @@ export class XiaohongshuIdentityService {
       const result = verifiedData(response, device);
       const now = Date.now();
       const entry: Authorization = {
+        appId,
         id: randomUUID(),
         code: result.device_code,
         verificationUrl: result.verification_uri_complete,
@@ -120,7 +117,13 @@ export class XiaohongshuIdentityService {
     entry.nextPollAt = Date.now() + entry.interval;
     try {
       if (!entry.grant) {
-        const result = await request('device/token', { ...this.app(), device_code: entry.code });
+        const { appId, appSecret } = await readPlatformApp(this.prisma, workspaceId, 'xiaohongshu') ?? config.xiaohongshu;
+        if (appId !== entry.appId || !appSecret) {
+          entry.status = 'expired';
+          entry.code = '';
+          return { status: entry.status };
+        }
+        const result = await request('device/token', { app_id: appId, app_secret: appSecret, device_code: entry.code });
         if (result.code === 37002 || result.code === 37009) {
           entry.status = result.code === 37009 ? 'scanned' : 'pending';
           return { status: entry.status };
@@ -141,10 +144,10 @@ export class XiaohongshuIdentityService {
         this.pending.delete(key);
         throw new BadGatewayException('小红书返回的账号身份不一致，请重新授权。');
       }
-      await this.saveIdentity(workspaceId, userId, identity);
+      const saved = await this.saveIdentity(workspaceId, userId, entry.appId, identity);
       entry.grant = undefined;
       entry.code = '';
-      entry.status = 'connected';
+      entry.status = saved ? 'connected' : 'expired';
       return { status: entry.status };
     } finally {
       entry.busy = false;
@@ -152,9 +155,11 @@ export class XiaohongshuIdentityService {
     }
   }
 
-  private async saveIdentity(workspaceId: string, userId: string, identity: z.infer<typeof profile>) {
-    await this.prisma.$transaction(async (tx) => {
+  private async saveIdentity(workspaceId: string, userId: string, appId: string, identity: z.infer<typeof profile>) {
+    return this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+      const current = await workspacePlatformApp(tx, workspaceId, 'xiaohongshu');
+      if ((current?.appId ?? config.xiaohongshu.appId) !== appId) return false;
       const scope = { workspaceId, platform: 'xiaohongshu' as const, archivedAt: null };
       const existing = await tx.channelAccount.findFirst({ where: { ...scope, externalId: identity.open_id } });
       const verified = { authCheckedAt: new Date(), authAuthorizedBy: userId, authScope: ['basic_info'] };
@@ -165,7 +170,7 @@ export class XiaohongshuIdentityService {
         await tx.channelAccount.update({ where: { id: existing.id }, data: {
           ...verified, ...(identityOnly && { channelKind: 'manual', authStatus: 'active' }),
         } });
-        return;
+        return true;
       }
       const names = new Set((await tx.channelAccount.findMany({ where: scope, select: { displayName: true } }))
         .map(({ displayName }) => displayName));
@@ -175,6 +180,7 @@ export class XiaohongshuIdentityService {
       await tx.channelAccount.create({
         data: { ...scope, ...verified, channelKind: 'manual', authStatus: 'active', displayName, externalId: identity.open_id },
       });
+      return true;
     });
   }
 }

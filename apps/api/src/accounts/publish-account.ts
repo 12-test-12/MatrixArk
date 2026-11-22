@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import type { ChannelAccount } from '@prisma/client';
+import type { ChannelAccount, Prisma } from '@prisma/client';
 import { config } from '../config';
+import { decryptPlatformSecret, encryptPlatformSecret, platformKeyId, readPlatformApp } from './platform-app';
 
 type AccountIdentity = Pick<ChannelAccount, 'workspaceId' | 'id' | 'externalId'>;
 const biliKeyId = 'bilibili-v1';
@@ -9,7 +10,13 @@ function binding(account: AccountIdentity) {
   return Buffer.from(JSON.stringify([account.workspaceId, account.id, account.externalId]));
 }
 
-export function encryptBilibiliCredentials(account: AccountIdentity, accessToken: string) {
+export function encryptBilibiliCredentials(account: AccountIdentity, accessToken: string, managed = false) {
+  if (managed) {
+    return {
+      credentialsCiphertext: encryptPlatformSecret(['bilibili-account', account.workspaceId, account.id, account.externalId!], accessToken),
+      credentialsKeyId: platformKeyId,
+    };
+  }
   const key = config.bilibili.credentialsKey;
   if (!key || !/^[\da-f]{64}$/i.test(key) || !/^[!-~]{1,4096}$/.test(accessToken)) {
     throw new Error('B 站令牌或加密密钥格式无效');
@@ -32,17 +39,24 @@ export function publishChannel(account: ChannelAccount, now: Date) {
   }
   if (account.platform !== 'bilibili' || account.authStatus !== 'active') return undefined;
   if (account.channelKind === 'sandbox') return config.sandboxChannel ? 'sandbox' : undefined;
-  if (config.bilibili.enabled && account.authExpiresAt && account.authExpiresAt > now
+  const enabled = account.credentialsKeyId === platformKeyId ? !config.sandboxChannel
+    : config.bilibili.enabled && account.credentialsKeyId === biliKeyId;
+  if (enabled && account.authExpiresAt && account.authExpiresAt > now
     && account.authScope.includes('ATC_BASE') && account.authScope.includes('ATC_DATA')
-    && account.credentialsCiphertext && account.credentialsKeyId === biliKeyId) return 'official';
+    && account.credentialsCiphertext) return 'official';
   return undefined;
 }
 
 export function bilibiliCredentials(account: ChannelAccount) {
   const key = config.bilibili.credentialsKey;
   const ciphertext = account.credentialsCiphertext;
-  if (!key || !ciphertext || account.credentialsKeyId !== biliKeyId) return undefined;
+  if (!ciphertext) return undefined;
   try {
+    if (account.credentialsKeyId === platformKeyId && account.externalId) {
+      const access_token = decryptPlatformSecret(['bilibili-account', account.workspaceId, account.id, account.externalId], ciphertext);
+      return /^[!-~]{1,4096}$/.test(access_token) ? { access_token } : undefined;
+    }
+    if (!key || account.credentialsKeyId !== biliKeyId) return undefined;
     const [nonce, tag, data, extra] = ciphertext.split('.');
     if (!nonce || !tag || !data || extra !== undefined) return undefined;
     const iv = Buffer.from(nonce, 'base64url');
@@ -56,4 +70,10 @@ export function bilibiliCredentials(account: ChannelAccount) {
   } catch {
     return undefined;
   }
+}
+
+export async function bilibiliAppOptions(db: Prisma.TransactionClient, account: ChannelAccount) {
+  if (account.credentialsKeyId !== platformKeyId) return config.bilibili;
+  const app = await readPlatformApp(db, account.workspaceId, 'bilibili');
+  return app ? { clientId: app.appId, clientSecret: app.appSecret } : undefined;
 }

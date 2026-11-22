@@ -203,6 +203,24 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
 
   await t.test('只能通过小红书官方身份核验新增账号', async (test) => {
     let approved = false;
+    let webScanEnabled = false;
+    const settingsPath = own + '/accounts/platform-settings';
+    const settingsSecret = 'xiaohongshu-workspace-test-secret';
+    const application = { appId: process.env.XIAOHONGSHU_APP_ID, appSecret: settingsSecret };
+    await call(settingsPath + '/xiaohongshu', { cookie: otherCookie, method: 'PATCH', body: application, status: 403 });
+    await call(settingsPath + '/xiaohongshu', { cookie, method: 'PATCH', body: { ...application, appSecret: '' }, status: 400 });
+    assert.deepEqual((await call(settingsPath + '/xiaohongshu', { cookie, method: 'PATCH', body: application })).data,
+      { configured: true });
+    assert.deepEqual((await call(settingsPath, { cookie })).data,
+      { xiaohongshu: true, bilibili: true, bilibiliSandbox: false });
+    const storedApp = await prisma.platformAppSetting.findUniqueOrThrow({
+      where: { workspaceId_platform: { workspaceId, platform: 'xiaohongshu' } },
+    });
+    assert.equal(storedApp.updatedById, owner.user.id);
+    assert.ok(!storedApp.secretCiphertext.includes(settingsSecret));
+    await call(settingsPath + '/xiaohongshu', {
+      cookie, method: 'PATCH', body: { ...application, appId: 'a-different-app' }, status: 409,
+    });
     const localFetch = globalThis.fetch;
     test.mock.method(globalThis, 'fetch', (input, options) => {
       const url = new URL(input);
@@ -212,12 +230,15 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       switch (url.pathname.split('/').at(-1)) {
         case 'code':
           assert.deepEqual(body.scopes, ['basic_info']);
+          assert.equal(body.app_secret, settingsSecret);
+          if (!webScanEnabled) return Response.json({ code: 37007, success: false, data: null });
           return result({
             device_code: 'private-device-fixture',
             verification_uri_complete: 'https://openaccount.xiaohongshu.com/device?user_code=ABCD-EFGH',
             user_code: 'ABCD-EFGH', expires_in: 600, interval: 1,
           });
         case 'token':
+          assert.equal(body.app_secret, settingsSecret);
           assert.equal(body.device_code, 'private-device-fixture');
           return approved ? result({ access_token: 'private-token-fixture', open_id: 'verified-fixture', scope: ['basic_info'] })
             : Response.json({ code: 37002, success: false, data: null });
@@ -232,6 +253,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     }
     const path = own + '/accounts/xiaohongshu/authorize';
     const otherPath = foreign + '/accounts/xiaohongshu/authorize';
+    assert.match((await post(path, {}, 409)).data.message, /尚未开通 Web 扫码/u);
+    webScanEnabled = true;
     const { data: ticket } = await post(path, {});
     assert.deepEqual(Object.keys(ticket).sort(), ['expiresAt', 'id', 'userCode', 'verificationUrl']);
     const poll = (id) => post(`${path}/${id}/poll`, {}, 200);
@@ -275,6 +298,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     let lateTaskId;
     let incomplete = false;
     let matchingIdentity = true;
+    let appSecret = process.env.BILIBILI_CLIENT_SECRET;
     const token = 'bili-token-fixture';
     t.mock.method(https, 'request', (input, options, callback) => {
       const url = new URL(input);
@@ -284,7 +308,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       assert.equal(headers['x-bili-content-md5'], 'd41d8cd98f00b204e9800998ecf8427e');
       const signed = Object.keys(headers).filter((key) => key.startsWith('x-bili-')).sort();
       const payload = signed.map((key) => key + ':' + headers[key]).join('\n');
-      assert.equal(headers.Authorization, createHmac('sha256', process.env.BILIBILI_CLIENT_SECRET).update(payload).digest('hex'));
+      assert.equal(headers.Authorization, createHmac('sha256', appSecret).update(payload).digest('hex'));
       const req = new EventEmitter();
       req.end = (contents) => {
         void (async () => {
@@ -408,6 +432,32 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.deepEqual(expired.events.map(({ kind }) => kind), ['created', 'claimed', 'late_receipt', 'result']);
     assert.equal(expired.events[2].details.remoteId, '5467');
     assert.equal(submissionCount, 3);
+
+    appSecret = 'bilibili-workspace-test-secret';
+    const { config } = await import('../dist/config.js');
+    config.bilibili.enabled = false;
+    t.after(() => { config.bilibili.enabled = true; });
+    await call(own + '/accounts/platform-settings/bilibili', { cookie, method: 'PATCH',
+      body: { appId: process.env.BILIBILI_CLIENT_ID, appSecret } });
+    assert.deepEqual((await call(foreign + '/accounts/platform-settings', { cookie: otherCookie })).data,
+      { xiaohongshu: true, bilibili: false, bilibiliSandbox: false });
+    const bind = own + '/accounts/bilibili/bind';
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    await post(bind, { accessToken: token, expiresAt }, 502);
+    matchingIdentity = true;
+    assert.deepEqual((await post(bind, { accessToken: token, expiresAt })).data, { id });
+    const managedAccount = await prisma.channelAccount.findUniqueOrThrow({ where: { id } });
+    assert.equal(managedAccount.credentialsKeyId, 'platform-local-v1');
+    assert.ok(!managedAccount.credentialsCiphertext.includes(token));
+    assert.equal(bilibiliCredentials({ ...managedAccount, workspaceId: other.workspaces[0].id }), undefined);
+    assert.equal((await call(own + '/accounts', { cookie })).data.find((account) => account.id === id).availableForOfficial, true);
+    lateTaskId = undefined;
+    const managedTask = await scheduleArticle('网页配置后的专栏');
+    assert.equal(await dispatch.dispatchDue(), 1);
+    assert.equal((await call(own + '/tasks/' + managedTask.id, { cookie })).data.status, 'submitted');
+    await prisma.publishTask.update({ where: { id: managedTask.id }, data: { updatedAt: new Date(0) } });
+    await dispatch.pollAutomaticResults();
+    assert.equal((await call(own + '/tasks/' + managedTask.id, { cookie })).data.status, 'published');
 
     const reviewing = await new SandboxAdapter().fetchStatus({ status: 'submitted', remoteId: 'sandbox-1' });
     const simulated = await new SandboxAdapter().fetchStatus(reviewing);

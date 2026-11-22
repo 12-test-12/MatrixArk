@@ -4,7 +4,8 @@ import { Prisma, type ChannelAccount, type PublishResult, type PublishTask, type
 import { ManualHandoffAdapter, resolveAdapter, validateBilibiliArticle, type PublishInput, type PublishReceipt } from '@matrixark/adapters';
 import { assertTransition, COMMITTED_STATUSES, idempotencyKey, type recordResultSchema, type scheduleTasksSchema } from '@matrixark/shared';
 import type { z } from 'zod';
-import { bilibiliCredentials, publishChannel } from '../accounts/publish-account';
+import { platformKeyId } from '../accounts/platform-app';
+import { bilibiliAppOptions, bilibiliCredentials, publishChannel } from '../accounts/publish-account';
 import { config } from '../config';
 import { inspectSnapshot, variantSnapshot } from '../content/content.service';
 import { StorageService } from '../content/storage.service';
@@ -298,12 +299,16 @@ export class TasksService {
   async dispatchDue() {
     await this.recoverExpiredClaims();
     const enabledChannels: Array<'manual' | 'official' | 'sandbox'> = ['manual'];
-    if (config.bilibili.enabled) enabledChannels.push('official');
-    if (config.sandboxChannel) enabledChannels.push('sandbox');
+    enabledChannels.push(config.sandboxChannel ? 'sandbox' : 'official');
     const candidates = await this.prisma.publishTask.findMany({
       where: {
         status: 'scheduled', scheduledAt: { lte: await databaseTime(this.prisma) },
-        account: { channelKind: { in: enabledChannels } },
+        account: {
+          channelKind: { in: enabledChannels },
+          ...(config.bilibili.enabled || config.sandboxChannel ? {} : {
+            OR: [{ channelKind: 'manual' }, { credentialsKeyId: platformKeyId }],
+          }),
+        },
         OR: [{ executionChannel: null }, { executionChannel: { in: enabledChannels } }],
       },
       orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
@@ -389,7 +394,8 @@ export class TasksService {
   }
 
   private async submitClaim({ task, variant, account, channel, leaseId }: AutomaticClaim) {
-    const adapter = resolveAdapter(account.platform, channel, { bilibili: config.bilibili });
+    const bilibili = channel === 'official' ? await bilibiliAppOptions(this.prisma, account).catch(() => undefined) : undefined;
+    const adapter = resolveAdapter(account.platform, channel, { bilibili });
     const input: PublishInput = {
       variant: publishVariant(variant),
       account: { ...account, credentials: channel === 'official' ? bilibiliCredentials(account) : undefined },
@@ -472,16 +478,17 @@ export class TasksService {
   }
 
   async pollAutomaticResults() {
-    const channels: Array<'official' | 'sandbox'> = [];
-    if (config.bilibili.enabled) channels.push('official');
-    if (config.sandboxChannel) channels.push('sandbox');
-    if (!channels.length) return;
+    const channel = config.sandboxChannel ? 'sandbox' : 'official';
     const now = await databaseTime(this.prisma);
     const pending = await this.prisma.publishTask.findMany({
       where: {
-        status: { in: ['submitted', 'under_review'] }, executionChannel: { in: channels },
+        status: { in: ['submitted', 'under_review'] }, executionChannel: channel,
         updatedAt: { lte: new Date(now.getTime() - 10_000) },
-        result: { remoteId: { not: null } }, account: { platform: 'bilibili' },
+        result: { remoteId: { not: null } },
+        account: {
+          platform: 'bilibili',
+          ...(!config.sandboxChannel && !config.bilibili.enabled ? { credentialsKeyId: platformKeyId } : {}),
+        },
       },
       orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
       include: { account: true, result: true },
@@ -497,7 +504,10 @@ export class TasksService {
         || publishChannel(task.account, now) !== task.executionChannel) return;
       const credentials = task.executionChannel === 'official' ? bilibiliCredentials(task.account) : undefined;
       if (task.executionChannel === 'official' && !credentials) return;
-      const adapter = resolveAdapter(task.account.platform, task.executionChannel, { bilibili: config.bilibili });
+      const bilibili = task.executionChannel === 'official'
+        ? await bilibiliAppOptions(this.prisma, task.account).catch(() => undefined) : undefined;
+      if (task.executionChannel === 'official' && !bilibili) return;
+      const adapter = resolveAdapter(task.account.platform, task.executionChannel, { bilibili });
       const receipt = await adapter.fetchStatus(
         { status: task.result.state, remoteId: task.result.remoteId }, { ...task.account, credentials },
       );
