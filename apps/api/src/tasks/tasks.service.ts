@@ -423,9 +423,12 @@ export class TasksService {
       const account = await tx.channelAccount.findUniqueOrThrow({ where: { id: accountId } });
       const channel = publishChannel(account, now);
       if (task.executionChannel && task.executionChannel !== account.channelKind) return false;
-      if (!hasApproval(variant) || variant.contentHash !== task.variantContentHash
+      // 网页配置的应用凭据读不出来时先暂停，避免把待发任务直接烧成失败。
+      const appReady = channel !== 'official' || account.credentialsKeyId !== platformKeyId
+        || Boolean(await bilibiliAppOptions(tx, account).catch(() => undefined));
+      if (!appReady || !hasApproval(variant) || variant.contentHash !== task.variantContentHash
         || account.platform !== variant.platform || !channel || (variant.videoAssetId && channel === 'official')) {
-        const reason = '审核快照失效或发布账号不可用';
+        const reason = appReady ? '审核快照失效或发布账号不可用' : 'B 站开放平台应用凭据不可用，请负责人重新保存';
         assertTransition(task.status, 'paused');
         await tx.publishTask.update({ where: { id }, data: { status: 'paused', lastError: reason } });
         await tx.taskEvent.create({

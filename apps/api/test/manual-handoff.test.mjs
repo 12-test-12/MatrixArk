@@ -505,6 +505,15 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await dispatch.pollAutomaticResults();
     assert.equal((await call(own + '/tasks/' + managedTask.id, { cookie })).data.status, 'published');
 
+    await prisma.platformAppSetting.delete({ where: { workspaceId_platform: { workspaceId, platform: 'bilibili' } } });
+    const stranded = await scheduleArticle('应用凭据缺失的专栏');
+    assert.equal(await dispatch.dispatchDue(), 0);
+    const paused = (await call(own + '/tasks/' + stranded.id, { cookie })).data;
+    assert.equal(paused.status, 'paused');
+    assert.match(paused.lastError, /应用凭据不可用/u);
+    await call(own + '/accounts/platform-settings/bilibili', { cookie, method: 'PATCH',
+      body: { appId: process.env.BILIBILI_CLIENT_ID, appSecret } });
+
     const reviewing = await new SandboxAdapter().fetchStatus({ status: 'submitted', remoteId: 'sandbox-1' });
     const simulated = await new SandboxAdapter().fetchStatus(reviewing);
     assert.equal(reviewing.status, 'under_review');

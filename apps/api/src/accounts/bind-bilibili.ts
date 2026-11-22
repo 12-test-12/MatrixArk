@@ -1,3 +1,4 @@
+import { HttpException } from '@nestjs/common';
 import { config } from '../config';
 import { PrismaService } from '../prisma/prisma.service';
 import { bindBilibiliAccount } from './bilibili-account';
@@ -29,7 +30,9 @@ async function bind() {
 
 bind().catch((error: unknown) => {
   // Prisma may include invocation data in its errors. Print only the deliberate, non-secret diagnostics.
-  console.error(error instanceof Error && error.constructor === Error && /^[\p{Script=Han}B]/u.test(error.message)
+  const expected = error instanceof HttpException
+    || (error instanceof Error && error.constructor === Error && /^[\p{Script=Han}B]/u.test(error.message));
+  console.error(expected && error instanceof Error
     ? error.message : '绑定失败，请检查开放平台授权、数据库及应用配置');
   process.exitCode = 1;
 });
