@@ -37,13 +37,13 @@ export const PENDING_STATUSES: readonly TaskStatus[] = ['scheduled', 'paused'];
 
 const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   // 等待到点
-  scheduled: ['dispatching', 'paused', 'canceled'],
+  scheduled: ['dispatching', 'paused', 'canceled', 'unknown'],
   // 已抢占、正在调用通道
   dispatching: ['handed_off', 'submitted', 'under_review', 'published', 'failed', 'unknown'],
   // 人工暂停
   paused: ['scheduled', 'canceled'],
   // 已生成交接单，等运营发布
-  handed_off: ['published', 'failed', 'unknown'],
+  handed_off: ['published', 'failed', 'unknown', 'canceled'],
   // 已提交平台（平台受理）
   submitted: ['under_review', 'published', 'failed', 'unknown'],
   // 平台审核中
@@ -51,13 +51,13 @@ const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   // 已发布：终态
   published: [],
   // 明确失败：允许重试
-  failed: ['scheduled', 'canceled'],
+  failed: ['verified', 'published'],
   // 结果不明：必须先核对
   unknown: ['verified'],
   // 核对完成：确认已发 / 确认未发需重试
-  verified: ['published', 'failed', 'scheduled'],
-  // 已取消：终态
-  canceled: [],
+  verified: ['published', 'failed', 'scheduled', 'submitted'],
+  // 已取消：仅允许有证据的结果更正
+  canceled: ['published'],
 };
 
 export class IllegalTransitionError extends Error {
@@ -90,9 +90,9 @@ export function isTerminal(status: TaskStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
-/** 结果不明时是否允许直接重试：只有 unknown 进来的不行，必须先 verified */
+/** 有过尝试的失败和结果不明需要先核对，派发中也不可重试。 */
 export function isRetryBlockedByVerification(status: TaskStatus): boolean {
-  return status === 'unknown' || status === 'dispatching';
+  return status === 'unknown' || status === 'dispatching' || status === 'failed';
 }
 
 /**

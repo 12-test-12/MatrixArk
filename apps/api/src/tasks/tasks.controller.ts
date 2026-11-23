@@ -1,9 +1,9 @@
 import {
-  Body, Controller, Get, HttpCode, NotFoundException, Param, Patch, Post, Query, Res,
+  Body, Controller, Get, HttpCode, Param, Patch, Post, Query, Res,
   UploadedFile, UseGuards, UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { recordResultSchema, scheduleTasksSchema, TASK_STATUSES } from '@matrixark/shared';
+import { adjustTaskScheduleSchema, cancelTaskSchema, recordResultSchema, scheduleTasksSchema, TASK_STATUSES, verifyTaskSchema } from '@matrixark/shared';
 import type { Role } from '@prisma/client';
 import type { Response } from 'express';
 import { z } from 'zod';
@@ -11,7 +11,7 @@ import { CurrentRole, CurrentUser } from '../auth/decorators';
 import type { SessionUser } from '../auth/session.service';
 import { assertCan } from '../common/permissions';
 import { parse } from '../common/zod';
-import { IMAGE_UPLOAD_LIMIT, StorageService, validateImageUpload } from '../content/storage.service';
+import { IMAGE_UPLOAD_LIMIT, validateImageUpload } from '../content/storage.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
 import { TasksService } from './tasks.service';
 
@@ -35,7 +35,7 @@ const metricsSchema = z.object({
 @Controller('workspaces/:workspaceId/tasks')
 @UseGuards(WorkspaceGuard)
 export class TasksController {
-  constructor(private readonly tasks: TasksService, private readonly storage: StorageService) {}
+  constructor(private readonly tasks: TasksService) {}
 
   @Post()
   async schedule(
@@ -67,6 +67,45 @@ export class TasksController {
     return this.tasks.detail(workspaceId, id);
   }
 
+  @Patch(':id/schedule')
+  reschedule(@CurrentRole() role: Role, @CurrentUser() user: SessionUser, @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string, @Body() body: unknown) {
+    assertCan(role, 'task:manage');
+    return this.tasks.changeSchedule(workspaceId, id, user.id, parse(adjustTaskScheduleSchema, body).scheduledAt, 'reschedule');
+  }
+
+  @Post(':id/cancel')
+  @HttpCode(200)
+  cancel(@CurrentRole() role: Role, @CurrentUser() user: SessionUser, @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string, @Body() body: unknown) {
+    assertCan(role, 'task:manage');
+    return this.tasks.cancel(workspaceId, id, user.id, role, parse(cancelTaskSchema, body));
+  }
+
+  @Post(':id/verify')
+  @HttpCode(200)
+  verify(@CurrentRole() role: Role, @CurrentUser() user: SessionUser, @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string, @Body() body: unknown) {
+    assertCan(role, 'task:result');
+    return this.tasks.verify(workspaceId, id, user.id, parse(verifyTaskSchema, body));
+  }
+
+  @Post(':id/resume')
+  @HttpCode(200)
+  resume(@CurrentRole() role: Role, @CurrentUser() user: SessionUser, @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string, @Body() body: unknown) {
+    assertCan(role, 'task:manage');
+    return this.tasks.changeSchedule(workspaceId, id, user.id, parse(adjustTaskScheduleSchema, body).scheduledAt, 'resume');
+  }
+
+  @Post(':id/retry')
+  @HttpCode(200)
+  retry(@CurrentRole() role: Role, @CurrentUser() user: SessionUser, @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string, @Body() body: unknown) {
+    assertCan(role, 'task:manage');
+    return this.tasks.changeSchedule(workspaceId, id, user.id, parse(adjustTaskScheduleSchema, body).scheduledAt, 'retry');
+  }
+
   @Get(':id/handoff')
   handoff(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
     assertCan(role, 'task:result');
@@ -84,11 +123,8 @@ export class TasksController {
   ) {
     assertCan(role, 'task:result');
     const { file, filename, mimeType } = validateImageUpload(upload);
-    const task = await this.tasks.evidenceTarget(workspaceId, id);
-    this.tasks.requireHandoff(task);
-    const { key } = await this.storage.save(workspaceId, filename, file.buffer);
-    return this.tasks.attachEvidence(workspaceId, id, user.id, {
-      storageKey: key, filename, size: file.size, mimeType,
+    return this.tasks.attachEvidence(workspaceId, id, user.id, role, {
+      filename, size: file.size, mimeType, buffer: file.buffer,
     });
   }
 
@@ -96,14 +132,10 @@ export class TasksController {
   async downloadEvidence(
     @Param('workspaceId') workspaceId: string,
     @Param('id') id: string,
+    @Query('assetId') assetId: unknown,
     @Res() response: Response,
   ) {
-    const task = await this.tasks.evidenceTarget(workspaceId, id);
-    const image = task.result?.evidenceAsset;
-    if (!image || image.workspaceId !== workspaceId || image.taskId !== task.id || image.kind !== 'task_evidence') {
-      throw new NotFoundException('回执截图不存在');
-    }
-    const { data, mimeType } = await this.storage.readImage(workspaceId, image.storageKey);
+    const { data, mimeType } = await this.tasks.readEvidence(workspaceId, id, parse(z.string().uuid().optional(), assetId));
     response.setHeader('content-type', mimeType);
     response.setHeader('x-content-type-options', 'nosniff');
     response.setHeader('cache-control', 'private, no-store');
@@ -120,7 +152,7 @@ export class TasksController {
     @Body() body: unknown,
   ) {
     assertCan(role, 'task:result');
-    return this.tasks.recordResult(workspaceId, id, user.id, parse(recordResultSchema, body));
+    return this.tasks.recordResult(workspaceId, id, user.id, role, parse(recordResultSchema, body));
   }
 
   @Patch(':id/metrics')

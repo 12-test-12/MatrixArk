@@ -1,10 +1,10 @@
-import { useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
 import {
   ArrowLeft, ArrowRight, CalendarDays, ChevronRight, ClipboardCheck, Clock3, Copy, ExternalLink, History,
   Images, RefreshCw, Send,
 } from 'lucide-react';
 import {
-  canRecord, fileBody, formatTime, publishPlatformLabel, post, taskLabel, useAction, useResource,
+  api, canEdit, canRecord, fileBody, formatTime, publishPlatformLabel, post, taskLabel, useAction, useResource,
   type Handoff, type Role, type Task, type TaskDetail, type TaskStatus,
 } from './api';
 import { Empty, Feedback, Loading, PageHeader, TaskBadge } from './ui';
@@ -14,6 +14,8 @@ const filters = [
   { value: '', label: '全部' }, { value: 'scheduled', label: '待执行' }, { value: 'handed_off', label: '待回填' },
   { value: 'under_review', label: '平台审核中' },
   { value: 'published', label: '已发布' }, { value: 'unknown', label: '待核实' },
+  { value: 'verified', label: '已核实' }, { value: 'paused', label: '已暂停' },
+  { value: 'failed', label: '失败' }, { value: 'canceled', label: '已取消' },
 ] as const;
 
 const eventLabels: Record<string, string> = {
@@ -59,47 +61,184 @@ function Package({ data }: { data: Handoff }) {
   </div>;
 }
 
-function RecordResult({ path, saved }: { path: string; saved: () => void }) {
-  const action = useAction();
-  const [state, setState] = useState<'published' | 'failed' | 'unknown'>('published');
+function useTaskEvidence(path: string) {
   const [attachment, setAttachment] = useState<{ file: File; id?: string }>();
+  async function upload() {
+    if (!attachment || attachment.id) return attachment?.id;
+    const { assetId } = await post<{ assetId: string }>(path + '/evidence', fileBody(attachment.file));
+    setAttachment({ ...attachment, id: assetId });
+    return assetId;
+  }
+  return {
+    hasFile: Boolean(attachment),
+    choose: (file?: File) => setAttachment(file ? { file } : undefined),
+    upload,
+  };
+}
+
+function EvidenceFields({ choose }: { choose: (file?: File) => void }) {
+  return <>
+    <label>作品链接<input name="remoteUrl" type="url" placeholder="https://…" maxLength={2048} /></label>
+    <label>截图证据 <small>JPG、PNG 或 WebP，最大 20 MB</small>
+      <input className="file-field" type="file" accept="image/jpeg,image/png,image/webp"
+        onChange={(event) => choose(event.currentTarget.files?.[0])} />
+    </label>
+  </>;
+}
+
+function readWorkUrl(fields: FormData) {
+  const remoteUrl = String(fields.get('remoteUrl') ?? '').trim();
+  if (remoteUrl && !externalUrl(remoteUrl)) throw new Error('请输入有效的 HTTP 或 HTTPS 作品链接。');
+  return remoteUrl || undefined;
+}
+
+function RecordResult({ path, saved, action, correction = false }: {
+  path: string; saved: () => void; action: ReturnType<typeof useAction>; correction?: boolean;
+}) {
+  const [state, setState] = useState<'published' | 'failed' | 'unknown'>('published');
+  const evidence = useTaskEvidence(path);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const fields = new FormData(event.currentTarget);
-    const remoteUrl = String(fields.get('remoteUrl') ?? '').trim();
     const note = String(fields.get('note') ?? '').trim();
+    const reason = String(fields.get('reason') ?? '').trim();
     void action.run(async () => {
-      if (remoteUrl && !externalUrl(remoteUrl)) throw new Error('请输入有效的 HTTP 或 HTTPS 作品链接。');
-      if (state === 'published' && !remoteUrl && !attachment) throw new Error('请填写作品链接或上传发布截图。');
-      let evidenceAssetId = attachment?.id;
-      if (attachment && !evidenceAssetId) {
-        const uploaded = await post<{ assetId: string }>(path + '/evidence', fileBody(attachment.file));
-        evidenceAssetId = uploaded.assetId;
-        setAttachment({ ...attachment, id: evidenceAssetId });
-      }
-      await post(path + '/result', { state, remoteUrl: remoteUrl || undefined, note: note || undefined, evidenceAssetId });
+      const remoteUrl = readWorkUrl(fields);
+      if (state === 'published' && !remoteUrl && !evidence.hasFile) throw new Error('请填写作品链接或上传发布截图。');
+      if (correction && !reason) throw new Error('请填写更正原因。');
+      const evidenceAssetId = await evidence.upload();
+      await post(path + '/result', { state, remoteUrl, note: note || undefined, reason: reason || undefined, evidenceAssetId });
       saved();
     });
   }
-  return <form className="task-section form-stack" onSubmit={submit}>
-    <h3><ClipboardCheck size={17} aria-hidden="true" />回填发布结果</h3>
-    <div className="form-row">
-      <label>发布结果<select value={state} onChange={(event) => setState(event.target.value as typeof state)}>
+  return <form className={correction ? 'form-stack' : 'task-section form-stack'} onSubmit={submit} aria-busy={action.busy}>
+    <h3><ClipboardCheck size={17} aria-hidden="true" />{correction ? '更正为已发布' : '回填发布结果'}</h3>
+    <fieldset className="form-stack task-action-fields" disabled={action.busy}>
+      {!correction && <label>发布结果<select value={state} onChange={(event) => setState(event.target.value as typeof state)}>
         <option value="published">已发布</option><option value="failed">失败</option><option value="unknown">待核实</option>
-      </select></label>
-      <label>作品链接<input name="remoteUrl" type="url" placeholder="https://…" maxLength={2048} /></label>
-    </div>
-    <label>截图证据 <small>JPG、PNG 或 WebP，最大 20 MB</small>
-      <input className="file-field" type="file" accept="image/jpeg,image/png,image/webp" disabled={action.busy}
-        onChange={(event) => {
-          const file = event.currentTarget.files?.[0];
-          setAttachment(file ? { file } : undefined);
-        }} />
-    </label>
-    <label>备注 <small>选填</small><textarea name="note" rows={3} maxLength={1000} placeholder="例如 发布后需要继续观察审核结果" /></label>
+      </select></label>}
+      <EvidenceFields choose={evidence.choose} />
+      {correction ? <label>更正原因<textarea name="reason" required rows={3} maxLength={1000} /></label>
+        : <label>备注 <small>选填</small><textarea name="note" rows={3} maxLength={1000} placeholder="例如 发布后需要继续观察审核结果" /></label>}
+    </fieldset>
     <Feedback error={action.error} />
-    <button className="button primary" disabled={action.busy}>{action.busy ? '正在保存…' : '保存回填结果'}</button>
+    <button className="button primary" disabled={action.busy}>{action.busy ? '正在保存…' : correction ? '保存更正' : '保存回填结果'}</button>
   </form>;
+}
+
+const taskActions = {
+  schedule: ['调整排期', '已调整计划时间。'],
+  cancel: ['取消任务', '任务已取消。'],
+  verify: ['核对发布结果', '核对记录已保存。'],
+  resume: ['恢复暂停任务', '任务已恢复排期。'],
+  retry: ['重新排期重试', '原任务已重新排期。'],
+  correct: ['更正为已发布', '已更正发布结果。'],
+} as const;
+type TaskOperation = keyof typeof taskActions;
+type VerifyOutcome = 'unresolved' | 'accepted' | 'published' | 'not_received';
+
+function TaskOperationForm({ mode, path, task, saved, action }: {
+  mode: Exclude<TaskOperation, 'correct'>; path: string; task: TaskDetail; saved: () => void; action: ReturnType<typeof useAction>;
+}) {
+  const evidence = useTaskEvidence(path);
+  const [outcome, setOutcome] = useState<VerifyOutcome>(task.status === 'failed' ? 'not_received' : 'unresolved');
+  const needsTime = mode === 'schedule' || mode === 'resume' || mode === 'retry';
+  const time = new Date(mode === 'schedule' ? task.scheduledAt : Date.now() + 5 * 60_000);
+  const localTime = new Date(time.getTime() - time.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const fields = new FormData(event.currentTarget);
+    void action.run(async () => {
+      if (needsTime) {
+        const date = new Date(String(fields.get('scheduledAt') ?? ''));
+        if (!Number.isFinite(date.getTime()) || date.getTime() <= Date.now()) throw new Error('请选择未来的计划时间。');
+        await api(path + '/' + mode, { method: mode === 'schedule' ? 'PATCH' : 'POST', body: { scheduledAt: date.toISOString() } });
+      } else {
+        const reason = String(fields.get('reason') ?? '').trim();
+        if (!reason) throw new Error('请填写原因或核对依据。');
+        if (mode === 'cancel') {
+          const verification = String(fields.get('verification') ?? '').trim();
+          if (task.status === 'handed_off' && !verification) throw new Error('请填写确认尚未发布的核对依据。');
+          await post(path + '/cancel', { reason, verification: verification || undefined });
+        } else {
+          const body: { outcome: VerifyOutcome; reason: string; remoteId?: string; remoteUrl?: string; evidenceAssetId?: string } = { outcome, reason };
+          if (outcome === 'accepted') body.remoteId = String(fields.get('remoteId') ?? '').trim();
+          if (outcome === 'published') {
+            body.remoteUrl = readWorkUrl(fields);
+            if (!body.remoteUrl && !evidence.hasFile) throw new Error('请填写作品链接或上传发布截图。');
+            body.evidenceAssetId = await evidence.upload();
+          }
+          await post(path + '/verify', body);
+        }
+      }
+      saved();
+    });
+  }
+  return <form className="form-stack" onSubmit={submit} aria-busy={action.busy}>
+    <fieldset className="form-stack task-action-fields" disabled={action.busy}>
+      {needsTime && <label>新计划时间 <small>{Intl.DateTimeFormat().resolvedOptions().timeZone}</small>
+        <input name="scheduledAt" type="datetime-local" defaultValue={localTime} required />
+      </label>}
+      {mode === 'verify' && <>
+        <label>核对结论<select value={outcome} onChange={(event) => {
+          setOutcome(event.target.value as VerifyOutcome); evidence.choose();
+        }}>
+          {task.status === 'unknown' && <>
+            <option value="unresolved">仍无法确认</option>
+            {task.executionChannel === 'official' && <option value="accepted">平台已受理</option>}
+            <option value="published">确认已发布</option>
+          </>}
+          <option value="not_received">{task.executionChannel === 'official' ? '确认平台未受理' : '确认未发布'}</option>
+        </select></label>
+        {outcome === 'accepted' && <label>B 站文章 ID
+          <input name="remoteId" required inputMode="numeric" pattern="[1-9][0-9]{0,19}" defaultValue={task.result?.remoteId ?? ''} />
+        </label>}
+        {outcome === 'published' && <EvidenceFields choose={evidence.choose} />}
+      </>}
+      {!needsTime && <label>{mode === 'cancel' ? '取消原因' : outcome === 'unresolved' ? '已检查内容及下一步' : '核对依据'}
+        <textarea name="reason" required rows={3} maxLength={1000} />
+      </label>}
+      {mode === 'cancel' && task.status === 'handed_off' && <label>确认未发布的依据
+        <textarea name="verification" required rows={3} maxLength={1000} />
+      </label>}
+    </fieldset>
+    <Feedback error={action.error} />
+    <button className="button primary" disabled={action.busy}>{action.busy ? '正在保存…' : mode === 'cancel' ? '确认取消任务' : '确认' + taskActions[mode][0]}</button>
+  </form>;
+}
+
+function TaskActions({ task, path, role, changed }: { task: TaskDetail; path: string; role: Role; changed: (notice: string) => void }) {
+  const [mode, setMode] = useState<TaskOperation>();
+  const action = useAction();
+  const panelId = useId();
+  const actions: TaskOperation[] = [];
+  if (canEdit(role)) {
+    if (task.status === 'scheduled') actions.push('schedule');
+    if (task.status === 'paused') actions.push('resume');
+    if (task.status === 'scheduled' || task.status === 'paused' || (task.status === 'handed_off' && role === 'owner')) actions.push('cancel');
+    if (task.status === 'verified') actions.push('retry');
+  }
+  if (canRecord(role) && (task.status === 'unknown' || task.status === 'failed')) actions.push('verify');
+  if ((canRecord(role) && task.status === 'failed') || (role === 'owner' && task.status === 'canceled')) actions.push('correct');
+  if (actions.length === 0) return null;
+  const active = mode && actions.includes(mode) ? mode : undefined;
+  function saved() {
+    if (!active) return;
+    setMode(undefined);
+    changed(taskActions[active][1]);
+  }
+  return <div className="task-section">
+    <h3>任务操作</h3>
+    <div className="actions">
+      {actions.map((item) => <button type="button" key={item} className="button compact"
+        aria-expanded={active === item} aria-controls={panelId} disabled={action.busy}
+        onClick={() => { action.reset(); setMode(active === item ? undefined : item); }}>{taskActions[item][0]}</button>)}
+    </div>
+    <div id={panelId} hidden={!active}>
+      {active === 'correct' ? <RecordResult path={path} saved={saved} action={action} correction />
+        : active && <TaskOperationForm key={active} mode={active} path={path} task={task} saved={saved} action={action} />}
+    </div>
+  </div>;
 }
 
 function TaskDetails({ id, scope, role, onRecorded, people }: {
@@ -107,6 +246,7 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
 }) {
   const path = scope + '/tasks/' + id;
   const detail = useResource<TaskDetail>(path, 5_000);
+  const recordAction = useAction();
   const task = detail.data;
   const recordable = canRecord(role);
   const handoff = useResource<Handoff>(recordable && task?.handedOffAt && task.executionChannel === 'manual' ? path + '/handoff' : null);
@@ -143,10 +283,14 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
       </div>}
       <Feedback error={handoff.error} />
       {handoff.loading ? <Loading /> : handoff.data && <Package data={handoff.data} />}
-      {recordable && task.status === 'handed_off' && task.executionChannel === 'manual' && <RecordResult path={path} saved={() => {
+      {recordable && task.status === 'handed_off' && task.executionChannel === 'manual' && <RecordResult path={path} action={recordAction} saved={() => {
         detail.refresh();
-        onRecorded(task.variant.title);
+        onRecorded(`「${task.variant.title}」的发布结果已保存。`);
       }} />}
+      <TaskActions key={task.status} task={task} path={path} role={role} changed={(notice) => {
+        detail.refresh();
+        onRecorded(notice);
+      }} />
       {result && <div className="task-section">
         <div className="section-line"><h3><ClipboardCheck size={17} aria-hidden="true" />发布回执</h3><TaskBadge status={result.state} /></div>
         <p className="muted small">{actorName(result.recordedById)} · {formatTime(result.recordedAt)}</p>
@@ -185,6 +329,14 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
               : eventLabels[event.kind] ?? (event.toStatus ? taskLabel[event.toStatus] : '任务更新')}</strong>
               <div className="muted small">{actorName(event.actorId)} · {formatTime(event.createdAt)}</div>
               {event.reason && <p>{event.reason}</p>}
+              {event.details?.verification && <p className="muted small">核对依据 · {event.details.verification}</p>}
+              {event.details?.previousScheduledAt && event.details.scheduledAt && <p className="muted small">
+                {formatTime(event.details.previousScheduledAt)} → {formatTime(event.details.scheduledAt)}
+              </p>}
+              {event.details?.remoteId && <p className="muted small">作品 ID {event.details.remoteId}</p>}
+              {event.details?.previous?.evidenceAssetId && <a className="text-button"
+                href={'/api' + path + '/evidence?assetId=' + encodeURIComponent(event.details.previous.evidenceAssetId)}
+                target="_blank" rel="noreferrer">查看原回执截图</a>}
             </div>
           </li>)}
         </ol>
@@ -220,7 +372,7 @@ export function Tasks({ scope, role, initialId }: { scope: string; role: Role; i
       {filters.map((filter) => <button className={status === filter.value ? 'active' : ''} key={filter.value} aria-pressed={status === filter.value}
         disabled={listUnavailable} onClick={() => { setStatus(filter.value); changePage([]); }}>{filter.label}</button>)}
     </div>
-    <Feedback error={list.error} notice={recordedTitle ? `「${recordedTitle}」的发布结果已保存。` : undefined} />
+    <Feedback error={list.error} notice={recordedTitle || undefined} />
     {!listUnavailable && <div className="split-panel">
       <section className="card item-list">
         <div className="card-heading"><h2>任务列表</h2><span className="count">{items.length}</span></div>

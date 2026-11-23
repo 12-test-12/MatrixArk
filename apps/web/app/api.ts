@@ -53,7 +53,12 @@ export type TaskDetail = Task & {
     attempts: number; scheduledAt: string; sentAt: string | null; lastError: string | null;
   }[];
   events: { id: string; kind: string; toStatus: TaskStatus | null; actorId: string | null;
-    createdAt: string; reason: string | null }[];
+    createdAt: string; reason: string | null;
+    details?: {
+      outcome?: string; verification?: string; previousScheduledAt?: string; scheduledAt?: string;
+      remoteId?: string | null;
+      previous?: { evidenceAssetId?: string | null; remoteUrl?: string | null };
+    } }[];
 };
 export type Handoff = Pick<Variant, 'title' | 'body' | 'tags' | 'version'> & {
   assets: (Picture & { url: string })[];

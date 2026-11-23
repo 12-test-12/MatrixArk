@@ -1335,6 +1335,13 @@ textarea {
   justify-self: start;
 }
 
+.task-action-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 .schedule-accounts {
   display: grid;
   gap: 5px;

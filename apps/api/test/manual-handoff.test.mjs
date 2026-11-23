@@ -201,6 +201,103 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     }
   });
 
+  await t.test('待发任务调期与取消保留原 ID，交接后仅负责人凭核对依据可取消和更正', async () => {
+    const futurePath = own + '/tasks/' + future.items[0].id;
+    const original = await prisma.publishTask.findUniqueOrThrow({ where: { id: future.items[0].id } });
+    const newTime = new Date(Date.now() + 2 * 3600_000).toISOString();
+    await call(futurePath + '/schedule', { method: 'PATCH', cookie, body: { scheduledAt: scheduledAt }, status: 400 });
+    await call(foreign + '/tasks/' + original.id + '/schedule', { method: 'PATCH', cookie: otherCookie,
+      body: { scheduledAt: newTime }, status: 404 });
+    const change = () => call(futurePath + '/schedule', { method: 'PATCH', cookie, body: { scheduledAt: newTime } });
+    const { data: changed } = await change();
+    assert.equal(changed.id, original.id);
+    assert.equal(changed.idempotencyKey, original.idempotencyKey);
+    await change();
+    const scheduleEvents = (await call(futurePath, { cookie })).data.events.filter(({ kind }) => kind === 'rescheduled');
+    assert.equal(scheduleEvents.length, 1);
+    assert.deepEqual(scheduleEvents[0].details, { previousScheduledAt: original.scheduledAt.toISOString(), scheduledAt: newTime });
+    assert.equal(scheduleEvents[0].actorId, owner.user.id);
+
+    const membership = await prisma.membership.create({ data: { workspaceId, userId: other.user.id, role: 'editor' } });
+    try {
+      await prisma.publishTask.update({ where: { id: original.id }, data: { scheduledAt: new Date(scheduledAt) } });
+      assert.equal(await worker.get(TasksService).dispatchDue(), 1);
+      await call(futurePath + '/cancel', { method: 'POST', cookie: otherCookie,
+        body: { reason: '安排有误', verification: '核对尚未发布' }, status: 403 });
+      await post(futurePath + '/cancel', { reason: '安排有误' }, 400);
+      const { data: canceled } = await post(futurePath + '/cancel', { reason: '安排有误', verification: '查平台后台尚未发布' }, 200);
+      assert.equal(canceled.canceledById, owner.user.id);
+      await post(futurePath + '/cancel', { reason: '再次提交' }, 409);
+      await post(futurePath + '/retry', { scheduledAt: newTime }, 409);
+      const evidence = { state: 'published', reason: '运营反馈交接后实际已发布', remoteUrl: 'https://example.test/corrected' };
+      await call(futurePath + '/result', { method: 'POST', cookie: otherCookie, body: evidence, status: 403 });
+      await post(futurePath + '/result', { ...evidence, reason: ' ' }, 400);
+      const { data: { assetId } } = await post(futurePath + '/evidence', file(png, '更正凭证.png'));
+      const corrections = await Promise.all(Array.from({ length: 2 }, () => fetch(base + futurePath + '/result', {
+        method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ ...evidence, evidenceAssetId: assetId }),
+      })));
+      assert.deepEqual(corrections.map(({ status }) => status).sort(), [200, 409]);
+      const { data: corrected } = await call(futurePath, { cookie });
+      assert.equal(corrected.status, 'published');
+      assert.equal(corrected.executionChannel, 'manual');
+      assert.equal(corrected.idempotencyKey, original.idempotencyKey);
+      assert.equal(corrected.canceledAt, null);
+      assert.equal(corrected.result.evidenceAssetId, assetId);
+      assert.ok(corrected.notificationDeliveries.every((delivery) => delivery.status === 'skipped'));
+      const correctionsLogged = corrected.events.filter(({ kind }) => kind === 'corrected');
+      assert.equal(correctionsLogged.length, 1);
+      assert.equal(correctionsLogged[0].details.previous.cancelReason, '安排有误');
+      assert.equal(correctionsLogged[0].details.previous.canceledById, owner.user.id);
+      assert.equal(correctionsLogged[0].details.next.evidenceAssetId, assetId);
+    } finally {
+      await prisma.membership.delete({ where: { id: membership.id } });
+    }
+  });
+
+  await t.test('结果不明必须先核对，原任务可重试一次并保留旧回执与截图', async () => {
+    const { data: draft } = await post(own + '/manuscripts', { title: '核对与重试', body: '待发布内容' });
+    const draftPath = own + '/manuscripts/' + draft.id;
+    await post(draftPath + '/assets', file(sourcePng));
+    const { data: [version] } = await post(draftPath + '/generate', { platforms: ['xiaohongshu'] });
+    await post(own + '/variants/' + version.id + '/confirm', {});
+    const { data: { items: [item] } } = await post(own + '/tasks',
+      { accountIds: [account.id], variantIds: [version.id], scheduledAt });
+    const taskPath = own + '/tasks/' + item.id;
+    const newTime = new Date(Date.now() + 3 * 3600_000).toISOString();
+    const original = await prisma.publishTask.findUniqueOrThrow({ where: { id: item.id } });
+    const dispatch = worker.get(TasksService);
+    assert.equal(await dispatch.dispatchDue(), 1);
+    const { data: { assetId: previousEvidence } } = await post(taskPath + '/evidence', file(png, '首次核对.png'));
+    await post(taskPath + '/result', { state: 'unknown', note: '结果未知', evidenceAssetId: previousEvidence }, 200);
+    await post(taskPath + '/retry', { scheduledAt: newTime }, 409);
+    await post(taskPath + '/verify', { outcome: 'unresolved', reason: '暂未找到原作品，继续查看后台' }, 200);
+    assert.equal((await call(taskPath, { cookie })).data.status, 'unknown');
+    await post(taskPath + '/verify', { outcome: 'published', reason: '查到作品' }, 400);
+    await post(taskPath + '/verify', { outcome: 'not_received', reason: '核对后台和操作记录，确认未发布' }, 200);
+    const retries = await Promise.all(Array.from({ length: 2 }, () => fetch(base + taskPath + '/retry', {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ scheduledAt: newTime }),
+    })));
+    assert.deepEqual(retries.map(({ status }) => status).sort(), [200, 409]);
+    const { data: retried } = await call(taskPath, { cookie });
+    assert.equal(retried.idempotencyKey, original.idempotencyKey);
+    assert.equal(retried.handedOffAt, null);
+    assert.equal(retried.result.evidenceAssetId, previousEvidence);
+    assert.equal(retried.events.filter(({ kind }) => kind === 'retried').length, 1);
+    await prisma.publishTask.update({ where: { id: item.id }, data: { scheduledAt: new Date(scheduledAt) } });
+    assert.equal(await dispatch.dispatchDue(), 1);
+    await post(taskPath + '/result', { state: 'failed', note: '确认第二次失败' }, 200);
+    await post(taskPath + '/retry', { scheduledAt: newTime }, 409);
+    await post(taskPath + '/result', { state: 'published', reason: '补发成功', remoteUrl: 'https://example.test/published' }, 200);
+    const { data: finished } = await call(taskPath, { cookie });
+    assert.equal(finished.status, 'published');
+    const secondResult = finished.events.filter((event) => event.fromStatus === 'handed_off' && event.kind === 'result').at(-1);
+    assert.equal(secondResult.actorId, owner.user.id);
+    assert.equal(secondResult.details.previous.evidenceAssetId, previousEvidence);
+    const historical = await fetch(base + taskPath + '/evidence?assetId=' + previousEvidence, { headers: { cookie } });
+    assert.equal(historical.status, 200);
+    assert.deepEqual(Buffer.from(await historical.arrayBuffer()), png);
+  });
+
   await t.test('B 站专栏用同平台人工账号交接及回填', async () => {
     const bilibili = await fixtureAccount('bilibili', 'manual', '专栏人工账号');
     const official = await fixtureAccount('bilibili', 'official', '专栏官方账号');
@@ -467,6 +564,15 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(unknownResult.state, 'unknown');
     assert.equal(unknownResult.remoteId, null);
     assert.equal(submissionCount, 2);
+    const unknownPath = own + '/tasks/' + unknown.id;
+    const futureTime = new Date(Date.now() + 3_600_000).toISOString();
+    await post(unknownPath + '/retry', { scheduledAt: futureTime }, 409);
+    await post(unknownPath + '/verify', { outcome: 'accepted', reason: '在 B 站找到了投稿', remoteId: '5467' }, 200);
+    assert.equal((await call(unknownPath, { cookie })).data.result.remoteId, '5467');
+    await prisma.publishTask.update({ where: { id: unknown.id }, data: { updatedAt: new Date(0) } });
+    await dispatch.pollAutomaticResults();
+    assert.equal((await call(unknownPath, { cookie })).data.status, 'published');
+    assert.equal(submissionCount, 2);
 
     const late = await scheduleArticle('迟到回执');
     lateTaskId = late.id;
@@ -477,6 +583,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(expired.status, 'unknown');
     assert.deepEqual(expired.events.map(({ kind }) => kind), ['created', 'claimed', 'late_receipt', 'result']);
     assert.equal(expired.events[2].details.remoteId, '5467');
+    await post(own + '/tasks/' + late.id + '/verify', { outcome: 'not_received', reason: '尝试核对' }, 409);
     assert.equal(submissionCount, 3);
 
     appSecret = 'bilibili-workspace-test-secret';
@@ -511,8 +618,28 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     const paused = (await call(own + '/tasks/' + stranded.id, { cookie })).data;
     assert.equal(paused.status, 'paused');
     assert.match(paused.lastError, /应用凭据不可用/u);
+    const pausedPath = own + '/tasks/' + stranded.id;
+    await post(pausedPath + '/resume', { scheduledAt: futureTime }, 409);
     await call(own + '/accounts/platform-settings/bilibili', { cookie, method: 'PATCH',
       body: { appId: process.env.BILIBILI_CLIENT_ID, appSecret } });
+    const { data: resumed } = await post(pausedPath + '/resume', { scheduledAt: futureTime }, 200);
+    assert.equal(resumed.id, stranded.id);
+    assert.equal(resumed.status, 'scheduled');
+    await post(pausedPath + '/cancel', { reason: '结束恢复验收' }, 200);
+
+    const delayed = await scheduleArticle('核对后收到迟到回执');
+    const delayedPath = own + '/tasks/' + delayed.id;
+    incomplete = true;
+    assert.equal(await dispatch.dispatchDue(), 1);
+    await post(delayedPath + '/verify', { outcome: 'not_received', reason: '当时后台尚无投稿记录' }, 200);
+    await post(delayedPath + '/retry', { scheduledAt: futureTime }, 200);
+    await prisma.taskEvent.create({ data: { workspaceId, taskId: delayed.id, kind: 'late_receipt',
+      details: { state: 'submitted', remoteId: '5467' } } });
+    await prisma.publishTask.update({ where: { id: delayed.id }, data: { scheduledAt: new Date(scheduledAt) } });
+    const attempts = submissionCount;
+    assert.equal(await dispatch.dispatchDue(), 0);
+    assert.equal(submissionCount, attempts);
+    assert.equal((await call(delayedPath, { cookie })).data.status, 'unknown');
 
     const reviewing = await new SandboxAdapter().fetchStatus({ status: 'submitted', remoteId: 'sandbox-1' });
     const simulated = await new SandboxAdapter().fetchStatus(reviewing);

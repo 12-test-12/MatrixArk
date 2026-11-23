@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { BadGatewayException, BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, type ChannelAccount, type MetricsSource, type Platform, type PublicationMetrics, type PublishResult, type PublishTask, type TaskStatus } from '@prisma/client';
+import { BadGatewayException, BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma, type ChannelAccount, type MetricsSource, type Platform, type PublicationMetrics, type PublishResult, type PublishTask, type Role, type TaskStatus } from '@prisma/client';
 import { BilibiliAdapter, ManualHandoffAdapter, resolveAdapter, validateBilibiliArticle, type PublishInput, type PublishReceipt } from '@matrixark/adapters';
-import { assertTransition, COMMITTED_STATUSES, idempotencyKey, type recordResultSchema, type scheduleTasksSchema } from '@matrixark/shared';
+import { assertTransition, COMMITTED_STATUSES, idempotencyKey, type cancelTaskSchema, type recordResultSchema, type scheduleTasksSchema, type verifyTaskSchema } from '@matrixark/shared';
 import type { z } from 'zod';
 import { platformKeyId } from '../accounts/platform-app';
 import { bilibiliAppOptions, bilibiliCredentials, publishChannel } from '../accounts/publish-account';
@@ -102,6 +102,19 @@ function requirePublishedWork(task: Pick<PublishTask, 'status' | 'executionChann
   return result;
 }
 
+function receiptSnapshot(result: PublishResult | null) {
+  return {
+    state: result?.state ?? null,
+    remoteId: result?.remoteId ?? null,
+    remoteUrl: result?.remoteUrl ?? null,
+    evidenceAssetId: result?.evidenceAssetId ?? null,
+    note: result?.note ?? null,
+    recordedById: result?.recordedById ?? null,
+    recordedAt: result?.recordedAt.toISOString() ?? null,
+    platformPublishedAt: result?.platformPublishedAt?.toISOString() ?? null,
+  };
+}
+
 @Injectable()
 export class TasksService {
   private readonly manual = new ManualHandoffAdapter();
@@ -175,6 +188,142 @@ export class TasksService {
         throw new BadRequestException((error as Error).message);
       }
     }
+    return channel;
+  }
+
+  async changeSchedule(workspaceId: string, id: string, userId: string, scheduledAt: Date,
+    operation: 'reschedule' | 'resume' | 'retry') {
+    const expected = { reschedule: 'scheduled', resume: 'paused', retry: 'verified' } as const;
+    return this.prisma.$transaction(async (tx) => {
+      const source = await tx.publishTask.findFirst({
+        where: { id, workspaceId },
+        select: { variantId: true, accountId: true, variant: { select: { manuscriptId: true } } },
+      });
+      if (!source || !(await lockRow(tx, 'manuscript', workspaceId, source.variant.manuscriptId))
+        || !(await lockRow(tx, 'variant', workspaceId, source.variantId))
+        || !(await lockRow(tx, 'account', workspaceId, source.accountId))
+        || !(await lockRow(tx, 'task', workspaceId, id))) throw new NotFoundException('任务不存在');
+      const task = await tx.publishTask.findUniqueOrThrow({ where: { id },
+        include: { variant: { include: publishableVariant }, account: true, result: true } });
+      if (task.status !== expected[operation]) throw new ConflictException('任务状态已变化，或尚未确认平台未受理');
+      const now = await databaseTime(tx);
+      if (scheduledAt <= now) throw new BadRequestException('请选择未来的计划时间');
+      if (!hasApproval(task.variant) || task.variant.contentHash !== task.variantContentHash) {
+        throw new ConflictException('原审核快照已失效，请审核当前版本后重新排期');
+      }
+      const channel = this.requireAvailableAccount(task.account, task.variant, now);
+      if (task.executionChannel && task.executionChannel !== channel) throw new ConflictException('发布通道已变化，无法重新安排原任务');
+      if (channel === 'official' && !await bilibiliAppOptions(tx, task.account).catch(() => undefined)) {
+        throw new ConflictException('B 站开放平台应用凭据不可用，请负责人重新保存');
+      }
+      if (operation === 'retry' || (operation === 'resume' && (task.attempts || task.claimedAt || task.handedOffAt || task.result || task.executionChannel))) {
+        const verification = await tx.taskEvent.findFirst({
+          where: { taskId: id, kind: 'verified', toStatus: 'verified' }, orderBy: { id: 'desc' },
+        });
+        const details = verification?.details as { outcome?: string; attempt?: number } | undefined;
+        if (details?.outcome !== 'not_received' || details.attempt !== task.attempts) {
+          throw new ConflictException('请先核对本次发布并确认平台未受理');
+        }
+        await this.requireNoAcceptance(tx, task);
+      }
+      if (operation === 'reschedule' && scheduledAt.getTime() === task.scheduledAt.getTime()) return presentTask(task);
+      if (task.status !== 'scheduled') assertTransition(task.status, 'scheduled');
+      const updated = await tx.publishTask.update({
+        where: { id }, data: { status: 'scheduled', scheduledAt, lastError: null,
+          ...(operation === 'reschedule' ? {} : { claimedAt: null, handedOffAt: null }) },
+      });
+      await tx.taskEvent.create({
+        data: { workspaceId, taskId: id, actorId: userId, kind: operation === 'retry' ? 'retried' : 'rescheduled',
+          fromStatus: task.status, toStatus: 'scheduled', reason: operation === 'resume' ? '恢复暂停任务' : undefined,
+          details: { previousScheduledAt: task.scheduledAt.toISOString(), scheduledAt: scheduledAt.toISOString() } },
+      });
+      return presentTask(updated);
+    }, { isolationLevel: 'ReadCommitted' });
+  }
+
+  async cancel(workspaceId: string, id: string, userId: string, role: Role, input: z.infer<typeof cancelTaskSchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      if (!(await lockRow(tx, 'task', workspaceId, id))) throw new NotFoundException('任务不存在');
+      const task = await tx.publishTask.findUniqueOrThrow({ where: { id } });
+      if (task.status === 'handed_off') {
+        if (role !== 'owner') throw new ForbiddenException('仅负责人可以取消已经交接的任务');
+        if (!input.verification) throw new BadRequestException('请填写确认尚未发布的核对依据');
+      } else if (task.status !== 'scheduled' && task.status !== 'paused') {
+        throw new ConflictException('当前状态不能取消，请先核对发布结果');
+      }
+      assertTransition(task.status, 'canceled');
+      const canceledAt = await databaseTime(tx);
+      const updated = await tx.publishTask.update({ where: { id }, data: {
+        status: 'canceled', canceledAt, canceledById: userId, cancelReason: input.reason, lastError: null,
+      } });
+      await this.skipPendingReminders(tx, id, '任务已取消');
+      await tx.taskEvent.create({
+        data: { workspaceId, taskId: id, actorId: userId, kind: 'canceled', fromStatus: task.status, toStatus: 'canceled',
+          reason: input.reason, details: { verification: input.verification ?? null } },
+      });
+      return presentTask(updated);
+    }, { isolationLevel: 'ReadCommitted' });
+  }
+
+  private hasLateAcceptance(db: Prisma.TransactionClient, id: string) {
+    return db.taskEvent.findFirst({
+      where: { taskId: id, kind: 'late_receipt', OR: [
+        ...['submitted', 'under_review', 'published'].map((state) => ({ details: { path: ['state'], equals: state } })),
+        { details: { path: ['remoteId'], not: Prisma.AnyNull } },
+      ] },
+      select: { id: true },
+    });
+  }
+
+  private async requireNoAcceptance(tx: Prisma.TransactionClient, task: PublishTask & { result: PublishResult | null }) {
+    if (task.result?.remoteId || task.result?.remoteUrl || await this.hasLateAcceptance(tx, task.id)) {
+      throw new ConflictException('已有平台受理或作品证据，请核对原作品，避免重复发布');
+    }
+  }
+
+  async verify(workspaceId: string, id: string, userId: string, input: z.infer<typeof verifyTaskSchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      if (!(await lockRow(tx, 'task', workspaceId, id))) throw new NotFoundException('任务不存在');
+      const task = await tx.publishTask.findUniqueOrThrow({ where: { id }, include: { result: true } });
+      if (task.status !== 'unknown' && !(task.status === 'failed' && input.outcome === 'not_received')) {
+        throw new ConflictException('任务当前状态不能提交此项核对');
+      }
+      if (input.outcome === 'unresolved') {
+        await tx.taskEvent.create({ data: { workspaceId, taskId: id, actorId: userId, kind: 'verified',
+          fromStatus: 'unknown', toStatus: 'unknown', reason: input.reason, details: { outcome: input.outcome } } });
+        return presentTask(task);
+      }
+      if (input.outcome === 'not_received') await this.requireNoAcceptance(tx, task);
+      if (input.outcome === 'accepted') {
+        if (task.executionChannel !== 'official') throw new ConflictException('仅官方通道支持按文章 ID 继续回读');
+        if (!/^[1-9]\d{0,19}$/u.test(input.remoteId)) throw new BadRequestException('请填写有效的 B 站文章 ID');
+        if (task.result?.remoteId && task.result.remoteId !== input.remoteId) throw new ConflictException('文章 ID 与现有回执不一致');
+      }
+      assertTransition(task.status, 'verified');
+      await tx.taskEvent.create({
+        data: { workspaceId, taskId: id, actorId: userId, kind: 'verified', fromStatus: task.status, toStatus: 'verified',
+          reason: input.reason, details: { outcome: input.outcome, attempt: task.attempts, previous: receiptSnapshot(task.result),
+            ...('remoteId' in input && input.remoteId ? { remoteId: input.remoteId } : {}) } },
+      });
+      if (input.outcome === 'not_received') {
+        const updated = await tx.publishTask.update({ where: { id }, data: { status: 'verified', lastError: null } });
+        return presentTask(updated);
+      }
+      const state = input.outcome === 'accepted' ? 'submitted' : 'published';
+      assertTransition('verified', state);
+      const evidenceAssetId = await this.validateEvidence(tx, workspaceId, id, 'evidenceAssetId' in input ? input.evidenceAssetId : undefined);
+      const receipt = {
+        workspaceId, taskId: id, state, recordedById: userId, recordedAt: await databaseTime(tx), note: input.reason,
+        remoteId: input.remoteId || task.result?.remoteId || null,
+        remoteUrl: ('remoteUrl' in input ? input.remoteUrl : task.result?.remoteUrl) || null,
+        evidenceAssetId: input.outcome === 'accepted' ? task.result?.evidenceAssetId ?? null : evidenceAssetId,
+      } as const;
+      const saved = await tx.publishResult.upsert({ where: { taskId: id }, create: receipt, update: receipt });
+      const updated = await tx.publishTask.update({ where: { id }, data: { status: state, lastError: null } });
+      await tx.taskEvent.create({ data: { workspaceId, taskId: id, actorId: userId, kind: 'result',
+        fromStatus: 'verified', toStatus: state, reason: input.reason, details: receiptSnapshot(saved) } });
+      return presentTask(updated);
+    }, { isolationLevel: 'ReadCommitted' });
   }
 
   async list(workspaceId: string, { status, accountId, manuscriptId, cursor, limit, performance, platform, content }: TaskFilters) {
@@ -312,66 +461,98 @@ export class TasksService {
     };
   }
 
-  async evidenceTarget(workspaceId: string, id: string) {
-    const task = await this.prisma.publishTask.findFirst({
-      where: { id, workspaceId },
-      include: { result: { include: { evidenceAsset: true } } },
-    });
+  async readEvidence(workspaceId: string, id: string, assetId?: string) {
+    const task = await this.prisma.publishTask.findFirst({ where: { id, workspaceId }, include: { result: true } });
     if (!task) throw new NotFoundException('任务不存在');
-    return task;
+    const image = await this.prisma.asset.findFirst({
+      where: { id: assetId ?? task.result?.evidenceAssetId ?? '', workspaceId, taskId: id, kind: 'task_evidence' },
+    });
+    if (!image) throw new NotFoundException('回执截图不存在');
+    return this.storage.readImage(workspaceId, image.storageKey);
   }
 
-  async attachEvidence(workspaceId: string, id: string, userId: string, metadata: {
-    storageKey: string;
-    filename: string;
-    mimeType: string;
-    size: number;
-  }) {
-    return this.prisma.$transaction(async (tx) => {
-      if (!(await lockRow(tx, 'task', workspaceId, id))) throw new NotFoundException('任务不存在');
-      const task = await tx.publishTask.findUniqueOrThrow({ where: { id } });
-      this.requireHandoff(task);
-      const asset = await tx.asset.create({
-        data: { ...metadata, workspaceId, taskId: id, kind: 'task_evidence', uploadedById: userId },
-      });
-      return { assetId: asset.id };
-    }, { isolationLevel: 'ReadCommitted' });
+  async attachEvidence(workspaceId: string, id: string, userId: string, role: Role,
+    file: { filename: string; mimeType: string; buffer: Buffer; size: number }) {
+    const existing = await this.prisma.publishTask.findFirst({ where: { id, workspaceId } });
+    if (!existing) throw new NotFoundException('任务不存在');
+    this.requireEvidenceWrite(existing, role);
+    const { key } = await this.storage.save(workspaceId, file.filename, file.buffer);
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        if (!(await lockRow(tx, 'task', workspaceId, id))) throw new NotFoundException('任务不存在');
+        const task = await tx.publishTask.findUniqueOrThrow({ where: { id } });
+        this.requireEvidenceWrite(task, role);
+        const asset = await tx.asset.create({
+          data: { storageKey: key, filename: file.filename, mimeType: file.mimeType, size: file.size,
+            workspaceId, taskId: id, kind: 'task_evidence', uploadedById: userId },
+        });
+        return { assetId: asset.id };
+      }, { isolationLevel: 'ReadCommitted' });
+    } catch (error) {
+      const registered = await this.prisma.asset.findUnique({ where: { storageKey: key }, select: { id: true } }).catch(() => undefined);
+      if (registered === null) await this.storage.remove(key).catch(() => undefined);
+      throw error;
+    }
   }
 
-  async recordResult(workspaceId: string, id: string, userId: string, input: z.infer<typeof recordResultSchema>) {
+  private requireEvidenceWrite(task: PublishTask, role: Role) {
+    if (task.status === 'canceled' && role !== 'owner') throw new ForbiddenException('仅负责人可以更正已取消的任务');
+    if (task.status !== 'unknown' && task.status !== 'failed' && task.status !== 'canceled') this.requireHandoff(task);
+  }
+
+  private async validateEvidence(tx: Prisma.TransactionClient, workspaceId: string, taskId: string, evidenceAssetId?: string) {
+    if (evidenceAssetId && !(await tx.asset.findFirst({
+      where: { id: evidenceAssetId, workspaceId, taskId, kind: 'task_evidence' }, select: { id: true },
+    }))) throw new NotFoundException('本任务截图不存在');
+    return evidenceAssetId ?? null;
+  }
+
+  private skipPendingReminders(tx: Prisma.TransactionClient, taskId: string, reason: string) {
+    return tx.notificationDelivery.updateMany({
+      where: { taskId, status: 'pending' },
+      data: { status: 'skipped', nextAttemptAt: null, lastError: reason },
+    });
+  }
+
+  async recordResult(workspaceId: string, id: string, userId: string, role: Role, input: z.infer<typeof recordResultSchema>) {
     return this.prisma.$transaction(async (tx) => {
       if (!(await lockRow(tx, 'task', workspaceId, id))) throw new NotFoundException('任务不存在');
-      const task = await tx.publishTask.findUniqueOrThrow({ where: { id } });
-      this.requireHandoff(task);
-      const evidenceAssetId = input.evidenceAssetId ?? null;
-      if (evidenceAssetId && !(await tx.asset.findFirst({
-        where: { id: evidenceAssetId, workspaceId, taskId: id, kind: 'task_evidence' },
-        select: { id: true },
-      }))) throw new NotFoundException('本任务截图不存在');
+      const task = await tx.publishTask.findUniqueOrThrow({ where: { id }, include: { result: true } });
+      const corrected = task.status === 'failed' || task.status === 'canceled';
+      if (corrected) {
+        if (task.status === 'canceled' && role !== 'owner') throw new ForbiddenException('仅负责人可以更正已取消的任务');
+        if (input.state !== 'published') throw new ConflictException('此处仅可凭作品证据更正为已发布');
+        if (!input.reason) throw new BadRequestException('请填写更正原因');
+      } else {
+        this.requireHandoff(task);
+      }
+      const evidenceAssetId = await this.validateEvidence(tx, workspaceId, id, input.evidenceAssetId);
       assertTransition(task.status, input.state);
-
-      const result = await tx.publishResult.create({
-        data: {
-          workspaceId, taskId: id, state: input.state, evidenceAssetId, recordedById: userId,
-          remoteId: input.remoteId || null, remoteUrl: input.remoteUrl || null, note: input.note,
-        },
-      });
-      await tx.publishTask.update({ where: { id }, data: { status: input.state } });
-      await tx.notificationDelivery.updateMany({
-        where: { taskId: id, status: 'pending' },
-        data: { status: 'skipped', nextAttemptAt: null, lastError: '任务已回填' },
-      });
+      const receipt = {
+        workspaceId, taskId: id, state: input.state, evidenceAssetId, recordedById: userId, recordedAt: await databaseTime(tx),
+        remoteId: input.remoteId || (corrected ? task.result?.remoteId : null) || null,
+        remoteUrl: input.remoteUrl || null, note: input.note ?? null, platformPublishedAt: null,
+      };
+      const result = await tx.publishResult.upsert({ where: { taskId: id }, create: receipt, update: receipt });
+      await tx.publishTask.update({ where: { id }, data: { status: input.state, lastError: null,
+        ...(task.status === 'canceled' ? { canceledAt: null, canceledById: null, cancelReason: null } : {}),
+      } });
+      await this.skipPendingReminders(tx, id, '任务已回填');
+      const previous = { ...receiptSnapshot(task.result), taskStatus: task.status,
+        canceledAt: task.canceledAt?.toISOString() ?? null, canceledById: task.canceledById, cancelReason: task.cancelReason };
       await tx.taskEvent.create({
         data: {
-          workspaceId, taskId: id, kind: 'result', fromStatus: task.status, toStatus: input.state,
-          actorId: userId, reason: input.note, details: { evidenceAssetId, remoteUrl: result.remoteUrl },
+          workspaceId, taskId: id, kind: corrected ? 'corrected' : 'result', fromStatus: task.status, toStatus: input.state,
+          actorId: userId, reason: corrected ? input.reason : input.note,
+          details: corrected ? { previous, next: receiptSnapshot(result), reason: input.reason! }
+            : { ...receiptSnapshot(result), ...(task.result ? { previous } : {}) },
         },
       });
       return result;
     }, { isolationLevel: 'ReadCommitted' });
   }
 
-  requireHandoff(task: PublishTask) {
+  private requireHandoff(task: PublishTask) {
     if (task.status !== 'handed_off' || task.executionChannel !== 'manual' || !task.handedOffAt) {
       throw new ConflictException('仅已交接且未回填的人工任务可以录入结果');
     }
@@ -418,6 +599,10 @@ export class TasksService {
       const now = await databaseTime(tx);
       if (task.status !== 'scheduled' || task.scheduledAt > now || task.accountId !== accountId
         || task.variantId !== variantId) return false;
+      if (task.attempts > 0 && await this.hasLateAcceptance(tx, id)) {
+        await this.storeAutomaticResult(tx, task, { status: 'unknown', message: '收到原尝试的迟到受理回执，请先核对作品' }, now);
+        return false;
+      }
 
       const variant = await tx.variant.findUniqueOrThrow({ where: { id: variantId }, include: publishableVariant });
       const account = await tx.channelAccount.findUniqueOrThrow({ where: { id: accountId } });
@@ -492,7 +677,7 @@ export class TasksService {
               authExpiresAt: { gt: now }, OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lte: now } }] } },
           select: { id: true },
         });
-        return Boolean(lease);
+        return Boolean(lease) && (task.attempts === 0 || !await this.hasLateAcceptance(this.prisma, task.id));
       },
     };
     let failure: PublishReceipt | undefined;
@@ -619,7 +804,7 @@ export class TasksService {
     const result = {
       state, remoteId: receipt.remoteId, remoteUrl: receipt.remoteUrl,
       platformPublishedAt: receipt.platformPublishedAt ? new Date(receipt.platformPublishedAt) : undefined,
-      note: receipt.message ?? null, recordedAt: now,
+      note: receipt.message ?? null, recordedAt: now, recordedById: null,
     };
     await tx.publishResult.upsert({
       where: { taskId: task.id }, update: result,

@@ -26,21 +26,22 @@ describe('任务状态机', () => {
     expect(canTransition('unknown', 'dispatching')).toBe(false);
     expect(canTransition('unknown', 'verified')).toBe(true);
     expect(isRetryBlockedByVerification('unknown')).toBe(true);
-    expect(isRetryBlockedByVerification('failed')).toBe(false);
+    expect(canTransition('failed', 'scheduled')).toBe(false);
   });
 
   it('核实后可按结论走发布或重试', () => {
     assertTransition('verified', 'published');
     assertTransition('verified', 'scheduled');
     assertTransition('verified', 'failed');
+    assertTransition('verified', 'submitted');
   });
 
-  it('已发布与已取消是终态', () => {
+  it('已发布与已取消停止派发，已取消仅允许更正为已发布', () => {
     expect(isTerminal('published')).toBe(true);
     expect(isTerminal('canceled')).toBe(true);
     for (const to of TASK_STATUSES) {
       expect(canTransition('published', to)).toBe(false);
-      expect(canTransition('canceled', to)).toBe(false);
+      expect(canTransition('canceled', to)).toBe(to === 'published');
     }
   });
 

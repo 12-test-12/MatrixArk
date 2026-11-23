@@ -49,34 +49,45 @@ export const createAccountSchema = z.object({
   credentials: z.record(z.string()).optional(),
 });
 
+const scheduledAt = z.string().datetime({ offset: true }).pipe(z.coerce.date());
+const taskReason = z.string().trim().min(1, '请填写原因或核对依据').max(1000);
+const workUrl = z.preprocess(
+  (value) => typeof value === 'string' ? value.trim() : value,
+  z.string().max(2048).url('链接格式不对').refine((value) => {
+    const url = URL.canParse(value) ? new URL(value) : null;
+    return url && ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password;
+  }, '作品链接须为 HTTP 或 HTTPS').or(z.literal('')).optional(),
+);
+const workEvidence = {
+  remoteUrl: workUrl,
+  remoteId: z.string().trim().max(200).optional(),
+  evidenceAssetId: z.string().uuid().optional(),
+};
+
 export const scheduleTasksSchema = z.object({
   variantIds: z.array(z.string().uuid()).min(1, '至少选一个平台版本'),
   accountIds: z.array(z.string().uuid()).min(1, '至少选一个账号'),
-  scheduledAt: z.string().datetime({ offset: true }).pipe(z.coerce.date()),
+  scheduledAt,
 });
 
 export const recordResultSchema = z.object({
   state: z.enum(['published', 'failed', 'unknown']),
-  remoteUrl: z.preprocess(
-    (value) => (typeof value === 'string' ? value.trim() : value),
-    z.string().max(2048).url('链接格式不对').refine((value) => {
-      const url = URL.canParse(value) ? new URL(value) : null;
-      return url && ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password;
-    }, '作品链接须为 HTTP 或 HTTPS').or(z.literal('')).optional(),
-  ),
-  remoteId: z.string().trim().max(200).optional(),
-  evidenceAssetId: z.string().uuid().optional(),
+  ...workEvidence,
+  reason: taskReason.optional(),
   note: z.string().trim().max(1000).optional(),
 }).refine(
   (result) => result.state !== 'published' || result.remoteUrl || result.evidenceAssetId,
   '已发布须提交作品链接或截图',
 );
 
-export const verifyTaskSchema = z.object({
-  published: z.boolean(),
-  remoteUrl: z.string().trim().url('链接格式不对').optional().or(z.literal('')),
-  note: z.string().trim().max(1000).optional(),
-});
+export const adjustTaskScheduleSchema = z.object({ scheduledAt }).strict();
+export const cancelTaskSchema = z.object({ reason: taskReason, verification: taskReason.optional() }).strict();
+export const verifyTaskSchema = z.discriminatedUnion('outcome', [
+  z.object({ outcome: z.literal('accepted'), reason: taskReason, remoteId: z.string().trim().min(1).max(200) }).strict(),
+  z.object({ outcome: z.literal('published'), reason: taskReason, ...workEvidence }).strict(),
+  z.object({ outcome: z.literal('not_received'), reason: taskReason }).strict(),
+  z.object({ outcome: z.literal('unresolved'), reason: taskReason }).strict(),
+]).refine((result) => result.outcome !== 'published' || result.remoteUrl || result.evidenceAssetId, '确认已发布须提交作品链接或截图');
 
 export const addMemberSchema = z.object({
   email: emailSchema,
