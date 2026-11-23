@@ -531,7 +531,7 @@ export class TasksService {
       const receipt = {
         workspaceId, taskId: id, state: input.state, evidenceAssetId, recordedById: userId, recordedAt: await databaseTime(tx),
         remoteId: input.remoteId || (corrected ? task.result?.remoteId : null) || null,
-        remoteUrl: input.remoteUrl || null, note: input.note ?? null, platformPublishedAt: null,
+        remoteUrl: input.remoteUrl || null, note: (corrected ? (input.reason || input.note) : input.note) ?? null, platformPublishedAt: null,
       };
       const result = await tx.publishResult.upsert({ where: { taskId: id }, create: receipt, update: receipt });
       await tx.publishTask.update({ where: { id }, data: { status: input.state, lastError: null,

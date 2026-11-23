@@ -29,7 +29,7 @@ const deliveryLabels = { pending: '待投递', sending: '投递中', sent: '已�
 function externalUrl(value: string | null) {
   if (!value || !URL.canParse(value)) return null;
   const url = new URL(value);
-  return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null;
+  return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password ? url.href : null;
 }
 
 function Package({ data }: { data: Handoff }) {
@@ -143,7 +143,8 @@ function TaskOperationForm({ mode, path, task, saved, action }: {
   const evidence = useTaskEvidence(path);
   const [outcome, setOutcome] = useState<VerifyOutcome>(task.status === 'failed' ? 'not_received' : 'unresolved');
   const needsTime = mode === 'schedule' || mode === 'resume' || mode === 'retry';
-  const time = new Date(mode === 'schedule' ? task.scheduledAt : Date.now() + 5 * 60_000);
+  const time = new Date(mode === 'schedule' && new Date(task.scheduledAt).getTime() > Date.now()
+    ? task.scheduledAt : Date.now() + 5 * 60_000);
   const localTime = new Date(time.getTime() - time.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
