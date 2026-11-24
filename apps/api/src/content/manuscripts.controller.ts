@@ -24,11 +24,19 @@ import { CurrentMembership, CurrentUser } from '../auth/decorators';
 import type { SessionUser } from '../auth/session.service';
 import { assertCan } from '../common/permissions';
 import { parse } from '../common/zod';
-import type { Role } from '@prisma/client';
+import type { Prisma, Role } from '@prisma/client';
+import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
-import { ContentService, variantSnapshot } from './content.service';
+import { ContentService, variantRejections, variantSnapshot } from './content.service';
 import { IMAGE_UPLOAD_LIMIT, VIDEO_UPLOAD_LIMIT, StorageService, imageDisplayName, validateImageUpload } from './storage.service';
+
+const listSchema = z.object({
+  archived: z.enum(['true', 'false']).optional(),
+  review: z.enum(['pending', 'returned']).optional(),
+  cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
 
 @Controller('workspaces/:workspaceId/manuscripts')
 @UseGuards(WorkspaceGuard)
@@ -40,21 +48,48 @@ export class ManuscriptsController {
   ) {}
 
   @Get()
-  async list(@Param('workspaceId') workspaceId: string, @Query('archived') archived?: string) {
+  async list(@Param('workspaceId') workspaceId: string, @CurrentUser() user: SessionUser, @Query() query: unknown) {
+    const { archived, review, cursor, limit } = parse(listSchema, query);
+    const paged = limit !== undefined || review !== undefined || cursor !== undefined;
+    const pageSize = limit ?? (paged ? 20 : 100);
+    const authorId = review === 'returned' ? user.id : undefined;
+    const scope = JSON.stringify([workspaceId, archived === 'true', review, authorId]);
+    let after: Prisma.ManuscriptWhereInput = {};
+    if (cursor) {
+      try {
+        const [cursorScope, timestamp, id]: unknown[] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+        if (cursorScope !== scope || typeof timestamp !== 'string' || typeof id !== 'string' || !id) throw new Error();
+        const createdAt = new Date(timestamp);
+        if (createdAt.toISOString() !== timestamp) throw new Error();
+        after = { OR: [{ createdAt: { lt: createdAt } }, { createdAt, id: { lt: id } }] };
+      } catch {
+        throw new BadRequestException('原稿分页游标无效');
+      }
+    }
     const manuscripts = await this.prisma.manuscript.findMany({
-      where: { workspaceId, archivedAt: archived === 'true' ? { not: null } : null },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+      where: {
+        workspaceId, archivedAt: archived === 'true' ? { not: null } : null, createdById: authorId,
+        ...(review && { variants: { some: {
+          status: 'draft',
+          rejections: review === 'pending' ? { none: {} } : { some: {} },
+        } } }),
+        ...after,
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: pageSize + (paged ? 1 : 0),
       include: {
         variants: {
           where: { status: { not: 'superseded' } },
-          select: { id: true, platform: true, version: true, status: true },
+          select: {
+            id: true, platform: true, version: true, status: true,
+            rejections: { take: 1, select: { id: true } },
+          },
         },
         _count: { select: { assets: { where: { kind: 'manuscript_image' } } } },
       },
     });
 
-    return manuscripts.map((m) => ({
+    const items = manuscripts.slice(0, pageSize).map((m) => ({
       id: m.id,
       title: m.title,
       createdAt: m.createdAt,
@@ -67,8 +102,17 @@ export class ManuscriptsController {
         platform: v.platform,
         version: v.version,
         status: v.status,
+        returned: v.status === 'draft' && v.rejections.length > 0,
       })),
     }));
+    if (!paged) return items;
+    const last = items.at(-1);
+    return {
+      items,
+      nextCursor: manuscripts.length > pageSize && last
+        ? Buffer.from(JSON.stringify([scope, last.createdAt.toISOString(), last.id])).toString('base64url')
+        : null,
+    };
   }
 
   @Post()
@@ -93,7 +137,10 @@ export class ManuscriptsController {
       include: {
         assets: { where: { kind: 'manuscript_image' }, orderBy: { createdAt: 'asc' } },
         videoAsset: { select: { id: true, filename: true, size: true } },
-        variants: { include: variantSnapshot, orderBy: [{ platform: 'asc' }, { version: 'desc' }] },
+        variants: {
+          include: { ...variantSnapshot, rejections: variantRejections },
+          orderBy: [{ platform: 'asc' }, { version: 'desc' }],
+        },
       },
     });
     if (!manuscript) throw new NotFoundException('稿件不存在');
@@ -124,6 +171,8 @@ export class ManuscriptsController {
         snapshotVersion: v.snapshotVersion,
         sealedAt: v.sealedAt,
         status: v.status,
+        returned: v.status === 'draft' && v.rejections.length > 0,
+        rejections: v.rejections,
         isCurrent: v.status !== 'superseded',
         createdAt: v.createdAt,
         approval: v.approval

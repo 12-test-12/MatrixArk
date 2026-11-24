@@ -20,6 +20,11 @@ export const variantSnapshot = {
   },
 } as const satisfies Prisma.VariantInclude;
 
+export const variantRejections = {
+  orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  select: { id: true, reviewerId: true, reviewer: { select: { name: true } }, reason: true, createdAt: true },
+} as const satisfies Prisma.Variant$rejectionsArgs;
+
 type Snapshot = Prisma.VariantGetPayload<{ include: typeof variantSnapshot }>;
 type ImageScope = Pick<Manuscript, 'id' | 'workspaceId'>;
 
@@ -317,9 +322,29 @@ export class ContentService {
     return { variant, ...inspectSnapshot(variant) };
   }
 
+  async reject(params: { variantId: string; workspaceId: string; userId: string; reason: string }) {
+    return this.prisma.$transaction(async (tx) => {
+      const { workspaceId, variantId, userId, reason } = params;
+      const variant = await this.lockCurrentVariant(tx, workspaceId, variantId);
+      if (variant.status !== 'draft' || variant.approval) throw new ConflictException('只有待审核的版本可以退回');
+      await this.assertNotReturned(tx, variant.id);
+      return tx.variantRejection.create({
+        data: { workspaceId, variantId, reviewerId: userId, reason },
+        select: variantRejections.select,
+      });
+    }, { isolationLevel: 'ReadCommitted' });
+  }
+
+  private async assertNotReturned(tx: Prisma.TransactionClient, variantId: string) {
+    if (await tx.variantRejection.findFirst({ where: { variantId }, select: { id: true } })) {
+      throw new ConflictException('该版本已退回，请保存新版本后重新审核');
+    }
+  }
+
   async confirm(params: { variantId: string; workspaceId: string; userId: string; note?: string }) {
     return this.prisma.$transaction(async (tx) => {
       const variant = await this.lockCurrentVariant(tx, params.workspaceId, params.variantId);
+      await this.assertNotReturned(tx, variant.id);
       const { issues } = inspectSnapshot(variant);
       if (issues.some(({ field }) => field === 'snapshot')) {
         throw new ConflictException({ message: '版本快照无效，请保存为新版本后重新确认', issues });

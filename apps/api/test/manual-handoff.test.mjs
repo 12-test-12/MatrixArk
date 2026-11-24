@@ -334,6 +334,76 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     }
   });
 
+  await t.test('旧稿可分页审核，退回与确认互斥，作者修改后重新送审', async (reviewTest) => {
+    const membership = await prisma.membership.create({
+      data: { workspaceId, userId: other.user.id, role: 'viewer' },
+    });
+    reviewTest.after(() => prisma.membership.delete({ where: { id: membership.id } }));
+    const oldTime = new Date('2020-01-01T00:00:00.000Z');
+    const draftData = { workspaceId, createdById: owner.user.id, title: '旧待审核稿', body: '待修改正文', createdAt: oldTime };
+    const old = await prisma.manuscript.create({ data: draftData });
+    const sameTime = await prisma.manuscript.create({ data: { ...draftData, title: '同刻待审核稿' } });
+    await prisma.manuscript.createMany({ data: Array.from({ length: 101 }, (_, index) => ({
+      ...draftData, createdAt: new Date('2021-01-01T00:00:00.000Z'), title: `新原稿 ${index}`,
+    })) });
+    const generate = async (id) => (await post(`${own}/manuscripts/${id}/generate`, { platforms: ['bilibili'] })).data[0];
+    const version = await generate(old.id);
+    const sibling = await generate(sameTime.id);
+    const path = own + '/variants/' + version.id;
+    const list = (query, session = cookie, status = 200) => call(own + '/manuscripts?' + query, { cookie: session, status });
+    assert.ok(!(await list('')).data.some(({ id }) => id === old.id));
+    const first = await list('review=pending&limit=1', otherCookie);
+    assert.ok(first.data.nextCursor);
+    await list('review=returned&cursor=' + first.data.nextCursor, otherCookie, 400);
+    await call(foreign + '/manuscripts?review=pending&cursor=' + first.data.nextCursor, { cookie: otherCookie, status: 400 });
+    const ids = [];
+    let page = first.data;
+    while (true) {
+      ids.push(...page.items.map(({ id }) => id));
+      if (!page.nextCursor) break;
+      assert.ok(ids.length < 20);
+      page = (await list('review=pending&limit=1&cursor=' + page.nextCursor, otherCookie)).data;
+    }
+    assert.equal(new Set(ids).size, ids.length);
+    assert.deepEqual(ids.slice(-2), [old.id, sameTime.id].sort().reverse());
+
+    const reject = (target, reason, session, status) => call(target + '/reject', {
+      cookie: session, method: 'POST', body: { reason }, status,
+    });
+    await reject(path, '调整标题', otherCookie, 403);
+    await prisma.membership.update({ where: { id: membership.id }, data: { role: 'reviewer' } });
+    await reject(foreign + '/variants/' + version.id, '跨工作室', otherCookie, 404);
+    await reject(path, '  ', otherCookie, 400);
+    const { data: rejected } = await reject(path, '  调整标题  ', otherCookie, 201);
+    assert.equal(rejected.reason, '调整标题');
+    assert.equal(rejected.reviewerId, other.user.id);
+    assert.ok(rejected.createdAt);
+    await reject(path, '重复退回', otherCookie, 409);
+    await post(path + '/confirm', {}, 409);
+    assert.ok(!(await list('review=pending')).data.items.some(({ id }) => id === old.id));
+    assert.deepEqual((await list('review=returned')).data.items.map(({ id }) => id), [old.id]);
+    assert.deepEqual((await list('review=returned', otherCookie)).data.items, []);
+    const detail = () => call(own + '/manuscripts/' + old.id, { cookie });
+    const { data: returned } = await detail();
+    assert.equal(returned.variants[0].returned, true);
+    assert.deepEqual(returned.variants[0].rejections, [rejected]);
+    const { data: { variant: revised } } = await call(path, { cookie, method: 'PATCH', body: { title: '修订后标题' } });
+    assert.ok((await list('review=pending')).data.items.some(({ id }) => id === old.id));
+    assert.deepEqual((await list('review=returned')).data.items, []);
+    await post(own + '/variants/' + revised.id + '/confirm', {});
+    await reject(own + '/variants/' + revised.id, '已确认', otherCookie, 409);
+    assert.deepEqual((await detail()).data.variants.find(({ id }) => id === version.id).rejections, [rejected]);
+
+    const siblingPath = base + own + '/variants/' + sibling.id;
+    const [confirmed, declined] = await Promise.all([
+      fetch(siblingPath + '/confirm', { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: '{}' }),
+      fetch(siblingPath + '/reject', { method: 'POST', headers: { cookie: otherCookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: '并发退回' }) }),
+    ]);
+    assert.deepEqual([confirmed.status, declined.status].sort(), [201, 409]);
+    await Promise.all([confirmed.json(), declined.json()]);
+  });
+
   await t.test('只能通过小红书官方身份核验新增账号', async (test) => {
     let approved = false;
     let webScanEnabled = false;

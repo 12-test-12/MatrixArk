@@ -14,16 +14,20 @@ export type Account = {
   identityVerified: boolean; identityCheckedAt: string | null; availableForHandoff: boolean; availableForOfficial: boolean;
 };
 export type Approval = { approvedAt: string; snapshotHash: string | null };
+export type Rejection = { id: string; reviewer: { name: string }; reason: string; createdAt: string };
 export type Picture = { assetId: string; position: number; isCover: boolean };
 export type VideoAsset = { id: string; filename: string; size: number };
-export type VariantSummary = { id: string; platform: Platform; status: 'draft' | 'approved' | 'superseded'; version: number };
+export type VariantSummary = {
+  id: string; platform: Platform; status: 'draft' | 'approved' | 'superseded'; version: number; returned?: boolean;
+};
 type VariantText = VariantSummary & { title: string; body: string; tags: string[]; platformFields?: Record<string, unknown> };
 export type Variant = VariantText & {
   assets: Picture[]; snapshotVersion: number;
   approval: Approval | null;
+  rejections?: Rejection[];
   videoAsset?: VideoAsset | null;
 };
-export type ManuscriptVariant = VariantText & Partial<Pick<Variant, 'assets' | 'snapshotVersion' | 'approval' | 'videoAsset'>>;
+export type ManuscriptVariant = VariantText & Partial<Pick<Variant, 'assets' | 'snapshotVersion' | 'approval' | 'rejections' | 'videoAsset'>>;
 export type ManuscriptSummary = {
   id: string; title: string; assetCount: number; updatedAt: string; variants: VariantSummary[];
   videoAssetId?: string | null;

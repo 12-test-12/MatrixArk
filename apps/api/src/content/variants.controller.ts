@@ -17,9 +17,10 @@ import { assertCan } from '../common/permissions';
 import { parse } from '../common/zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from '../workspaces/workspace.guard';
-import { ContentService, variantSnapshot } from './content.service';
+import { ContentService, variantRejections, variantSnapshot } from './content.service';
 
 const confirmSchema = z.object({ note: z.string().trim().max(500).optional() });
+const rejectSchema = z.object({ reason: z.string().trim().min(1, '请填写退回原因').max(500) });
 
 @Controller('workspaces/:workspaceId/variants')
 @UseGuards(WorkspaceGuard)
@@ -35,6 +36,7 @@ export class VariantsController {
       where: { id, workspaceId },
       include: {
         ...variantSnapshot,
+        rejections: variantRejections,
         tasks: {
           include: {
             account: { omit: { credentials: true, credentialsCiphertext: true, credentialsKeyId: true } },
@@ -89,5 +91,18 @@ export class VariantsController {
       note: input.note,
     });
     return result;
+  }
+
+  @Post(':id/reject')
+  reject(
+    @CurrentMembership() membership: { role: Role },
+    @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string,
+    @CurrentUser() user: SessionUser,
+    @Body() body: unknown,
+  ) {
+    assertCan(membership.role, 'content:approve');
+    const { reason } = parse(rejectSchema, body);
+    return this.content.reject({ variantId: id, workspaceId, userId: user.id, reason });
   }
 }

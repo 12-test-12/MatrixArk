@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import {
-  ArrowDown, ArrowUp, CalendarPlus, ChevronRight, CircleCheck, FileText, ImagePlus, Images, PencilLine, Plus,
+  ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarPlus, ChevronRight, CircleCheck, FileText, ImagePlus, Images, PencilLine, Plus,
   ShieldCheck, Sparkles,
 } from 'lucide-react';
 import {
@@ -9,8 +9,12 @@ import {
 } from './api';
 import { Empty, Feedback, Loading, PageHeader, PlatformIcon, ReviewPicture } from './ui';
 
-function variantLabel(variant?: Pick<Variant, 'status'>) {
-  return variant?.status === 'approved' ? '已审核' : variant ? '待审核' : '未生成';
+type ReviewFilter = 'all' | 'pending' | 'returned';
+
+function variantLabel(variant?: Pick<Variant, 'status' | 'returned'>) {
+  if (!variant) return '未生成';
+  if (variant.returned) return '已退回';
+  return variant.status === 'approved' ? '已审核' : '待审核';
 }
 
 function hasSnapshot(variant: ManuscriptVariant): variant is Variant {
@@ -280,10 +284,10 @@ function Schedule({ scope, variants, accounts, onSchedule, openAccounts }: {
   </div>;
 }
 
-function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApproved, onSchedule, openAccounts }: {
+function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, changed, onReview, onSchedule, openAccounts }: {
   scope: string; role: Role; id: string; accounts: ReturnType<typeof useResource<Account[]>>;
-  drafts: ManuscriptDrafts;
-  changed: () => void; onApproved?: (title: string) => void; onSchedule: (id: string) => void; openAccounts: () => void;
+  drafts: ManuscriptDrafts; reviewFilter: ReviewFilter;
+  changed: () => void; onReview: (message: string) => void; onSchedule: (id: string) => void; openAccounts: () => void;
 }) {
   const detail = useResource<Manuscript>(scope + '/manuscripts/' + id);
   const action = useAction();
@@ -298,10 +302,14 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
   }, [pickedVideo]);
   const [editing, setEditing] = useState<boolean | null>(null);
   const [selectedPlatform, setPlatform] = useState<Platform>();
+  const [rejecting, setRejecting] = useState(false);
+  const rejectButton = useRef<HTMLButtonElement>(null);
+  const rejectFormId = useId();
   const manuscript = detail.data;
   const currentVariants = manuscript?.variants.filter(({ status }) => status !== 'superseded') ?? [];
-  const pending = role === 'reviewer' ? currentVariants.find(({ status }) => status === 'draft') : undefined;
-  const platform = selectedPlatform ?? pending?.platform
+  const relevant = reviewFilter === 'all' ? undefined : currentVariants.find(({ status, returned }) =>
+    status === 'draft' && Boolean(returned) === (reviewFilter === 'returned'));
+  const platform = selectedPlatform ?? relevant?.platform
     ?? platforms.find((candidate) => currentVariants.some((variant) => variant.platform === candidate)) ?? platforms[0];
   const variant = currentVariants.find((item) => item.platform === platform);
   const snapshot = variant && hasSnapshot(variant) ? variant : undefined;
@@ -312,6 +320,8 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
   const approvedVersions = currentVariants.filter(hasSnapshot).filter((item) =>
     item.status === 'approved' && Boolean(item.approval?.snapshotHash) && item.snapshotVersion === 1);
   const approved = approvedVersions.some((item) => item.id === snapshot?.id);
+  const reviewable = snapshot?.status === 'draft' && !snapshot.returned && !manuscript?.archivedAt && canReview(role);
+  const pastRejections = manuscript?.variants.filter(({ status, rejections }) => status === 'superseded' && rejections?.length) ?? [];
   const editingVersion = snapshot && editable && (editing ?? drafts.has(draftKey));
   function refresh() { detail.refresh(); changed(); }
   function archive() {
@@ -339,8 +349,21 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
       await post(scope + '/variants/' + snapshot.id + '/confirm', {});
       check.refresh();
       refresh();
-      onApproved?.(manuscript.title);
-    }, onApproved ? '' : '已确认当前版本。');
+      onReview(`「${manuscript.title}」的${publishPlatformLabel(snapshot.platform, Boolean(snapshot.videoAsset))}版本已确认。`);
+    });
+  }
+  function reject(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!snapshot || !manuscript || !reviewable) return;
+    const reason = String(new FormData(event.currentTarget).get('reason') ?? '').trim();
+    setPlatform(snapshot.platform);
+    void action.run(async () => {
+      if (!reason) throw new Error('请填写退回原因。');
+      await post(scope + '/variants/' + snapshot.id + '/reject', { reason });
+      setRejecting(false);
+      refresh();
+      onReview(`「${manuscript.title}」的${publishPlatformLabel(snapshot.platform, Boolean(snapshot.videoAsset))}版本已退回。`);
+    });
   }
   function upload(files: File[]) {
     if (!files.length) return;
@@ -371,7 +394,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
       </button>}
     </div>
     <div className="detail-content">
-      <Feedback error={action.error || detail.error} notice={action.notice} />
+      <Feedback error={(!rejecting ? action.error : '') || detail.error} notice={action.notice} />
       <details className="source">
         <summary>查看原稿正文</summary>
         <p className="content-text">{manuscript.body}</p>
@@ -417,7 +440,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
       </div> : <p className="muted small">暂无配图。小红书图文至少需要 1 张。</p>}
       <div className="section-line variant-heading">
         <h3><PlatformIcon platform={platform} />{publishPlatformLabel(platform, Boolean(manuscript.videoAsset))}版本</h3>
-        {snapshot && <span className={`badge ${approved ? 'green' : 'amber'}`}>{approved ? '已审核' : '待审核'}</span>}
+        {variant && <span className={`badge ${approved ? 'green' : 'amber'}`}>{variantLabel(variant)}</span>}
       </div>
       <div className="filters platform-options" role="group" aria-label="按平台查看版本">
         {platforms.map((candidate) => {
@@ -425,7 +448,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
           return <button type="button" key={candidate} className={platform === candidate ? 'active' : ''}
             aria-pressed={platform === candidate} disabled={action.busy} onClick={() => {
               if (platform === candidate) return;
-              action.reset(); setPlatform(candidate); setEditing(null);
+              action.reset(); setPlatform(candidate); setEditing(null); setRejecting(false);
             }}>{publishPlatformLabel(candidate, Boolean(manuscript.videoAsset))} <small>{variantLabel(current)}</small></button>;
         })}
       </div>
@@ -440,7 +463,10 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
         </div>}
       </div> : snapshot && editingVersion ? <EditVersion key={snapshot.id} scope={scope} variant={snapshot}
         assets={manuscript.assets} drafts={drafts} draftKey={draftKey}
-        onSave={() => { setPlatform(snapshot.platform); setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />
+        onSave={() => {
+          setPlatform(snapshot.platform); setEditing(false); refresh();
+          if (snapshot.returned) onReview(`「${manuscript.title}」已保存新版本，重新进入待审核。`);
+        }} onCancel={() => setEditing(false)} />
         : <>
           <div className="variant-preview">
             <div className="section-line"><h3>{variant.title}</h3><span className="version">V{variant.version}</span></div>
@@ -462,6 +488,14 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
               </div>)}
             </div>}
           </div>
+          {variant.returned && variant.rejections?.length ? <div className="check-list">
+            <strong>退回意见</strong>
+            {variant.rejections.map((item) => <div key={item.id}>
+              <p className="muted small">{item.reviewer.name} · {formatTime(item.createdAt)}</p>
+              <p className="content-text">{item.reason}</p>
+            </div>)}
+            {editable && <p>按意见编辑并保存新版本后，稿件会重新进入待审核。</p>}
+          </div> : null}
           <Feedback error={snapshot ? check.error : 'API 未返回版本图片快照。当前可查看文案，使用与工作台同版本的 API 后可继续编辑、审核和排期。'} />
           {issues?.length ? <div className="check-list" role="status">
             <strong>发布前检查</strong><ul>{issues.map((issue) => <li key={issue.code}>{issue.message}</li>)}</ul>
@@ -469,18 +503,43 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, changed, onApprov
               <p>上传原稿配图后，在「编辑版本」中将图片加入当前平台版本。</p>}
           </div> : null}
           <div className="actions">
-            {snapshot && editable && <button type="button" className="button" disabled={action.busy} onClick={() => setEditing(true)}>
+            {snapshot && editable && !rejecting && <button type="button" className="button" disabled={action.busy} onClick={() => setEditing(true)}>
               <PencilLine size={16} aria-hidden="true" />编辑版本
             </button>}
-            {snapshot && !manuscript.archivedAt && canReview(role) && !approved && <button type="button" className="button primary"
+            {reviewable && !rejecting && <button type="button" className="button primary"
               disabled={action.busy || !issues || issues.length !== 0} onClick={approve}>
               <ShieldCheck size={17} aria-hidden="true" />确认审核
             </button>}
+            {reviewable && <button ref={rejectButton} type="button" className="button" disabled={action.busy}
+              aria-expanded={rejecting} aria-controls={rejecting ? rejectFormId : undefined}
+              onClick={() => { action.reset(); setRejecting(!rejecting); }}>退回修改</button>}
             {approved && snapshot?.approval && <span className="approved-note"><CircleCheck size={16} aria-hidden="true" />
               {formatTime(snapshot.approval.approvedAt)} 确认
             </span>}
           </div>
+          {reviewable && rejecting && <form id={rejectFormId} className="form-stack" onSubmit={reject}>
+            <label>退回原因<textarea name="reason" required maxLength={500} rows={3} autoFocus
+              aria-invalid={Boolean(action.error)} aria-describedby={action.error ? rejectFormId + '-error' : undefined}
+              disabled={action.busy} onChange={action.reset} /></label>
+            {action.error && <div id={rejectFormId + '-error'}><Feedback error={action.error} /></div>}
+            <div className="actions">
+              <button type="submit" className="button primary" disabled={action.busy}>{action.busy ? '正在退回…' : '提交退回'}</button>
+              <button type="button" className="button" disabled={action.busy} onClick={() => {
+                setRejecting(false); action.reset(); rejectButton.current?.focus();
+              }}>取消</button>
+            </div>
+          </form>}
         </>}
+      {pastRejections.length > 0 && <details className="source">
+        <summary>查看历史退回意见</summary>
+        {pastRejections.map((item) => <div key={item.id}>
+          <h4>{publishPlatformLabel(item.platform, Boolean(item.videoAsset))} V{item.version}</h4>
+          {item.rejections?.map((rejection) => <div key={rejection.id}>
+            <p className="muted small">{rejection.reviewer.name} · {formatTime(rejection.createdAt)}</p>
+            <p className="content-text">{rejection.reason}</p>
+          </div>)}
+        </div>)}
+      </details>}
       {editable && !editingVersion && approvedVersions.length > 0 && (accounts.loading ? <Loading />
         : accounts.error ? <Feedback error={accounts.error} /> : <Schedule scope={scope} variants={approvedVersions}
           accounts={accounts.data ?? []} onSchedule={onSchedule} openAccounts={openAccounts} />)}
@@ -494,62 +553,83 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
   openTasks: (id: string) => void; openAccounts: () => void;
 }) {
   const [showArchived, setShowArchived] = useState(false);
-  const list = useResource<ManuscriptSummary[]>(scope + '/manuscripts' + (showArchived ? '?archived=true' : ''));
   const [selection, setSelection] = useState('');
-  const [pendingOnly, setPendingOnly] = useState(role === 'reviewer');
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>(role === 'reviewer' ? 'pending' : 'all');
+  const [pages, setPages] = useState<string[]>([]);
   const [reviewNotice, setReviewNotice] = useState('');
   const draftKey = scope + '/manuscripts/new';
   const [creating, setCreating] = useState(() => canEdit(role) && drafts.has(draftKey));
-  const allItems = list.data ?? [];
-  const items = pendingOnly ? allItems.filter(({ variants }) =>
-    variants.some(({ status }) => status === 'draft')) : allItems;
+  const cursor = pages.at(-1);
+  const search = new URLSearchParams({ limit: '20' });
+  if (showArchived) search.set('archived', 'true');
+  if (reviewFilter !== 'all') search.set('review', reviewFilter);
+  if (cursor) search.set('cursor', cursor);
+  const list = useResource<{ items: ManuscriptSummary[]; nextCursor: string | null }>(scope + '/manuscripts?' + search);
+  const listError = list.error || (list.data && !Array.isArray(list.data.items)
+    ? '当前 API 不支持稿件分页，请使用与工作台同版本的 API。' : undefined);
+  const items = Array.isArray(list.data?.items) ? list.data.items : [];
   const selected = items.some(({ id }) => id === selection) ? selection : '';
   const active = selected || items[0]?.id || '';
   const start = () => setCreating(true);
+  const emptyTitle = showArchived ? '暂无已归档稿件' : reviewFilter === 'pending' ? '暂无待审核原稿'
+    : reviewFilter === 'returned' ? '暂无需要你修改的稿件' : '暂无原稿';
+  function changePage(next: string[]) {
+    setPages(next); setSelection(''); setCreating(false); setReviewNotice('');
+  }
   return <>
-    <PageHeader title={pendingOnly ? '待审核原稿' : '原稿与审核'}
+    <PageHeader title={reviewFilter === 'pending' ? '待审核原稿' : '原稿与审核'}
       description={role === 'reviewer' ? '按平台审核文案、配图和封面。' : canEdit(role)
         ? '从一篇原稿生成各平台版本，分别审核并排期。' : '查阅原稿和各平台版本。'}>
       {canEdit(role) && <>
         <button type="button" className="button" aria-pressed={showArchived} onClick={() => {
-          setShowArchived(!showArchived); setSelection(''); setCreating(false);
+          setShowArchived(!showArchived); setReviewFilter('all'); changePage([]);
         }}>{showArchived ? '查看在用稿件' : '查看已归档'}</button>
-        {!showArchived && items.length > 0 && <button className="button primary" onClick={start}><Plus size={18} aria-hidden="true" />新建原稿</button>}
+        {!showArchived && <button className="button primary" onClick={start}><Plus size={18} aria-hidden="true" />新建原稿</button>}
       </>}
     </PageHeader>
-    {role === 'reviewer' && <div className="filters" aria-label="按审核状态筛选">
-      <button type="button" className={pendingOnly ? 'active' : ''} aria-pressed={pendingOnly}
-        onClick={() => { setPendingOnly(true); setSelection(''); setReviewNotice(''); }}>待审核</button>
-      <button type="button" className={!pendingOnly ? 'active' : ''} aria-pressed={!pendingOnly}
-        onClick={() => { setPendingOnly(false); setSelection(''); setReviewNotice(''); }}>全部原稿</button>
+    {!showArchived && canReview(role) && <div className="filters" role="group" aria-label="按审核状态筛选">
+      {([
+        ['all', '全部原稿'], ['pending', '待审核'], ...(canEdit(role) ? [['returned', '退回给我']] as const : []),
+      ] as const).map(([filter, label]) => <button key={filter} type="button" className={reviewFilter === filter ? 'active' : ''}
+        aria-pressed={reviewFilter === filter} onClick={() => { setReviewFilter(filter); changePage([]); }}>{label}</button>)}
     </div>}
-    <Feedback error={list.error} notice={pendingOnly ? reviewNotice : undefined} />
+    <Feedback error={listError} notice={reviewNotice} />
+    {list.error && <button type="button" className="button compact" onClick={list.refresh}>重试加载原稿</button>}
     <div className="split-panel">
       <section className="card item-list">
         <div className="card-heading"><h2>{showArchived ? '已归档原稿' : '原稿列表'}</h2><span className="count">{items.length}</span></div>
         {list.loading ? <Loading /> : items.length > 0 ? items.map((item) => {
           const variants = item.variants.filter(({ status }) => status !== 'superseded');
-          const pending = variants.filter(({ status }) => status === 'draft').length;
+          const pending = variants.filter(({ status, returned }) => status === 'draft' && !returned).length;
+          const returned = variants.filter((variant) => variant.returned).length;
+          const review = [
+            pending ? `${pending} 个待审核` : '', returned ? `${returned} 个已退回` : '',
+          ].filter(Boolean).join(' · ');
           return <button key={item.id} className={`list-item ${active === item.id && !creating ? 'selected' : ''}`}
             aria-pressed={active === item.id && !creating} onClick={() => { setSelection(item.id); setCreating(false); setReviewNotice(''); }}>
             <span className="list-icon"><FileText size={18} aria-hidden="true" /></span>
             <span className="list-copy"><strong>{item.title}</strong><small>{item.videoAssetId ? '视频 · ' : ''}{item.assetCount} 张图片 · {variants.length
-              ? `${variants.length} 个版本 · ${pending ? `${pending} 个待审核` : '已审核'}` : '未生成版本'}</small></span>
+              ? `${variants.length} 个版本 · ${review || '已审核'}` : '未生成版本'}</small></span>
             <ChevronRight className="row-chevron" size={15} aria-hidden="true" />
           </button>;
-        }) : <Empty icon={FileText} title={showArchived ? '暂无已归档稿件' : pendingOnly ? '暂无待审核原稿' : '暂无原稿'} />}
+        }) : !listError && <Empty icon={FileText} title={emptyTitle} />}
+        {(cursor || list.data?.nextCursor) && <div className="pagination" aria-label="稿件分页">
+          <button type="button" className="icon-button" aria-label="上一页" disabled={!cursor}
+            onClick={() => changePage(pages.slice(0, -1))}><ArrowLeft size={17} aria-hidden="true" /></button>
+          <span>第 {pages.length + 1} 页</span>
+          <button type="button" className="icon-button" aria-label="下一页" disabled={!list.data?.nextCursor}
+            onClick={() => { if (list.data?.nextCursor) changePage([...pages, list.data.nextCursor]); }}><ArrowRight size={17} aria-hidden="true" /></button>
+        </div>}
       </section>
       {creating ? <NewManuscript scope={scope} drafts={drafts} draftKey={draftKey} onCancel={() => setCreating(false)} onSave={(id) => {
-        setSelection(id); setCreating(false); list.refresh();
+        changePage([]); setReviewFilter('all'); setSelection(id); list.refresh();
       }} /> : active ? <ManuscriptDetail key={active} scope={scope} role={role} id={active} accounts={accounts} drafts={drafts}
-        changed={list.refresh} onApproved={pendingOnly ? (title) => setReviewNotice(`「${title}」已确认审核。`) : undefined}
+        reviewFilter={reviewFilter} changed={list.refresh} onReview={setReviewNotice}
         onSchedule={openTasks} openAccounts={openAccounts} />
         : <section className="card detail-pane empty-detail">
-          {list.loading ? <Loading /> : <Empty icon={FileText} title={showArchived ? '暂无归档记录' : canEdit(role) ? '开始你的第一篇原稿' : '暂无原稿可查看'}
-            description={showArchived ? '归档的原稿可以在这里查看和恢复。' : pendingOnly ? '编辑生成平台版本后会出现在这里。' : canEdit(role)
-              ? '添加标题、正文和图片，然后生成各平台版本。' : '工作室有原稿后，可在这里查看。'}>
-            {canEdit(role) && !showArchived && <button className="button primary" onClick={start}><Plus size={17} aria-hidden="true" />新建原稿</button>}
-          </Empty>}
+          {list.loading ? <Loading /> : <Empty icon={FileText} title={listError ? '暂时无法查看稿件' : emptyTitle}
+            description={reviewFilter === 'all' && !showArchived && !listError && canEdit(role)
+              ? '新建原稿后，可以生成各平台版本。' : undefined} />}
         </section>}
     </div>
   </>;
