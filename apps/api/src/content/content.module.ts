@@ -3,10 +3,11 @@ import { AssetsController } from './assets.controller';
 import { ContentService } from './content.service';
 import { ManuscriptsController } from './manuscripts.controller';
 import { StorageService } from './storage.service';
+import { TopicsController } from './topics.controller';
 import { VariantsController } from './variants.controller';
 
 @Module({
-  controllers: [ManuscriptsController, VariantsController, AssetsController],
+  controllers: [ManuscriptsController, VariantsController, AssetsController, TopicsController],
   providers: [ContentService, StorageService],
   exports: [ContentService, StorageService],
 })

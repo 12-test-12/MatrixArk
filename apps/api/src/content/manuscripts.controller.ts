@@ -156,6 +156,7 @@ export class ManuscriptsController {
       updatedAt: manuscript.updatedAt,
       archivedAt: manuscript.archivedAt,
       videoAsset: manuscript.videoAsset,
+      referenceUrl: manuscript.referenceUrl,
       imageCount,
       assets: manuscript.assets.map((asset) => ({ ...asset, filename: imageDisplayName(asset.filename) })),
       variants: manuscript.variants.map((v) => ({

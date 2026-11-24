@@ -34,6 +34,13 @@ const people: { name: string; role: Role }[] = [
 function PreviewContent({ role, section }: { role: Role; section: Section }) {
   const [selection, setSelection] = useState('');
   const description = roleView[role].description;
+  if (section === 'topics') return <>
+    <PageHeader title="选题台" description="按平台和博主分析对标作品，收藏适合自己的选题。" />
+    <section className="card form-card">
+      <h2>导入 CreatorHub 报告</h2>
+      <p className="muted">登录后可导入采集报告并保存到工作室。</p>
+    </section>
+  </>;
   if (section === 'notifications') return <>
     <PageHeader title="飞书提醒" description="连接工作室的飞书群，接收任务交接和未回填提醒。" />
     <section className="card form-card form-stack">

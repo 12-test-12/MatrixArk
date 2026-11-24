@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { BarChart3, Bell, CalendarDays, ChevronRight, CircleUserRound, FileText, UserRoundCog, UsersRound } from 'lucide-react';
+import { BarChart3, Bell, CalendarDays, ChevronRight, CircleUserRound, FileText, Telescope, UserRoundCog, UsersRound } from 'lucide-react';
 import type { Role, TaskStatus } from './api';
 import { Brand } from './ui';
 
@@ -10,13 +10,14 @@ const navigation = {
   accounts: { label: '发布账号', icon: UsersRound },
   notifications: { label: '飞书提醒', icon: Bell },
   members: { label: '团队成员', icon: UserRoundCog },
+  topics: { label: '选题台', icon: Telescope },
   profile: { label: '个人资料', icon: CircleUserRound },
 };
 export type Section = keyof typeof navigation;
 
 export const roleView: Record<Role, { sections: readonly [Section, ...Section[]]; taskStatus?: TaskStatus; description: string }> = {
-  owner: { sections: ['tasks', 'manuscripts', 'accounts', 'performance', 'notifications', 'members'], description: '查看发布进度和待核实的任务，管理工作室成员。' },
-  editor: { sections: ['manuscripts', 'tasks', 'accounts', 'performance'], description: '整理原稿与配图，生成各平台版本，为已审稿件排期。' },
+  owner: { sections: ['tasks', 'manuscripts', 'accounts', 'performance', 'notifications', 'members', 'topics'], description: '查看发布进度和待核实的任务，管理工作室成员。' },
+  editor: { sections: ['manuscripts', 'tasks', 'accounts', 'performance', 'topics'], description: '整理原稿与配图，生成各平台版本，为已审稿件排期。' },
   reviewer: { sections: ['manuscripts', 'tasks', 'performance'], description: '检查待审核版本的文案、配图和封面。' },
   operator: { sections: ['tasks', 'manuscripts', 'performance'], taskStatus: 'handed_off', description: '取用已审交接包，发布后补填作品链接或截图。' },
   viewer: { sections: ['tasks', 'manuscripts', 'performance'], taskStatus: 'published', description: '查阅原稿、发布进度和回执。' },

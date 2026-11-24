@@ -395,6 +395,9 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
     </div>
     <div className="detail-content">
       <Feedback error={(!rejecting ? action.error : '') || detail.error} notice={action.notice} />
+      {manuscript.referenceUrl && <p className="muted small">
+        <a href={manuscript.referenceUrl} target="_blank" rel="noreferrer">查看选题参考作品</a>
+      </p>}
       <details className="source">
         <summary>查看原稿正文</summary>
         <p className="content-text">{manuscript.body}</p>
@@ -547,18 +550,18 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
   </section>;
 }
 
-export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAccounts }: {
+export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAccounts, initialId }: {
   scope: string; role: Role; accounts: ReturnType<typeof useResource<Account[]>>;
   drafts: ManuscriptDrafts;
-  openTasks: (id: string) => void; openAccounts: () => void;
+  openTasks: (id: string) => void; openAccounts: () => void; initialId?: string;
 }) {
   const [showArchived, setShowArchived] = useState(false);
-  const [selection, setSelection] = useState('');
+  const [selection, setSelection] = useState(initialId ?? '');
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>(role === 'reviewer' ? 'pending' : 'all');
   const [pages, setPages] = useState<string[]>([]);
   const [reviewNotice, setReviewNotice] = useState('');
   const draftKey = scope + '/manuscripts/new';
-  const [creating, setCreating] = useState(() => canEdit(role) && drafts.has(draftKey));
+  const [creating, setCreating] = useState(() => !initialId && canEdit(role) && drafts.has(draftKey));
   const cursor = pages.at(-1);
   const search = new URLSearchParams({ limit: '20' });
   if (showArchived) search.set('archived', 'true');

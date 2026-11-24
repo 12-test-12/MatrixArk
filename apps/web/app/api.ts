@@ -34,6 +34,7 @@ export type ManuscriptSummary = {
 };
 export type Manuscript = {
   id: string; title: string; body: string; tags: string[]; archivedAt?: string | null;
+  referenceUrl?: string | null;
   assets: { id: string; filename: string }[]; variants: ManuscriptVariant[];
   videoAsset?: VideoAsset | null;
 };

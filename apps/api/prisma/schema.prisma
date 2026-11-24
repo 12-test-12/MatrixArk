@@ -161,6 +161,7 @@ model Workspace {
   notificationDeliveries NotificationDelivery[]
   platformAppSettings    PlatformAppSetting[]
   oauthStates            OAuthState[]
+  topicWorks             TopicWork[]
 }
 
 model Membership {
@@ -189,6 +190,7 @@ model Manuscript {
   archivedAt   DateTime? @db.Timestamptz(3)
   archivedById String?
   videoAssetId String?
+  referenceUrl String?
 
   workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   createdBy  User      @relation("ManuscriptAuthor", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: NoAction)
@@ -198,6 +200,30 @@ model Manuscript {
   videoAsset Asset? @relation("ManuscriptVideo", fields: [videoAssetId], references: [id], onDelete: Restrict, onUpdate: NoAction)
 
   @@index([workspaceId, createdAt])
+}
+
+model TopicWork {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  platform     String
+  externalId   String
+  creatorId    String?
+  creator      String?
+  description  String
+  mediaType    String
+  sourceUrl    String
+  publishedOn  DateTime? @db.Date
+  likes        Int?
+  comments     Int?
+  importedAt   DateTime  @default(now()) @db.Timestamptz(3)
+  savedAt      DateTime? @db.Timestamptz(3)
+  note         String?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+
+  @@unique([workspaceId, platform, externalId])
+  @@index([workspaceId, importedAt(sort: Desc), id(sort: Desc)])
+  @@index([workspaceId, savedAt(sort: Desc), id(sort: Desc)])
 }
 
 model Asset {

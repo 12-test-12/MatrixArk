@@ -404,6 +404,45 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await Promise.all([confirmed.json(), declined.json()]);
   });
 
+  await t.test('对标作品导入去重、选题隔离与原稿来源', async (topicTest) => {
+    const membership = await prisma.membership.create({ data: { workspaceId, userId: other.user.id, role: 'reviewer' } });
+    topicTest.after(() => prisma.membership.delete({ where: { id: membership.id } }));
+    const works = own + '/topics/works';
+    const externalId = 'shared-external-id';
+    const sourceUrl = 'https://www.bilibili.com/video/BV1example';
+    const bilibili = {
+      platform: 'bilibili', externalId, sourceUrl, creatorId: 'sample', creator: '示例博主',
+      description: '3 个拍摄建议 #视频', mediaType: 'video', publishedOn: '2026-11-20', likes: 0, comments: null,
+    };
+    const xhs = { ...bilibili, platform: 'xiaohongshu', mediaType: 'images',
+      sourceUrl: 'https://www.xiaohongshu.com/explore/fake-fixture', publishedOn: '2026-11-19' };
+    await call(works, { cookie: otherCookie, status: 403 });
+    await post(works + '/import', { works: [{ ...bilibili, sourceUrl: 'javascript:alert(1)' }] }, 400);
+    assert.deepEqual((await post(works + '/import', { works: [bilibili, bilibili, xhs] })).data, { imported: 2 });
+    const result = await call(works + '?platform=bilibili&from=2026-11-20&to=2026-11-20&creator=sample', { cookie });
+    const [item] = result.data.items;
+    assert.equal(result.data.total, 1);
+    assert.equal(item.likes, 0);
+    assert.equal(item.comments, null);
+    assert.equal(item.publishedOn, '2026-11-20T00:00:00.000Z');
+    await call(works + '/' + item.id, { cookie, method: 'PATCH', body: { saved: true, note: '从真实案例切入' } });
+    await post(works + '/import', { works: [{ ...bilibili, likes: 30 }] });
+    const saved = (await call(works + '?saved=true', { cookie })).data.items;
+    assert.deepEqual(saved.map(({ id, likes, note }) => ({ id, likes, note })),
+      [{ id: item.id, likes: 30, note: '从真实案例切入' }]);
+    const foreignWorks = foreign + '/topics/works';
+    assert.equal((await call(foreignWorks, { cookie: otherCookie })).data.total, 0);
+    await call(foreignWorks + '/' + item.id, { cookie: otherCookie, method: 'PATCH', body: { saved: true }, status: 404 });
+    const draft = { title: '我的创作原稿', body: '这是自己的创作角度和正文。' };
+    await call(foreignWorks + '/' + item.id + '/manuscript', { cookie: otherCookie, method: 'POST', body: draft, status: 404 });
+    const { data: created } = await post(works + '/' + item.id + '/manuscript', draft);
+    const { data: manuscript } = await call(own + '/manuscripts/' + created.id, { cookie });
+    assert.equal(manuscript.referenceUrl, sourceUrl);
+    assert.equal(manuscript.body, draft.body);
+    const { data: [variant] } = await post(own + '/manuscripts/' + created.id + '/generate', { platforms: ['bilibili'] });
+    assert.ok(!variant.body.includes(sourceUrl));
+  });
+
   await t.test('只能通过小红书官方身份核验新增账号', async (test) => {
     let approved = false;
     let webScanEnabled = false;
