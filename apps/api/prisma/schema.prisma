@@ -162,6 +162,8 @@ model Workspace {
   platformAppSettings    PlatformAppSetting[]
   oauthStates            OAuthState[]
   topicWorks             TopicWork[]
+  topicSources           TopicSource[]
+  topicAiSetting         TopicAiSetting?
 }
 
 model Membership {
@@ -202,6 +204,37 @@ model Manuscript {
   @@index([workspaceId, createdAt])
 }
 
+model TopicAiSetting {
+  workspaceId   String   @id
+  provider      String
+  keyCiphertext String
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+}
+
+model TopicSource {
+  id            String    @id @default(uuid())
+  workspaceId   String
+  provider      String
+  target        String
+  keyword       String    @default("")
+  enabled       Boolean   @default(true)
+  nextRunAt     DateTime  @default(now()) @db.Timestamptz(3)
+  leaseUntil    DateTime? @db.Timestamptz(3)
+  lastAttemptAt DateTime? @db.Timestamptz(3)
+  lastSuccessAt DateTime? @db.Timestamptz(3)
+  lastCount     Int       @default(0)
+  lastError     String?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  matches   TopicMatch[]
+
+  @@unique([workspaceId, provider, target, keyword])
+  @@unique([workspaceId, id])
+  @@index([enabled, nextRunAt])
+}
+
 model TopicWork {
   id           String    @id @default(uuid())
   workspaceId  String
@@ -211,7 +244,11 @@ model TopicWork {
   creator      String?
   description  String
   mediaType    String
-  sourceUrl    String
+  sourceUrl    String?
+  coverUrl     String?
+  views        BigInt?
+  origin       String    @default("legacy")
+  legacyRuleRejected Boolean? @default(false)
   publishedOn  DateTime? @db.Date
   likes        Int?
   comments     Int?
@@ -220,10 +257,27 @@ model TopicWork {
   note         String?
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  matches   TopicMatch[]
 
   @@unique([workspaceId, platform, externalId])
+  @@unique([workspaceId, id])
   @@index([workspaceId, importedAt(sort: Desc), id(sort: Desc)])
   @@index([workspaceId, savedAt(sort: Desc), id(sort: Desc)])
+}
+
+model TopicMatch {
+  workspaceId String
+  sourceId    String
+  workId      String
+  field       String
+  excerpt     String?
+  seenAt      DateTime @db.Timestamptz(3)
+
+  source TopicSource @relation(fields: [workspaceId, sourceId], references: [workspaceId, id], onDelete: Restrict)
+  work   TopicWork   @relation(fields: [workspaceId, workId], references: [workspaceId, id], onDelete: Restrict)
+
+  @@id([workspaceId, sourceId, workId])
+  @@index([workspaceId, workId, seenAt(sort: Desc)])
 }
 
 model Asset {

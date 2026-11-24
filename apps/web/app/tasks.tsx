@@ -1,21 +1,31 @@
-import { useId, useState, type FormEvent } from 'react';
+import { useId, useMemo, useState, type FormEvent } from 'react';
 import {
   ArrowLeft, ArrowRight, CalendarDays, ChevronRight, ClipboardCheck, Clock3, Copy, ExternalLink, History,
-  Images, RefreshCw, Send,
+  Images, List, RefreshCw, Search, Send, Table2, X,
 } from 'lucide-react';
 import {
-  api, canEdit, canRecord, fileBody, formatTime, publishPlatformLabel, post, taskLabel, useAction, useResource,
-  type Handoff, type Role, type Task, type TaskDetail, type TaskStatus,
+  api, canEdit, canRecord, fileBody, formatTime, platformLabel, platforms, publishPlatformLabel, post, taskLabel, useAction, useResource,
+  type Handoff, type Platform, type Role, type Task, type TaskDetail, type TaskStatus, type WorkbenchSummary,
 } from './api';
 import { Empty, Feedback, Loading, PageHeader, TaskBadge } from './ui';
 import { roleView } from './workbench';
 
-const filters = [
-  { value: '', label: '全部' }, { value: 'scheduled', label: '待执行' }, { value: 'handed_off', label: '待回填' },
+const primaryFilters = [
+  { value: '', label: '全部' },
+  { value: 'scheduled', label: '待执行' },
+  { value: 'handed_off', label: '待回填' },
   { value: 'under_review', label: '平台审核中' },
-  { value: 'published', label: '已发布' }, { value: 'unknown', label: '待核实' },
-  { value: 'verified', label: '已核实' }, { value: 'paused', label: '已暂停' },
-  { value: 'failed', label: '失败' }, { value: 'canceled', label: '已取消' },
+  { value: 'published', label: '已发布' },
+  { value: 'unknown', label: '待核实' },
+  { value: 'verified', label: '已核实' },
+] as const;
+
+const secondaryFilters = [
+  { value: 'dispatching', label: '处理中' },
+  { value: 'submitted', label: '已受理' },
+  { value: 'paused', label: '已暂停' },
+  { value: 'failed', label: '失败' },
+  { value: 'canceled', label: '已取消' },
 ] as const;
 
 const eventLabels: Record<string, string> = {
@@ -37,14 +47,14 @@ function Package({ data }: { data: Handoff }) {
   return <div className="task-section">
     <div className="section-line">
       <h3><Send size={17} aria-hidden="true" />已审交接包</h3>
-      <button type="button" className="button compact" disabled={copy.busy} onClick={() => void copy.run(async () => {
+      <button type="button" className="button primary compact" disabled={copy.busy} onClick={() => void copy.run(async () => {
         if (!navigator.clipboard) throw new Error('浏览器暂不支持复制，可选中文案手动复制。');
         await navigator.clipboard.writeText(`${data.title}\n\n${data.body}`);
       }, '已复制标题和正文。')}><Copy size={15} aria-hidden="true" />复制文案</button>
     </div>
     <div className="variant-preview">
-      <div className="section-line"><h3>{data.title}</h3><span className="version">V{data.version}</span></div>
-      <p className="content-text">{data.body}</p>
+      <div className="section-line"><h3>{data.title || '未命名文案'}</h3><span className="version">V{data.version}</span></div>
+      <p className="content-text">{data.body || '无正文内容'}</p>
       {data.video && <div className="video-asset">
         <video controls preload="none" aria-label="已审交接视频" src={data.video.url} />
         <a className="button compact" href={data.video.url} download={data.video.filename}>下载已审视频</a>
@@ -262,10 +272,19 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
   function actorName(actorId: string | null) {
     return actorId ? people.get(actorId) ?? '工作室成员' : '系统';
   }
+  function eventDotTone(event: TaskDetail['events'][number]): string {
+    if (event.toStatus === 'failed' || event.toStatus === 'canceled') return 'red';
+    if (event.toStatus === 'published' || event.toStatus === 'verified' || event.kind === 'result') return 'green';
+    if (event.toStatus === 'paused' || event.toStatus === 'unknown') return 'amber';
+    return 'violet';
+  }
   return <section className="card detail-pane task-detail">
     <div className="detail-heading">
       <div className="detail-icon"><CalendarDays size={22} aria-hidden="true" /></div>
-      <div><h2>{task.variant.title}</h2><p>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))} · {task.account.displayName} · V{task.variant.version}</p></div>
+      <div>
+        <h2>{task.variant.title?.trim() || '未命名任务'}</h2>
+        <p>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))} · {task.account.displayName?.trim() || '未指定账号'} · V{task.variant.version}</p>
+      </div>
       <TaskBadge status={task.status} />
     </div>
     <div className="detail-content">
@@ -276,6 +295,8 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
         {automated
           ? <div><dt>开始处理</dt><dd>{task.claimedAt ? formatTime(task.claimedAt) : '待执行'}</dd></div>
           : <div><dt>实际交接</dt><dd>{task.handedOffAt ? formatTime(task.handedOffAt) : '待交接'}</dd></div>}
+        <div><dt>发布账号</dt><dd title={task.account.displayName}>{task.account.displayName?.trim() || '未指定账号'}</dd></div>
+        <div><dt>版本规格</dt><dd>V{task.variant.version} · {publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))}</dd></div>
       </dl>
       {(task.status === 'scheduled' || task.status === 'dispatching') && <div className="sub-empty">
         <Clock3 size={19} aria-hidden="true" /><p>{automated
@@ -325,13 +346,17 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
         <h3><History size={17} aria-hidden="true" />操作记录</h3>
         <ol className="timeline">
           {task.events.map((event) => <li key={event.id}>
-            <span className="timeline-dot" />
-            <div><strong>{automated && event.kind === 'result' && event.toStatus ? taskLabel[event.toStatus]
-              : eventLabels[event.kind] ?? (event.toStatus ? taskLabel[event.toStatus] : '任务更新')}</strong>
-              <div className="muted small">{actorName(event.actorId)} · {formatTime(event.createdAt)}</div>
-              {event.reason && <p>{event.reason}</p>}
+            <span className={`timeline-dot ${eventDotTone(event)}`} />
+            <div className="timeline-content">
+              <div className="timeline-header">
+                <strong>{automated && event.kind === 'result' && event.toStatus ? taskLabel[event.toStatus]
+                  : eventLabels[event.kind] ?? (event.toStatus ? taskLabel[event.toStatus] : '任务更新')}</strong>
+                <time className="muted small">{formatTime(event.createdAt)}</time>
+              </div>
+              <div className="timeline-actor">{actorName(event.actorId)}</div>
+              {event.reason && <p className="timeline-reason">{event.reason}</p>}
               {event.details?.verification && <p className="muted small">核对依据 · {event.details.verification}</p>}
-              {event.details?.previousScheduledAt && event.details.scheduledAt && <p className="muted small">
+              {event.details?.previousScheduledAt && event.details.scheduledAt && <p className="timeline-shift">
                 {formatTime(event.details.previousScheduledAt)} → {formatTime(event.details.scheduledAt)}
               </p>}
               {event.details?.remoteId && <p className="muted small">作品 ID {event.details.remoteId}</p>}
@@ -346,11 +371,17 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
   </section>;
 }
 
-export function Tasks({ scope, role, initialId }: { scope: string; role: Role; initialId: string }) {
+export function Tasks({ scope, role, initialId, counts, refreshSummary, openManuscripts }: {
+  scope: string; role: Role; initialId: string; counts?: WorkbenchSummary['taskCounts'];
+  refreshSummary: () => void; openManuscripts: () => void;
+}) {
   const [status, setStatus] = useState<'' | TaskStatus>(initialId ? '' : roleView[role].taskStatus ?? '');
   const [selected, setSelected] = useState(initialId);
   const [pages, setPages] = useState<string[]>([]);
   const [recordedTitle, setRecordedTitle] = useState('');
+  const [keyword, setKeyword] = useState('');
+  const [platformFilter, setPlatformFilter] = useState<string>('all');
+  const [tableView, setTableView] = useState(false);
   const cursor = pages.at(-1);
   const search = new URLSearchParams({ limit: '20' });
   if (status) search.set('status', status);
@@ -360,29 +391,141 @@ export function Tasks({ scope, role, initialId }: { scope: string; role: Role; i
   const people = new Map(members.data?.map(({ user }) => [user.id, user.name]));
   const items = list.data?.items ?? [];
   const listUnavailable = Boolean(list.error && !list.data);
-  const active = selected || items[0]?.id || '';
+
+  const total = counts ? Object.values(counts).reduce((sum, value) => sum + value, 0) : undefined;
+
+  const filteredItems = useMemo(() => {
+    return items.filter((task) => {
+      if (platformFilter !== 'all' && task.variant.platform !== platformFilter) return false;
+      if (keyword.trim()) {
+        const query = keyword.trim().toLowerCase();
+        const titleMatch = (task.variant.title || '').toLowerCase().includes(query);
+        const accountMatch = (task.account.displayName || '').toLowerCase().includes(query);
+        return titleMatch || accountMatch;
+      }
+      return true;
+    });
+  }, [items, keyword, platformFilter]);
+
+  const narrowing = Boolean(keyword.trim()) || platformFilter !== 'all';
+  const active = (filteredItems.some(({ id }) => id === selected) || (!narrowing && selected === initialId) ? selected : '')
+    || filteredItems[0]?.id || '';
   function changePage(next: string[]) { setPages(next); setSelected(''); setRecordedTitle(''); }
+  function chooseTask(id: string) { setSelected(id); setRecordedTitle(''); }
+  const empty = <Empty icon={CalendarDays} title={narrowing ? '本页未找到符合条件的任务' : status ? '暂无该状态的任务' : '暂无发布任务'}>
+    {narrowing ? <button type="button" className="button" onClick={() => { setKeyword(''); setPlatformFilter('all'); }}>清除搜索和平台筛选</button>
+      : status ? <button type="button" className="button" onClick={() => { setStatus(''); changePage([]); }}>查看全部任务</button>
+        : !cursor && canEdit(role) && <button type="button" className="button primary" onClick={openManuscripts}>前往原稿与审核</button>}
+  </Empty>;
 
   return <>
     <PageHeader title="发布任务" description={role === 'operator' ? roleView.operator.description
       : canRecord(role) ? '查看交接进度、取得已审文案并记录发布结果。' : '查阅发布进度和回执。'}>
-      <button className="button" onClick={list.refresh}><RefreshCw size={16} aria-hidden="true" />
+      <button className="button" onClick={() => { list.refresh(); refreshSummary(); }}><RefreshCw size={16} aria-hidden="true" />
         {listUnavailable ? '重试加载' : '刷新任务'}</button>
     </PageHeader>
     <div className="filters" aria-label="按任务状态筛选">
-      {filters.map((filter) => <button className={status === filter.value ? 'active' : ''} key={filter.value} aria-pressed={status === filter.value}
-        disabled={listUnavailable} onClick={() => { setStatus(filter.value); changePage([]); }}>{filter.label}</button>)}
+      {primaryFilters.map((filter) => {
+        const count = filter.value ? counts && (counts[filter.value] ?? 0) : total;
+        return (
+          <button
+            className={status === filter.value ? 'active' : ''}
+            key={filter.value}
+            aria-pressed={status === filter.value}
+            disabled={listUnavailable}
+            onClick={() => { setStatus(filter.value); changePage([]); }}
+          >
+            {filter.label}
+            {count !== undefined && <span className="tab-badge">{count.toLocaleString('zh-CN')}</span>}
+          </button>
+        );
+      })}
+      <div className="filters-more">
+        <select
+          className="filter-select"
+          aria-label="更多状态筛选"
+          value={secondaryFilters.some((f) => f.value === status) ? status : ''}
+          onChange={(e) => {
+            const val = e.target.value as TaskStatus | '';
+            if (val) {
+              setStatus(val);
+              changePage([]);
+            }
+          }}
+        >
+          <option value="" disabled>更多状态…</option>
+          {secondaryFilters.map((f) => (
+            <option key={f.value} value={f.value}>
+              {f.label}{counts ? `（${counts[f.value] ?? 0}）` : ''}
+            </option>
+          ))}
+        </select>
+      </div>
     </div>
     <Feedback error={list.error} notice={recordedTitle || undefined} />
-    {!listUnavailable && <div className="split-panel">
+    {!listUnavailable && <div className={tableView ? 'task-table-layout' : 'split-panel'}>
       <section className="card item-list">
-        <div className="card-heading"><h2>任务列表</h2><span className="count">{items.length}</span></div>
-        {list.loading ? <Loading /> : items.length ? items.map((task) => <button key={task.id} className={`list-item ${active === task.id ? 'selected' : ''}`}
-          aria-pressed={active === task.id} onClick={() => { setSelected(task.id); setRecordedTitle(''); }}>
+        <div className="card-heading">
+          <h2>任务列表</h2>
+          <div className="actions">
+            <span className="count" aria-label={`本页 ${filteredItems.length} 条`}>{filteredItems.length}</span>
+            <button type="button" className="button compact" aria-pressed={tableView} onClick={() => setTableView(!tableView)}>
+              {tableView ? <List size={15} aria-hidden="true" /> : <Table2 size={15} aria-hidden="true" />}
+              {tableView ? '列表视图' : '表格视图'}
+            </button>
+          </div>
+        </div>
+        <div className="list-toolbar">
+          <div className="search-box">
+            <Search size={14} className="search-icon" aria-hidden="true" />
+            <input
+              type="text"
+              placeholder="搜索本页任务或账号…"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              aria-label="搜索任务或账号"
+            />
+            {keyword && (
+              <button
+                type="button"
+                className="clear-btn"
+                onClick={() => setKeyword('')}
+                aria-label="清除搜索"
+              >
+                <X size={13} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+          <select
+            className="platform-select"
+            value={platformFilter}
+            onChange={(e) => setPlatformFilter(e.target.value)}
+            aria-label="按发布平台筛选"
+          >
+            <option value="all">全部平台</option>
+            {platforms.map((platform) => <option key={platform} value={platform}>{platform === 'bilibili' ? 'B 站' : platformLabel[platform]}</option>)}
+          </select>
+        </div>
+        {list.loading ? <Loading /> : !filteredItems.length ? empty : tableView ? <div className="table-scroll" tabIndex={0}
+          role="region" aria-label="可横向滚动的任务明细">
+          <table className="task-table" aria-label="发布任务明细">
+            <thead><tr>{['任务', '平台', '账号', '计划时间', '状态', '异常'].map((label) => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+            <tbody>{filteredItems.map((task) => <tr key={task.id} className={active === task.id ? 'selected' : ''}>
+              <th scope="row"><button type="button" className="task-table-title" aria-pressed={active === task.id}
+                onClick={() => chooseTask(task.id)}>{task.variant.title?.trim() || '未命名任务'}</button></th>
+              <td>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))}</td>
+              <td>{task.account.displayName?.trim() || '未指定账号'}</td>
+              <td>{formatTime(task.scheduledAt)}</td>
+              <td><TaskBadge status={task.status} /></td>
+              <td className="task-table-error">{task.lastError || '—'}</td>
+            </tr>)}</tbody>
+          </table>
+        </div> : filteredItems.map((task) => <button key={task.id} type="button" className={`list-item ${active === task.id ? 'selected' : ''}`}
+          aria-pressed={active === task.id} onClick={() => chooseTask(task.id)}>
           <span className="list-icon"><CalendarDays size={17} aria-hidden="true" /></span>
-          <span className="list-copy"><strong>{task.variant.title}</strong><small>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))} · {task.account.displayName} · {formatTime(task.scheduledAt)}</small></span>
+          <span className="list-copy"><strong>{task.variant.title?.trim() || '未命名任务'}</strong><small>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))} · {task.account.displayName?.trim() || '未指定账号'} · {formatTime(task.scheduledAt)}</small></span>
           <TaskBadge status={task.status} /><ChevronRight className="row-chevron" size={14} aria-hidden="true" />
-        </button>) : <Empty icon={CalendarDays} title="暂无匹配的任务" />}
+        </button>)}
         {(cursor || list.data?.nextCursor) && <div className="pagination">
           <button className="icon-button" aria-label="上一页" disabled={!cursor} onClick={() => changePage(pages.slice(0, -1))}><ArrowLeft size={17} aria-hidden="true" /></button>
           <small>第 {pages.length + 1} 页</small>
@@ -394,6 +537,7 @@ export function Tasks({ scope, role, initialId }: { scope: string; role: Role; i
         if (status === 'handed_off') setSelected((current) => current === active ? '' : current);
         setRecordedTitle(title);
         list.refresh();
+        refreshSummary();
       }} />
         : <section className="card detail-pane empty-detail">{list.loading ? <Loading />
           : <Empty icon={CalendarDays} title="在这里查看发布进度" description="为已审核的平台版本排期后，可以在这里查看交接与回执。" />}</section>}

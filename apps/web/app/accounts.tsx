@@ -22,8 +22,8 @@ function accountStatus(account: Account, archived: boolean) {
   return { label: '当前不可排期', tone: 'amber' };
 }
 
-function AppCredentials({ path, platform, configured, onSaved }: {
-  path: string; platform: Platform; configured: boolean; onSaved: () => void;
+function AppCredentials({ path, platform, configured, onSaved, primary = false }: {
+  path: string; platform: Platform; configured: boolean; onSaved: () => void; primary?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const action = useAction();
@@ -41,7 +41,7 @@ function AppCredentials({ path, platform, configured, onSaved }: {
   }
   return <>
     <div className="actions">
-      <button type="button" className="button" aria-expanded={editing} aria-controls={platform + '-credentials'}
+      <button type="button" className={`button ${primary && !configured ? 'primary' : ''}`} aria-expanded={editing} aria-controls={platform + '-credentials'}
         onClick={() => { setEditing(!editing); action.reset(); }} disabled={action.busy}>
         {editing ? '收起凭据设置' : configured ? '更新应用凭据' : '填写应用凭据'}
       </button>
@@ -195,10 +195,13 @@ export function Accounts({ scope, canManage, canConfigure, resource, openPerform
             {!visible.loading && !visible.error && <span className="muted small">{group.length} 个账号</span>}
           </div>
           {configured !== undefined && <div className="account-connection">
-            <p className="muted small">{configured ? '应用凭据已配置' : canConfigure ? '保存开放平台凭据后即可发起账号授权。'
-              : '请联系工作室负责人填写开放平台应用凭据。'}</p>
+            <p className="muted small">{configured
+              ? (group.length === 0 ? '暂无已连接账号，点击下方按钮完成授权连接即可。' : '应用凭据已配置')
+              : canConfigure
+                ? (group.length === 0 ? '暂无已连接账号，保存应用凭据后即可发起授权。' : '保存开放平台凭据后即可发起账号授权。')
+                : (group.length === 0 ? '暂无已连接账号，请联系工作室负责人填写开放平台应用凭据。' : '请联系工作室负责人填写开放平台应用凭据。')}</p>
             {canConfigure && <AppCredentials path={settingsPath + '/' + platform} platform={platform} configured={configured}
-              onSaved={settings.refresh} />}
+              primary={group.length === 0} onSaved={settings.refresh} />}
             {platform === 'xiaohongshu' && configured && <>
               {authorization ? <section className="form-stack" aria-labelledby="xiaohongshu-auth-title">
                 <h3 id="xiaohongshu-auth-title">用小红书 App 扫码授权</h3>
@@ -240,8 +243,8 @@ export function Accounts({ scope, canManage, canConfigure, resource, openPerform
                 </button>}
               </li>;
             })}
-          </ul> : !visible.error && <p className="account-group-empty muted small">
-            {query ? '没有匹配的账号。' : showArchived ? '暂时没有已归档账号。' : '暂时没有已连接账号。'}
+          </ul> : !visible.error && (query || showArchived) && <p className="account-group-empty muted small">
+            {query ? '没有匹配的账号。' : '暂时没有已归档账号。'}
           </p>}
         </section>;
       })}

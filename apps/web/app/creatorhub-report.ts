@@ -1,6 +1,7 @@
 export const topicPlatforms = {
   bilibili: 'B 站', xiaohongshu: '小红书', douyin: '抖音', kuaishou: '快手', shipinhao: '视频号',
   rednote: '海外小红书', tiktok: 'TikTok', instagram: 'Instagram', twitter: 'X',
+  youtube: 'YouTube', mastodon: 'Mastodon', 'google-trends': 'Google 热搜', rss: 'RSS 订阅',
 };
 export const topicMediaTypes = { video: '视频', images: '图文', text: '文字', other: '其他' };
 
@@ -30,12 +31,26 @@ export type ImportedWork = {
   creator: string | null;
   description: string;
   mediaType: keyof typeof topicMediaTypes;
-  sourceUrl: string;
+  sourceUrl: string | null;
   publishedOn: string | null;
   likes: number | null;
   comments: number | null;
 };
-export type TopicWork = ImportedWork & { id: string; importedAt: string; savedAt: string | null; note: string | null };
+export type TopicWork = ImportedWork & {
+  id: string;
+  importedAt: string;
+  savedAt: string | null;
+  note: string | null;
+  coverUrl?: string | null;
+  views?: number | null;
+  origin?: 'feed' | 'report' | 'legacy';
+  matches?: {
+    field: 'source' | 'title' | 'summary';
+    excerpt: string | null;
+    seenAt: string;
+    source: { id: string; provider: ImportedWork['platform']; target: string; keyword: string };
+  }[];
+};
 
 function text(value: unknown, max: number) {
   return typeof value === 'string'
@@ -57,41 +72,115 @@ function metric(value: unknown) {
   return null;
 }
 
+export function parseExcelSerialDate(serial: number): string | null {
+  if (!Number.isFinite(serial) || serial <= 0) return null;
+  if (serial > 1_000_000_000_000) {
+    const d = new Date(serial);
+    return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
+  }
+  if (serial > 1_000_000_000) {
+    const d = new Date(serial * 1000);
+    return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
+  }
+  const utcDays = Math.floor(serial);
+  const ms = (utcDays - 25569) * 86400 * 1000;
+  const d = new Date(ms);
+  return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
+}
+
+export function parseDateCell(value: unknown): string | null {
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === 'number') {
+    return parseExcelSerialDate(value);
+  }
+  if (typeof value === 'string') {
+    const str = value.trim();
+    if (!str) return null;
+    if (/^\d+(\.\d+)?$/.test(str)) {
+      const num = Number(str);
+      if (Number.isFinite(num)) {
+        const res = parseExcelSerialDate(num);
+        if (res) return res;
+      }
+    }
+    const normalized = str
+      .replace(/年|\/|\./g, '-')
+      .replace(/月/g, '-')
+      .replace(/日.*/, '')
+      .trim();
+    const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (match) {
+      const year = match[1];
+      const month = match[2]!.padStart(2, '0');
+      const day = match[3]!.padStart(2, '0');
+      const d = new Date(`${year}-${month}-${day}T00:00:00Z`);
+      if (Number.isFinite(d.getTime())) return `${year}-${month}-${day}`;
+    }
+    const parsed = new Date(str);
+    if (Number.isFinite(parsed.getTime())) {
+      return parsed.toISOString().slice(0, 10);
+    }
+  }
+  return null;
+}
+
 export function parseCreatorHubWorks(rows: ReadonlyArray<ReadonlyArray<unknown>>) {
   const [header, ...body] = rows;
-  const required = ['平台', '作品ID', '描述', '作者', '媒体类型', '发布时间', '作品链接'];
-  if (!header || !required.every((name) => header.includes(name))) {
-    throw new Error('找不到 CreatorHub 采集报告字段，请上传带有「作品」工作表的 Excel 报告。');
+  const columnKey = (name: unknown) => text(name, 100).replace(/\s/g, '').toLowerCase();
+  const columns = new Map(header?.map((name, index) => [columnKey(name), index]));
+  if (!columns.has('平台') || !columns.has('作品id')) {
+    throw new Error('工作表缺少「平台」或「作品ID」列，请重新导出 CreatorHub 作品报表。');
   }
-  const columns = new Map(header.map((name, index) => [name, index]));
   const works = new Map<string, ImportedWork>();
   let skipped = 0;
+  let missingDates = 0;
   for (const row of body) {
     if (row.every((cell) => cell === null || cell === undefined || cell === '')) continue;
-    const read = (name: string) => row[columns.get(name) ?? -1];
+    const read = (name: string) => row[columns.get(columnKey(name)) ?? -1];
     const rawPlatform = text(read('平台'), 30).toLowerCase();
-    const platform = platformAliases[rawPlatform];
+    const platform = Object.hasOwn(platformAliases, rawPlatform) ? platformAliases[rawPlatform] : undefined;
     const externalId = identifier(read('作品ID'));
-    const source = text(read('作品链接'), 2049);
+    const source = text(read('作品链接') ?? read('来源链接'), 2049);
     const url = URL.canParse(source) ? new URL(source) : undefined;
-    if (!platform || !externalId || !url || url.href.length > 2048
-      || !['https:', 'http:'].includes(url.protocol) || url.username || url.password) {
+    if (!platform || !externalId || (source && (!url || url.href.length > 2048
+      || !['https:', 'http:'].includes(url.protocol) || url.username || url.password))) {
       skipped++;
       continue;
     }
     const rawType = text(read('媒体类型'), 30).toLowerCase();
-    const mediaType = mediaTypeAliases[rawType] ?? 'other';
-    const day = read('发布时间');
+    const mediaType = Object.hasOwn(mediaTypeAliases, rawType) ? mediaTypeAliases[rawType]! : 'other';
+    const day = read('发布时间') ?? read('发布日期') ?? read('发表时间');
+    const publishedOn = parseDateCell(day);
+    if (!publishedOn) missingDates++;
+
     works.set(JSON.stringify([platform, externalId]), {
-      platform, externalId, mediaType, sourceUrl: url.href,
+      platform, externalId, mediaType, sourceUrl: url?.href ?? null,
       creatorId: identifier(read('作者ID')) || null,
-      creator: text(read('作者'), 120) || null,
-      description: text(read('描述'), 2000),
-      // CreatorHub stores the exporting machine's wall-clock date without a timezone.
-      publishedOn: day instanceof Date && Number.isFinite(day.getTime()) ? day.toISOString().slice(0, 10) : null,
+      creator: text(read('作者') ?? read('监控目标'), 120) || null,
+      description: text(read('描述') ?? read('作品描述'), 2000),
+      publishedOn,
       likes: metric(read('点赞数')),
-      comments: metric(read('平台评论数')),
+      comments: metric(read('平台评论数') ?? read('评论数')),
     });
   }
-  return { works: [...works.values()], skipped };
+  return { works: [...works.values()], skipped, missingDates };
+}
+
+export async function readCreatorHubReport(file: Blob) {
+  const { readSheet } = await import('read-excel-file/browser');
+  for (const name of ['作品', '作品数据']) {
+    let rows;
+    try {
+      rows = await readSheet(file, name);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'SheetNotFoundError') continue;
+      throw new Error('无法打开这份 .xlsx 文件，请在 CreatorHub 重新导出 Excel 报表。');
+    }
+    if (rows.length === 0) throw new Error('作品工作表为空，请导出包含作品的报表。');
+    if (rows.length > 1001) throw new Error('单次最多导入 1000 行，请分批导出。');
+    return parseCreatorHubWorks(rows);
+  }
+  throw new Error('文件里找不到「作品」或「作品数据」工作表。请选择 CreatorHub 的采集任务报告或监控作品报表。');
 }

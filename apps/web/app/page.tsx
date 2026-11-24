@@ -4,8 +4,8 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, CircleUserRound, LogOut, Radio, X } from 'lucide-react';
 import { Accounts } from './accounts';
 import {
-  api, ApiError, canEdit, messageOf, post, roleLabel, scopeFor, useAction, useResource,
-  type Account, type Session, type Workspace,
+  api, ApiError, canEdit, canRecord, messageOf, post, roleLabel, scopeFor, useAction, useResource,
+  type Account, type Session, type Workspace, type WorkbenchSummary,
 } from './api';
 import { Manuscripts, type ManuscriptDrafts } from './manuscripts';
 import { Topics } from './topics';
@@ -46,6 +46,7 @@ function SignIn({ onSession, onClose, initialError }: {
     {...({ closedby: action.busy ? 'none' : 'any' } as any)}
     onClick={(event) => {
       if (action.busy || !dialog.current) return;
+      if (event.target !== dialog.current) return;
       if (!('closedBy' in HTMLDialogElement.prototype)) {
         const rect = dialog.current.getBoundingClientRect();
         const isInside = (
@@ -86,17 +87,20 @@ function SignIn({ onSession, onClose, initialError }: {
   </dialog>;
 }
 
-function WorkspaceBody({ workspace, section, taskId, performanceAccountId, manuscriptId, drafts, openTasks, openAccounts, openPerformance, openManuscript }: {
+function WorkspaceBody({ workspace, section, taskId, performanceAccountId, manuscriptId, drafts, openTasks, openAccounts, openPerformance, openManuscript,
+  openManuscripts, summary }: {
   workspace: Workspace; section: Section; taskId: string; openTasks: (id: string) => void; openAccounts: () => void;
   drafts: ManuscriptDrafts; performanceAccountId: string; openPerformance: (id: string) => void;
   manuscriptId: string; openManuscript: (id: string) => void;
+  openManuscripts: () => void; summary: ReturnType<typeof useResource<WorkbenchSummary>>;
 }) {
   const scope = scopeFor(workspace.id);
   const accounts = useResource<Account[]>(section === 'accounts' || section === 'manuscripts' ? scope + '/accounts' : null);
   if (section === 'manuscripts') return <Manuscripts scope={scope} role={workspace.role} accounts={accounts} drafts={drafts} initialId={manuscriptId}
-    openTasks={openTasks} openAccounts={openAccounts} />;
-  if (section === 'topics') return <Topics scope={scope} openManuscript={openManuscript} />;
-  if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={taskId} />;
+    openTasks={openTasks} openAccounts={openAccounts} refreshSummary={summary.refresh} />;
+  if (section === 'topics') return <Topics scope={scope} openManuscript={openManuscript} canConfigureAi={workspace.role === 'owner'} />;
+  if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={taskId}
+    openManuscripts={openManuscripts} counts={summary.data?.taskCounts} refreshSummary={summary.refresh} />;
   if (section === 'performance') return <Performance scope={scope} role={workspace.role} initialAccount={performanceAccountId} openTask={openTasks} />;
   if (section === 'members') return <Members scope={scope} />;
   if (section === 'notifications') return <FeishuSettings scope={scope} />;
@@ -115,6 +119,9 @@ export default function Home() {
   const [performanceAccountId, setPerformanceAccountId] = useState('');
   const [drafts] = useState<ManuscriptDrafts>(() => new Map());
   const logout = useAction();
+  const workspace = session?.workspaces.find(({ id }) => id === workspaceId)
+    ?? session?.workspaces.find(({ role }) => role !== 'owner') ?? session?.workspaces[0];
+  const summary = useResource<WorkbenchSummary>(workspace ? scopeFor(workspace.id) + '/workbench-summary' : null, 15_000);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -137,11 +144,16 @@ export default function Home() {
       setSession(next); setShowSignIn(false); setStartupError(''); setSection(undefined); setWorkspaceId(''); setTaskId(''); setPerformanceAccountId(''); setManuscriptId('');
     }} />}
   </>;
-  const workspace = session.workspaces.find(({ id }) => id === workspaceId)
-    ?? session.workspaces.find(({ role }) => role !== 'owner') ?? session.workspaces[0];
   const sections: readonly Section[] = workspace ? [...roleView[workspace.role].sections, 'profile'] : ['profile'];
   const section = activeSection && sections.includes(activeSection) ? activeSection : sections[0];
+  const handoff = workspace && canRecord(workspace.role) ? summary.data?.taskCounts.handed_off ?? 0 : 0;
+  const unknown = workspace && canEdit(workspace.role) ? summary.data?.taskCounts.unknown ?? 0 : 0;
+  const review = summary.data?.pendingReview ?? 0;
   return <Workbench sections={sections} section={section} onSection={(next) => { setSection(next); setTaskId(''); setPerformanceAccountId(''); setManuscriptId(''); }}
+    badges={{
+      manuscripts: { count: review, label: `${review} 篇原稿待审核` },
+      tasks: { count: handoff + unknown, label: [handoff && `${handoff} 项待回填`, unknown && `${unknown} 项待核实`].filter(Boolean).join(' · ') },
+    }}
     workspacePicker={<label className="workspace-picker">
         <span className="workspace-icon"><Radio size={19} aria-hidden="true" /></span>
         <span><small>当前工作室</small>
@@ -171,7 +183,8 @@ export default function Home() {
       : workspace && section ? <WorkspaceBody key={workspace.id} workspace={workspace} section={section} taskId={taskId} drafts={drafts}
       performanceAccountId={performanceAccountId} openPerformance={(id) => { setPerformanceAccountId(id); setSection('performance'); }}
       manuscriptId={manuscriptId} openManuscript={(id) => { setManuscriptId(id); setSection('manuscripts'); }}
-      openTasks={(id) => { setTaskId(id); setSection('tasks'); }} openAccounts={() => setSection('accounts')} />
+      openTasks={(id) => { summary.refresh(); setTaskId(id); setSection('tasks'); }} openAccounts={() => setSection('accounts')}
+      openManuscripts={() => { setManuscriptId(''); setSection('manuscripts'); }} summary={summary} />
       : <section className="card"><Empty icon={Check} title="暂无可访问的工作室" description="加入工作室后可查看稿件和任务。" /></section>}
   </Workbench>;
 }

@@ -11,8 +11,9 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { addMemberSchema } from '@matrixark/shared';
+import type { Role } from '@prisma/client';
 import { z } from 'zod';
-import { assertCan, ASSIGNABLE_ROLES } from '../common/permissions';
+import { assertCan, ASSIGNABLE_ROLES, can } from '../common/permissions';
 import { CurrentMembership, CurrentUser } from '../auth/decorators';
 import type { SessionUser } from '../auth/session.service';
 import { parse } from '../common/zod';
@@ -80,6 +81,18 @@ export class WorkspacesController {
       orderBy: { createdAt: 'asc' },
     });
     return memberships.map((m) => ({ id: m.id, role: m.role, user: m.user }));
+  }
+
+  @Get(':workspaceId/workbench-summary')
+  @UseGuards(WorkspaceGuard)
+  async workbenchSummary(@Param('workspaceId') workspaceId: string, @CurrentMembership() membership: { role: Role }) {
+    const [tasks, pendingReview] = await Promise.all([
+      this.prisma.publishTask.groupBy({ by: ['status'], where: { workspaceId }, _count: { _all: true } }),
+      can(membership.role, 'content:approve') ? this.prisma.manuscript.count({
+        where: { workspaceId, archivedAt: null, variants: { some: { status: 'draft', rejections: { none: {} } } } },
+      }) : Promise.resolve(null),
+    ]);
+    return { taskCounts: Object.fromEntries(tasks.map((task) => [task.status, task._count._all])), pendingReview };
   }
 
   @Post(':workspaceId/members')

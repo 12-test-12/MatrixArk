@@ -111,6 +111,22 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
   const { data: future } = await post(own + '/tasks', {
     ...schedule, variantIds: [next.variant.id], scheduledAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
   });
+
+  await t.test('工作台汇总按工作室统计全部任务，待审核数随角色显示', async (summaryTest) => {
+    const { data: waiting } = await post(own + '/manuscripts', { title: '角标验收', body: '正文', tags: [] });
+    await post(own + '/manuscripts/' + waiting.id + '/generate', { platforms: ['bilibili', 'xiaohongshu'] });
+    const route = own + '/workbench-summary';
+    const { data: ownerSummary } = await call(route, { cookie });
+    assert.deepEqual(ownerSummary, { taskCounts: { scheduled: 1, handed_off: 1 }, pendingReview: 1 });
+    await call(route, { cookie: otherCookie, status: 403 });
+    const membership = await prisma.membership.create({ data: { workspaceId, userId: other.user.id, role: 'operator' } });
+    summaryTest.after(() => prisma.membership.delete({ where: { id: membership.id } }));
+    const { data: operatorSummary } = await call(route, { cookie: otherCookie });
+    assert.deepEqual(operatorSummary, { taskCounts: ownerSummary.taskCounts, pendingReview: null });
+    await prisma.manuscript.update({ where: { id: waiting.id }, data: { archivedAt: new Date() } });
+    assert.equal((await call(route, { cookie })).data.pendingReview, 0);
+  });
+
   assert.equal(await worker.get(TasksService).dispatchDue(), 0);
   await call(own + '/tasks/' + future.items[0].id + '/handoff', { cookie, status: 409 });
   const { data: handoff } = await call(path + '/handoff', { cookie });
@@ -414,8 +430,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       platform: 'bilibili', externalId, sourceUrl, creatorId: 'sample', creator: '示例博主',
       description: '3 个拍摄建议 #视频', mediaType: 'video', publishedOn: '2026-11-20', likes: 0, comments: null,
     };
-    const xhs = { ...bilibili, platform: 'xiaohongshu', mediaType: 'images',
-      sourceUrl: 'https://www.xiaohongshu.com/explore/fake-fixture', publishedOn: '2026-11-19' };
+    const xhs = { ...bilibili, platform: 'xiaohongshu', mediaType: 'images', sourceUrl: null, publishedOn: '2026-11-19' };
     await call(works, { cookie: otherCookie, status: 403 });
     await post(works + '/import', { works: [{ ...bilibili, sourceUrl: 'javascript:alert(1)' }] }, 400);
     assert.deepEqual((await post(works + '/import', { works: [bilibili, bilibili, xhs] })).data, { imported: 2 });
@@ -426,10 +441,21 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(item.comments, null);
     assert.equal(item.publishedOn, '2026-11-20T00:00:00.000Z');
     await call(works + '/' + item.id, { cookie, method: 'PATCH', body: { saved: true, note: '从真实案例切入' } });
-    await post(works + '/import', { works: [{ ...bilibili, likes: 30 }] });
+    await post(works + '/import', { works: [{ ...bilibili, sourceUrl: null, likes: 30 }] });
     const saved = (await call(works + '?saved=true', { cookie })).data.items;
-    assert.deepEqual(saved.map(({ id, likes, note }) => ({ id, likes, note })),
-      [{ id: item.id, likes: 30, note: '从真实案例切入' }]);
+    assert.deepEqual(saved.map(({ id, likes, note, sourceUrl }) => ({ id, likes, note, sourceUrl })),
+      [{ id: item.id, likes: 30, note: '从真实案例切入', sourceUrl }]);
+    const itemPath = works + '/' + item.id;
+    await call(itemPath, { cookie, method: 'PATCH', body: { note: '先对比两个拍摄角度' } });
+    const [edited] = (await call(works + '?saved=true', { cookie })).data.items;
+    assert.equal(edited.savedAt, saved[0].savedAt);
+    assert.equal(edited.note, '先对比两个拍摄角度');
+    await call(itemPath, { cookie, method: 'PATCH', body: { saved: false } });
+    await call(itemPath, { cookie, method: 'PATCH', body: { note: '移出后仍可编辑' } });
+    const [removed] = (await call(works + '?platform=bilibili', { cookie })).data.items;
+    assert.equal(removed.savedAt, null);
+    assert.equal(removed.note, '移出后仍可编辑');
+    await call(itemPath, { cookie, method: 'PATCH', body: {}, status: 400 });
     const foreignWorks = foreign + '/topics/works';
     assert.equal((await call(foreignWorks, { cookie: otherCookie })).data.total, 0);
     await call(foreignWorks + '/' + item.id, { cookie: otherCookie, method: 'PATCH', body: { saved: true }, status: 404 });
@@ -439,8 +465,193 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     const { data: manuscript } = await call(own + '/manuscripts/' + created.id, { cookie });
     assert.equal(manuscript.referenceUrl, sourceUrl);
     assert.equal(manuscript.body, draft.body);
+    const [noLink] = (await call(works + '?platform=xiaohongshu', { cookie })).data.items;
+    assert.equal(noLink.sourceUrl, null);
+    const fromNoLink = (await post(works + '/' + noLink.id + '/manuscript', draft)).data;
+    assert.equal((await call(own + '/manuscripts/' + fromNoLink.id, { cookie })).data.referenceUrl, null);
     const { data: [variant] } = await post(own + '/manuscripts/' + created.id + '/generate', { platforms: ['bilibili'] });
     assert.ok(!variant.body.includes(sourceUrl));
+  });
+
+  await t.test('按用户条件采集公开来源，手动与定时去重并保留失败状态', async (sourceTest) => {
+    const { TopicCollector } = await import('../dist/content/topic-collector.service.js');
+    const { matchingEvidence } = await import('../dist/content/topic-feeds.js');
+    assert.equal(matchingEvidence('ai', { title: 'Flying a plane', summary: 'See contact details https://example.test/ai' }), null);
+    assert.equal(matchingEvidence('ai', { title: '从 AI-powered 工具说起', summary: '' }).field, 'title');
+    assert.equal(matchingEvidence('地铁', { title: '地铁接驳怎么骑', summary: '' }).field, 'title');
+    const clipped = matchingEvidence('ai', { title: '', summary: 'AI ' + 'x'.repeat(46) + '🚀' });
+    assert.equal(clipped.excerpt, 'AI ' + 'x'.repeat(46) + '…');
+    const fetch = globalThis.fetch;
+    let requests = 0;
+    let limited = false;
+    globalThis.fetch = async (input, options) => {
+      if (input instanceof URL && input.origin === 'https://www.youtube.com') {
+        assert.equal(input.searchParams.get('channel_id'), 'UCBa659QWEk1AI4Tg--mrJ2A');
+        return new Response(`<feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/"><entry>
+          <yt:videoId>abcdefghijk</yt:videoId><title>我的骑行记录</title>
+          <link rel="alternate" href="https://www.youtube.com/watch?v=abcdefghijk" />
+          <media:group><media:description>讲一讲地铁接驳的步骤</media:description>
+          <media:thumbnail url="https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg" />
+          <media:community><media:statistics views="3000000000" /></media:community></media:group>
+        </entry><entry><yt:videoId>mnopqrstuvw</yt:videoId><title>地铁换乘地图</title>
+          <link rel="alternate" href="https://www.youtube.com/watch?v=mnopqrstuvw" />
+          <media:group><media:thumbnail url="https://example.test/untrusted.jpg" /></media:group>
+        </entry></feed>`);
+      }
+      if (!(input instanceof URL) || input.origin !== 'https://mastodon.social') return fetch(input, options);
+      assert.equal(input.pathname, '/tags/%E9%AA%91%E8%A1%8C.rss');
+      requests++;
+      if (limited) return new Response(null, { status: 429 });
+      return new Response(`<rss version="2.0"><channel><title>骑行</title>
+        <item><title>地铁接驳怎么骑</title><link>https://mastodon.social/@other/100</link></item>
+        <item><title>周末露营</title><link>https://mastodon.social/@other/200</link></item>
+      </channel></rss>`);
+    };
+    sourceTest.after(() => { globalThis.fetch = fetch; });
+    const sources = own + '/topics/sources';
+    await post(sources, { provider: 'rss', target: 'https://127.0.0.1/admin' }, 400);
+    const { data: source } = await post(sources, { provider: 'mastodon', target: '#骑行', keyword: '地铁' });
+    assert.equal((await post(sources, { provider: 'mastodon', target: '#骑行', keyword: '地铁' })).data.id, source.id);
+    const sync = sources + '/' + source.id + '/sync';
+    const [first, second] = await Promise.all([post(sync, {}), post(sync, {})]);
+    assert.deepEqual([first.data.status, second.data.status].sort(), ['busy', 'ok']);
+    assert.equal(requests, 1);
+    const read = () => call(own + '/topics/works?platform=mastodon', { cookie });
+    const { data: { items: [item], total } } = await read();
+    assert.equal(total, 1);
+    assert.equal(item.description, '地铁接驳怎么骑');
+    assert.equal(item.sourceUrl, 'https://mastodon.social/@other/100');
+    assert.equal(item.matches[0].field, 'title');
+    assert.match(item.matches[0].excerpt, /地铁/);
+    assert.equal(item.matches[0].source.id, source.id);
+    await call(foreign + '/topics/sources/' + source.id + '/sync', { cookie: otherCookie, method: 'POST', body: {}, status: 404 });
+    const rerun = async () => {
+      await prisma.topicSource.update({ where: { id: source.id }, data: { nextRunAt: new Date(0) } });
+      await worker.get(TopicCollector).runDue(new AbortController().signal);
+    };
+    await rerun();
+    assert.equal(requests, 2);
+    const rerunItem = (await read()).data.items[0];
+    assert.equal(rerunItem.id, item.id);
+    assert.equal(rerunItem.matches.length, 1);
+    limited = true;
+    await rerun();
+    const { data: [status] } = await call(sources, { cookie });
+    assert.ok(status.lastSuccessAt);
+    assert.match(status.lastError, /请求过多/);
+    assert.equal((await read()).data.total, 1);
+    await call(sources + '/' + source.id, { cookie, method: 'PATCH', body: { enabled: false } });
+    await rerun();
+    assert.equal(requests, 3);
+
+    const youtube = (await post(sources, { provider: 'youtube', target: 'UCBa659QWEk1AI4Tg--mrJ2A', keyword: '地铁' })).data;
+    await post(sources + '/' + youtube.id + '/sync', {});
+    const { data: { items: videos } } = await call(own + '/topics/works?platform=youtube', { cookie });
+    assert.equal(videos.length, 2);
+    const video = videos.find((entry) => entry.sourceUrl.endsWith('abcdefghijk'));
+    assert.equal(video.coverUrl, 'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg');
+    assert.equal(video.views, 3_000_000_000);
+    assert.equal(video.matches[0].field, 'summary');
+    assert.equal(video.matches[0].source.keyword, '地铁');
+    const otherVideo = videos.find((entry) => entry.sourceUrl.endsWith('mnopqrstuvw'));
+    assert.equal(otherVideo.coverUrl, null);
+    assert.equal(otherVideo.views, null);
+  });
+
+  await t.test('旧规则误命中不再进入作品列表、选题池和原稿入口', async (rejectTest) => {
+    const stale = await prisma.topicSource.create({
+      data: { workspaceId, provider: 'mastodon', target: '#旧规则误命中', keyword: 'ai' },
+    });
+    const work = await prisma.topicWork.create({
+      data: {
+        workspaceId, platform: 'mastodon', externalId: 'legacy-false-positive', origin: 'feed', mediaType: 'text',
+        description: 'Flying a plane badly, on purpose.\nSee contact details inside.',
+        legacyRuleRejected: null, savedAt: new Date(), note: '保留的备注',
+      },
+    });
+    await prisma.topicMatch.create({
+      data: {
+        workspaceId, sourceId: stale.id, workId: work.id, field: 'summary',
+        excerpt: 'See contact details inside.', seenAt: new Date(),
+      },
+    });
+    rejectTest.after(async () => {
+      await prisma.topicMatch.deleteMany({ where: { workspaceId, workId: work.id } });
+      await prisma.topicWork.delete({ where: { id: work.id } });
+      await prisma.topicSource.delete({ where: { id: stale.id } });
+    });
+
+    const list = (query) => call(own + '/topics/works?platform=mastodon' + query, { cookie });
+    const before = await list('');
+    assert.ok(before.data.items.some(({ description }) => description === '地铁接驳怎么骑'));
+    assert.ok(!before.data.items.some(({ id }) => id === work.id));
+    assert.ok(!(await list('&saved=true')).data.items.some(({ id }) => id === work.id));
+    const rejected = await prisma.topicWork.findUniqueOrThrow({ where: { id: work.id } });
+    assert.equal(rejected.legacyRuleRejected, true);
+    assert.ok(rejected.savedAt);
+    assert.equal(rejected.note, '保留的备注');
+    await call(own + '/topics/works/' + work.id, { cookie, method: 'PATCH', body: { saved: false }, status: 404 });
+    await call(own + '/topics/works/' + work.id + '/manuscript', {
+      cookie, method: 'POST', body: { title: '原稿', body: '正文' }, status: 404,
+    });
+    await call(own + '/topics/works/' + work.id + '/analyze', {
+      cookie, method: 'POST', body: { goal: '测试误命中样本' }, status: 404,
+    });
+  });
+
+  await t.test('选题 AI 按需求分析、校验原文引用，并隔离模型密钥', async (aiTest) => {
+    const url = own + '/topics/ai';
+    const apiKey = 'sk-unpublished-fixture-key';
+    const item = await prisma.topicWork.create({ data: {
+      workspaceId, platform: 'youtube', externalId: 'ai-brief-fixture', mediaType: 'video', origin: 'report',
+      description: 'Flying a plane badly, on purpose.\nA flight training demonstration https://example.test/?token=ignore',
+      note: '私有备注',
+    } });
+    const endpoint = own + '/topics/works/' + item.id + '/analyze';
+    const goal = '为小商家做一期 AI 工具实测';
+    const member = await prisma.membership.create({ data: { userId: other.user.id, workspaceId, role: 'editor' } });
+    aiTest.after(() => prisma.membership.delete({ where: { id: member.id } }));
+    assert.equal((await call(url, { cookie })).data.provider, null);
+    await post(endpoint, { goal }, 409);
+    await call(url, { cookie: otherCookie, method: 'PATCH', body: { provider: 'deepseek', apiKey }, status: 403 });
+    const { data: config } = await call(url, { cookie, method: 'PATCH', body: { provider: 'deepseek', apiKey } });
+    assert.deepEqual(config, {
+      provider: 'deepseek', model: 'deepseek-chat',
+      endpoint: 'https://api.deepseek.com/chat/completions', isLocal: false,
+    });
+    const encrypted = await prisma.topicAiSetting.findUnique({ where: { workspaceId } });
+    assert.ok(encrypted.keyCiphertext && !encrypted.keyCiphertext.includes(apiKey));
+    await call(foreign + '/topics/works/' + item.id + '/analyze', { cookie: otherCookie, method: 'POST', body: { goal }, status: 404 });
+    assert.equal((await call(foreign + '/topics/ai', { cookie: otherCookie })).data.provider, null);
+
+    const fetch = globalThis.fetch;
+    let hallucination = false;
+    let badKey = false;
+    globalThis.fetch = async (url, options) => {
+      if (url !== 'https://api.deepseek.com/chat/completions') return fetch(url, options);
+      assert.equal(options.headers.authorization, 'Bearer ' + apiKey);
+      assert.equal(options.redirect, 'error');
+      const request = JSON.parse(options.body);
+      const payload = JSON.parse(request.messages[1].content);
+      assert.equal(payload.goal, goal);
+      assert.equal(payload.summary, 'A flight training demonstration');
+      assert.ok(!options.body.includes(item.note));
+      if (badKey) return new Response(null, { status: 401 });
+      return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+        relevance: 'low', judgment: '公开摘要是飞行训练，与 AI 工具实测不相关。',
+        evidence: [{ field: 'summary', quote: hallucination ? '这条作品介绍 AI' : 'flight training' }],
+        angles: [], nextCheck: '改找摘要明确提到工具名称和实测过程的作品。',
+      }) } }] });
+    };
+    aiTest.after(() => { globalThis.fetch = fetch; });
+    const analyzed = await call(endpoint, { cookie: otherCookie, method: 'POST', body: { goal }, status: 201 });
+    assert.equal(analyzed.data.analysis.relevance, 'low');
+    assert.deepEqual(analyzed.data.analysis.angles, []);
+    hallucination = true;
+    assert.match((await post(endpoint, { goal })).data.message, /引用无法/);
+    badKey = true;
+    assert.match((await post(endpoint, { goal })).data.message, /拒绝了密钥/);
+    assert.equal((await call(url, { cookie })).data.model, 'deepseek-chat');
   });
 
   await t.test('只能通过小红书官方身份核验新增账号', async (test) => {

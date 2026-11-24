@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { ArrowRight, BarChart3, CalendarDays, ChevronRight, ClipboardCheck, FileText, Radio, Send } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { ArrowRight, BarChart3, CalendarDays, ChevronRight, ClipboardCheck, Copy, FileText, History, Radio, Search, Send, X } from 'lucide-react';
 import { platformLabel, platforms, roleLabel, type Platform, type Role, type TaskStatus } from './api';
 import { Empty, PageHeader, PlatformIcon, TaskBadge } from './ui';
 import { roleView, Workbench, type Section } from './workbench';
@@ -33,6 +33,9 @@ const people: { name: string; role: Role }[] = [
 
 function PreviewContent({ role, section }: { role: Role; section: Section }) {
   const [selection, setSelection] = useState('');
+  const [keyword, setKeyword] = useState('');
+  const [platformFilter, setPlatformFilter] = useState('all');
+  const [copied, setCopied] = useState(false);
   const description = roleView[role].description;
   if (section === 'topics') return <>
     <PageHeader title="选题台" description="按平台和博主分析对标作品，收藏适合自己的选题。" />
@@ -72,9 +75,23 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
 
   const manuscripts = section === 'manuscripts';
   const status = roleView[role].taskStatus;
-  const items = manuscripts
+  const rawItems = manuscripts
     ? samples.filter((sample) => role !== 'reviewer' || !sample.approved).map((manuscript) => ({ manuscript, task: undefined }))
     : tasks.filter((task) => !status || task.status === status).map((task) => ({ manuscript: task.manuscript, task }));
+
+  const items = useMemo(() => {
+    return rawItems.filter(({ manuscript }) => {
+      if (platformFilter !== 'all' && manuscript.platform !== platformFilter) return false;
+      if (keyword.trim()) {
+        const query = keyword.trim().toLowerCase();
+        const titleMatch = manuscript.title.toLowerCase().includes(query);
+        const bodyMatch = manuscript.body.toLowerCase().includes(query);
+        return titleMatch || bodyMatch;
+      }
+      return true;
+    });
+  }, [rawItems, keyword, platformFilter]);
+
   const active = items.find(({ manuscript }) => manuscript.id === selection) ?? items[0];
   const Icon = manuscripts ? FileText : CalendarDays;
   const title = manuscripts ? (role === 'reviewer' ? '待审核原稿' : '原稿与审核')
@@ -83,22 +100,98 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
     return <>
       <PageHeader title={title} description={section === roleView[role].sections[0] ? description :
         manuscripts ? '查阅原稿和对应的平台版本。' : '查看各平台交接进度和发布回执。'} />
-      <section className="card detail-pane empty-detail">
-        <Empty icon={Icon} title={manuscripts ? '暂无示例原稿' : '暂无示例任务'} />
-      </section>
+      <div className="split-panel">
+        <section className="card item-list">
+          <div className="card-heading">
+            <h2>{manuscripts ? '原稿列表' : '任务列表'}</h2>
+            <span className="count">0</span>
+          </div>
+          <div className="list-toolbar">
+            <div className="search-box">
+              <Search size={14} className="search-icon" aria-hidden="true" />
+              <input
+                type="text"
+                placeholder={manuscripts ? '搜索原稿标题或内容…' : '搜索任务标题…'}
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                aria-label="搜索"
+              />
+              {keyword && (
+                <button
+                  type="button"
+                  className="clear-button"
+                  onClick={() => setKeyword('')}
+                  aria-label="清除搜索"
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          </div>
+          <Empty icon={Icon} title={keyword || platformFilter !== 'all' ? '未找到符合条件的内容' : manuscripts ? '暂无示例原稿' : '暂无示例任务'} />
+        </section>
+        <section className="card detail-pane empty-detail">
+          <Empty icon={Icon} title="请选择列表项查看详情" />
+        </section>
+      </div>
     </>;
   }
+
+  function handleCopy() {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      void navigator.clipboard.writeText(active?.manuscript.body ?? '');
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }
+
   return <>
     <PageHeader title={title} description={section === roleView[role].sections[0] ? description :
       manuscripts ? '查阅原稿和对应的平台版本。' : '查看各平台交接进度和发布回执。'} />
     <div className="split-panel">
       <section className="card item-list">
-        <div className="card-heading"><h2>{manuscripts ? '原稿列表' : '任务列表'}</h2><span className="count">{items.length}</span></div>
+        <div className="card-heading">
+          <h2>{manuscripts ? '原稿列表' : '任务列表'}</h2>
+          <span className="count">{items.length}</span>
+        </div>
+        <div className="list-toolbar">
+          <div className="search-box">
+            <Search size={14} className="search-icon" aria-hidden="true" />
+            <input
+              type="text"
+              placeholder={manuscripts ? '搜索原稿标题或内容…' : '搜索任务标题…'}
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              aria-label="搜索"
+            />
+            {keyword && (
+              <button
+                type="button"
+                className="clear-button"
+                onClick={() => setKeyword('')}
+                aria-label="清除搜索"
+              >
+                <X size={13} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+          <select
+            className="platform-select"
+            value={platformFilter}
+            onChange={(e) => setPlatformFilter(e.target.value)}
+            aria-label="按发布平台筛选"
+          >
+            <option value="all">全部平台</option>
+            <option value="xiaohongshu">小红书</option>
+            <option value="bilibili">哔哩哔哩</option>
+          </select>
+        </div>
         {items.map(({ manuscript, task }) => <button type="button" key={manuscript.id}
           className={`list-item ${active.manuscript.id === manuscript.id ? 'selected' : ''}`}
           aria-pressed={active.manuscript.id === manuscript.id} onClick={() => setSelection(manuscript.id)}>
           <span className="list-icon"><Icon size={18} aria-hidden="true" /></span>
-          <span className="list-copy"><strong>{manuscript.title}</strong>
+          <span className="list-copy">
+            <strong>{manuscript.title || '未命名任务'}</strong>
             <small>{platformLabel[manuscript.platform]} · {task ? task.schedule : `V${manuscript.version}`}</small>
           </span>
           {task ? <TaskBadge status={task.status} /> : <span className={`badge ${manuscript.approved ? 'green' : 'amber'}`}>
@@ -109,20 +202,73 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
       <section className="card detail-pane task-detail">
         <div className="detail-heading">
           <div className="detail-icon"><Icon size={22} aria-hidden="true" /></div>
-          <div><h2>{active.manuscript.title}</h2>
-            <p>{platformLabel[active.manuscript.platform]}{active.task && ` · ${accountNames[active.manuscript.platform]}`}</p>
+          <div>
+            <h2>{active.manuscript.title || '未命名任务'}</h2>
+            <p>{platformLabel[active.manuscript.platform]}{active.task && ` · ${accountNames[active.manuscript.platform] ?? '未指定账号'}`} · V{active.manuscript.version}</p>
           </div>
           {active.task && <TaskBadge status={active.task.status} />}
         </div>
         <div className="detail-content">
+          {active.task && <dl className="task-meta">
+            <div><dt>计划时间</dt><dd>{active.task.schedule}</dd></div>
+            <div><dt>实际交接</dt><dd>{active.task.status === 'published' ? '上周日 09:45' : '周五 18:00'}</dd></div>
+            <div><dt>发布账号</dt><dd>{accountNames[active.manuscript.platform] ?? '未指定账号'}</dd></div>
+            <div><dt>版本规格</dt><dd>V{active.manuscript.version} · {platformLabel[active.manuscript.platform]}</dd></div>
+          </dl>}
           <div className="task-section">
-            <div className="section-line"><h3><Send size={17} aria-hidden="true" />{active.task ? '已审交接包' : '平台版本'}</h3>
-              <span className="version">V{active.manuscript.version}</span></div>
-            <p className="content-text">{active.manuscript.body}</p>
+            <div className="section-line">
+              <h3><Send size={17} aria-hidden="true" />{active.task ? '已审交接包' : '平台版本'}</h3>
+              <span className="version">V{active.manuscript.version}</span>
+            </div>
+            <div className="variant-preview">
+              <div className="preview-top">
+                <span className="version">V{active.manuscript.version} · 正文文案</span>
+                <button
+                  type="button"
+                  className="button primary compact"
+                  onClick={handleCopy}
+                  title="一键复制交接文案"
+                >
+                  <Copy size={13} aria-hidden="true" />
+                  {copied ? '已复制！' : '复制文案'}
+                </button>
+              </div>
+              <p className="content-text">{active.manuscript.body}</p>
+            </div>
           </div>
           {active.task && <div className="task-section">
-            <div className="section-line"><h3><ClipboardCheck size={17} aria-hidden="true" />发布回执</h3><TaskBadge status={active.task.status} /></div>
+            <div className="section-line">
+              <h3><ClipboardCheck size={17} aria-hidden="true" />发布回执</h3>
+              <TaskBadge status={active.task.status} />
+            </div>
             <p className="muted small">{active.task.status === 'published' ? '周禾已回填作品链接及发布截图。' : '交接已完成，等待运营发布并回填结果。'}</p>
+          </div>}
+          {active.task && <div className="task-section">
+            <h3><History size={17} aria-hidden="true" />操作记录</h3>
+            <ol className="timeline">
+              <li>
+                <span className={`timeline-dot ${active.task.status === 'published' ? 'green' : 'violet'}`} />
+                <div className="timeline-content">
+                  <div className="timeline-header">
+                    <strong>{active.task.status === 'published' ? '发布回执已确认' : '已生成交接包'}</strong>
+                    <time className="muted small">{active.task.status === 'published' ? '上周日 10:15' : '周五 18:00'}</time>
+                  </div>
+                  <div className="timeline-actor">周禾 · 运营人员</div>
+                  {active.task.status === 'published' && <p className="timeline-reason">已在小红书完成图文发布，并回填核验原链接与手机端截图。</p>}
+                </div>
+              </li>
+              <li>
+                <span className="timeline-dot violet" />
+                <div className="timeline-content">
+                  <div className="timeline-header">
+                    <strong>终审通过并排期</strong>
+                    <time className="muted small">上周五 15:30</time>
+                  </div>
+                  <div className="timeline-actor">许棠 · 审校人</div>
+                  <p className="timeline-reason">文案与标签核查完毕，符合发布规范。</p>
+                </div>
+              </li>
+            </ol>
           </div>}
         </div>
       </section>

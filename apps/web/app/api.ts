@@ -40,6 +40,7 @@ export type Manuscript = {
 };
 export type TaskStatus = 'scheduled' | 'dispatching' | 'paused' | 'handed_off' | 'submitted'
   | 'under_review' | 'published' | 'failed' | 'unknown' | 'verified' | 'canceled';
+export type WorkbenchSummary = { taskCounts: Partial<Record<TaskStatus, number>>; pendingReview: number | null };
 export type Result = {
   state: TaskStatus; remoteUrl: string | null; remoteId: string | null; recordedById: string | null; recordedAt: string;
   platformPublishedAt: string | null;
@@ -86,7 +87,7 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, options: {
-  method?: string; body?: unknown; headers?: Record<string, string>; signal?: AbortSignal;
+  method?: string; body?: unknown; headers?: Record<string, string>; signal?: AbortSignal; keepalive?: boolean;
 } = {}): Promise<T> {
   const form = options.body instanceof FormData;
   const blob = options.body instanceof Blob ? options.body : undefined;
@@ -104,6 +105,7 @@ export async function api<T>(path: string, options: {
       headers: options.headers ? { ...defaultHeaders, ...options.headers } : (Object.keys(defaultHeaders).length ? defaultHeaders : undefined),
       body: blob ?? (form ? options.body as FormData : JSON.stringify(options.body)),
       signal: options.signal,
+      keepalive: options.keepalive,
       cache: 'no-store',
     });
   } catch (error) {

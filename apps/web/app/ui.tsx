@@ -60,6 +60,7 @@ export function ReviewPicture({ src, label }: { src: string; label: string }) {
       {...({ closedby: 'any' } as any)}
       onClick={(event) => {
         if (!dialog.current) return;
+        if (event.target !== dialog.current) return;
         if (!('closedBy' in HTMLDialogElement.prototype)) {
           const rect = dialog.current.getBoundingClientRect();
           const isInside = (

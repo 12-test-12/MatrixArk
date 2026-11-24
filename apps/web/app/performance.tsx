@@ -221,14 +221,20 @@ export function Performance({ scope, role, initialAccount, openTask }: {
     <Feedback error={accounts.error || archived.error || result.error} />
     {result.loading && <Loading />}
     {result.data && <>
-      <PerformanceTrend scope={scope} works={result.data.items} />
       <div className="performance-summary" aria-label="筛选范围汇总">
         {result.data.summary.map((item) => <section className="card form-card" key={item.content}>
           <h2>{item.content === 'video' ? '视频' : '图文'}</h2>
           <p className="muted small">{number.format(item.published)} 件已发布 · {number.format(item.tracked)} 件已采集</p>
-          <MetricNumbers values={item} video={item.content === 'video'} />
+          {item.tracked === 0 ? (
+            <p className="performance-summary-empty">
+              暂无已采集的数据。发布作品并回填结果后，系统将自动汇总或支持手动同步成效。
+            </p>
+          ) : (
+            <MetricNumbers values={item} video={item.content === 'video'} />
+          )}
         </section>)}
       </div>
+      <PerformanceTrend scope={scope} works={result.data.items} />
       <section className="card" aria-labelledby="performance-works">
         <div className="card-heading"><h2 id="performance-works">作品明细</h2>
           <span className="muted small">汇总使用每件作品最近一次采集值。— 表示未采集。</span></div>

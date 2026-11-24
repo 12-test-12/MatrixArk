@@ -17,6 +17,11 @@ function variantLabel(variant?: Pick<Variant, 'status' | 'returned'>) {
   return variant.status === 'approved' ? '已审核' : '待审核';
 }
 
+function platformOfNotice(platform: Platform, hasVideo: boolean) {
+  const label = publishPlatformLabel(platform, hasVideo);
+  return /^[A-Za-z0-9]/.test(label) ? ` ${label}` : label;
+}
+
 function hasSnapshot(variant: ManuscriptVariant): variant is Variant {
   return Array.isArray(variant.assets) && typeof variant.snapshotVersion === 'number'
     && (variant.approval === null || typeof variant.approval?.snapshotHash === 'string' || variant.approval?.snapshotHash === null);
@@ -349,7 +354,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
       await post(scope + '/variants/' + snapshot.id + '/confirm', {});
       check.refresh();
       refresh();
-      onReview?.(`「${manuscript.title}」的${publishPlatformLabel(snapshot.platform, Boolean(snapshot.videoAsset))}版本已确认。`);
+      onReview?.(`「${manuscript.title}」的${platformOfNotice(snapshot.platform, Boolean(snapshot.videoAsset))}版本已确认。`);
     });
   }
   function reject(event: FormEvent<HTMLFormElement>) {
@@ -362,7 +367,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
       await post(scope + '/variants/' + snapshot.id + '/reject', { reason });
       setRejecting(false);
       refresh();
-      onReview?.(`「${manuscript.title}」的${publishPlatformLabel(snapshot.platform, Boolean(snapshot.videoAsset))}版本已退回。`);
+      onReview?.(`「${manuscript.title}」的${platformOfNotice(snapshot.platform, Boolean(snapshot.videoAsset))}版本已退回。`);
     });
   }
   function upload(files: File[]) {
@@ -459,7 +464,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
         <p>生成平台版本后，可检查文案、图片顺序和封面。</p>
         {editable && <div className="actions">
           <button type="button" className="button primary" disabled={action.busy} onClick={() => generate([platform])}>
-            <Sparkles size={16} aria-hidden="true" />生成{publishPlatformLabel(platform, Boolean(manuscript.videoAsset))}版本
+            <Sparkles size={16} aria-hidden="true" />生成{platformOfNotice(platform, Boolean(manuscript.videoAsset))}版本
           </button>
           {!currentVariants.length && <button type="button" className="button" disabled={action.busy}
             onClick={() => generate(platforms)}>一次生成两个平台版本</button>}
@@ -550,10 +555,11 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
   </section>;
 }
 
-export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAccounts, initialId }: {
+export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAccounts, initialId, refreshSummary }: {
   scope: string; role: Role; accounts: ReturnType<typeof useResource<Account[]>>;
   drafts: ManuscriptDrafts;
   openTasks: (id: string) => void; openAccounts: () => void; initialId?: string;
+  refreshSummary: () => void;
 }) {
   const [showArchived, setShowArchived] = useState(false);
   const [selection, setSelection] = useState(initialId ?? '');
@@ -627,12 +633,15 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
       {creating ? <NewManuscript scope={scope} drafts={drafts} draftKey={draftKey} onCancel={() => setCreating(false)} onSave={(id) => {
         changePage([]); setReviewFilter('all'); setSelection(id); list.refresh();
       }} /> : active ? <ManuscriptDetail key={active} scope={scope} role={role} id={active} accounts={accounts} drafts={drafts}
-        reviewFilter={reviewFilter} changed={list.refresh} onReview={setReviewNotice}
+        reviewFilter={reviewFilter} changed={() => { list.refresh(); refreshSummary(); }} onReview={setReviewNotice}
         onSchedule={openTasks} openAccounts={openAccounts} />
         : <section className="card detail-pane empty-detail">
           {list.loading ? <Loading /> : <Empty icon={FileText} title={listError ? '暂时无法查看稿件' : emptyTitle}
             description={reviewFilter === 'all' && !showArchived && !listError && canEdit(role)
-              ? '新建原稿后，可以生成各平台版本。' : undefined} />}
+              ? '新建原稿后，可以生成各平台版本。' : undefined}>
+            {reviewFilter === 'all' && !showArchived && !listError && canEdit(role)
+              && <button type="button" className="button primary" onClick={start}>新建原稿</button>}
+          </Empty>}
         </section>}
     </div>
   </>;

@@ -8,9 +8,17 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  colorScheme: 'light',
+  colorScheme: 'light dark',
 };
 
+const restoreTheme = `try {
+  const theme = localStorage.getItem('matrixark-theme');
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+} catch {}`;
+
 export default function RootLayout({ children }: { children: ReactNode }) {
-  return <html lang="zh-CN"><body>{children}</body></html>;
+  return <html lang="zh-CN" suppressHydrationWarning>
+    <head><script dangerouslySetInnerHTML={{ __html: restoreTheme }} /></head>
+    <body>{children}</body>
+  </html>;
 }
