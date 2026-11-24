@@ -287,7 +287,7 @@ function Schedule({ scope, variants, accounts, onSchedule, openAccounts }: {
 function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, changed, onReview, onSchedule, openAccounts }: {
   scope: string; role: Role; id: string; accounts: ReturnType<typeof useResource<Account[]>>;
   drafts: ManuscriptDrafts; reviewFilter: ReviewFilter;
-  changed: () => void; onReview: (message: string) => void; onSchedule: (id: string) => void; openAccounts: () => void;
+  changed: () => void; onReview?: (message: string) => void; onSchedule: (id: string) => void; openAccounts: () => void;
 }) {
   const detail = useResource<Manuscript>(scope + '/manuscripts/' + id);
   const action = useAction();
@@ -349,7 +349,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
       await post(scope + '/variants/' + snapshot.id + '/confirm', {});
       check.refresh();
       refresh();
-      onReview(`「${manuscript.title}」的${publishPlatformLabel(snapshot.platform, Boolean(snapshot.videoAsset))}版本已确认。`);
+      onReview?.(`「${manuscript.title}」的${publishPlatformLabel(snapshot.platform, Boolean(snapshot.videoAsset))}版本已确认。`);
     });
   }
   function reject(event: FormEvent<HTMLFormElement>) {
@@ -362,7 +362,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
       await post(scope + '/variants/' + snapshot.id + '/reject', { reason });
       setRejecting(false);
       refresh();
-      onReview(`「${manuscript.title}」的${publishPlatformLabel(snapshot.platform, Boolean(snapshot.videoAsset))}版本已退回。`);
+      onReview?.(`「${manuscript.title}」的${publishPlatformLabel(snapshot.platform, Boolean(snapshot.videoAsset))}版本已退回。`);
     });
   }
   function upload(files: File[]) {
@@ -465,7 +465,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
         assets={manuscript.assets} drafts={drafts} draftKey={draftKey}
         onSave={() => {
           setPlatform(snapshot.platform); setEditing(false); refresh();
-          if (snapshot.returned) onReview(`「${manuscript.title}」已保存新版本，重新进入待审核。`);
+          if (snapshot.returned) onReview?.(`「${manuscript.title}」已保存新版本，重新进入待审核。`);
         }} onCancel={() => setEditing(false)} />
         : <>
           <div className="variant-preview">
@@ -491,7 +491,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
           {variant.returned && variant.rejections?.length ? <div className="check-list">
             <strong>退回意见</strong>
             {variant.rejections.map((item) => <div key={item.id}>
-              <p className="muted small">{item.reviewer.name} · {formatTime(item.createdAt)}</p>
+              <p className="muted small">{item.reviewer?.name ?? '审核人'} · {formatTime(item.createdAt)}</p>
               <p className="content-text">{item.reason}</p>
             </div>)}
             {editable && <p>按意见编辑并保存新版本后，稿件会重新进入待审核。</p>}
@@ -535,7 +535,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
         {pastRejections.map((item) => <div key={item.id}>
           <h4>{publishPlatformLabel(item.platform, Boolean(item.videoAsset))} V{item.version}</h4>
           {item.rejections?.map((rejection) => <div key={rejection.id}>
-            <p className="muted small">{rejection.reviewer.name} · {formatTime(rejection.createdAt)}</p>
+            <p className="muted small">{rejection.reviewer?.name ?? '审核人'} · {formatTime(rejection.createdAt)}</p>
             <p className="content-text">{rejection.reason}</p>
           </div>)}
         </div>)}

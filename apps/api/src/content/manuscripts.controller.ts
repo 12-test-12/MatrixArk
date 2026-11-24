@@ -33,7 +33,7 @@ import { IMAGE_UPLOAD_LIMIT, VIDEO_UPLOAD_LIMIT, StorageService, imageDisplayNam
 
 const listSchema = z.object({
   archived: z.enum(['true', 'false']).optional(),
-  review: z.enum(['pending', 'returned']).optional(),
+  review: z.enum(['all', 'pending', 'returned']).optional(),
   cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
 });
@@ -50,10 +50,11 @@ export class ManuscriptsController {
   @Get()
   async list(@Param('workspaceId') workspaceId: string, @CurrentUser() user: SessionUser, @Query() query: unknown) {
     const { archived, review, cursor, limit } = parse(listSchema, query);
+    const reviewFilter = review === 'all' ? undefined : review;
     const paged = limit !== undefined || review !== undefined || cursor !== undefined;
     const pageSize = limit ?? (paged ? 20 : 100);
-    const authorId = review === 'returned' ? user.id : undefined;
-    const scope = JSON.stringify([workspaceId, archived === 'true', review, authorId]);
+    const authorId = reviewFilter === 'returned' ? user.id : undefined;
+    const scope = JSON.stringify([workspaceId, archived === 'true', reviewFilter, authorId]);
     let after: Prisma.ManuscriptWhereInput = {};
     if (cursor) {
       try {
@@ -69,9 +70,9 @@ export class ManuscriptsController {
     const manuscripts = await this.prisma.manuscript.findMany({
       where: {
         workspaceId, archivedAt: archived === 'true' ? { not: null } : null, createdById: authorId,
-        ...(review && { variants: { some: {
+        ...(reviewFilter && { variants: { some: {
           status: 'draft',
-          rejections: review === 'pending' ? { none: {} } : { some: {} },
+          rejections: reviewFilter === 'pending' ? { none: {} } : { some: {} },
         } } }),
         ...after,
       },

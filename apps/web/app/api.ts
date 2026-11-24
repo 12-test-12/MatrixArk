@@ -14,7 +14,7 @@ export type Account = {
   identityVerified: boolean; identityCheckedAt: string | null; availableForHandoff: boolean; availableForOfficial: boolean;
 };
 export type Approval = { approvedAt: string; snapshotHash: string | null };
-export type Rejection = { id: string; reviewer: { name: string }; reason: string; createdAt: string };
+export type Rejection = { id: string; reviewer?: { name: string } | null; reason: string; createdAt: string };
 export type Picture = { assetId: string; position: number; isCover: boolean };
 export type VideoAsset = { id: string; filename: string; size: number };
 export type VariantSummary = {
