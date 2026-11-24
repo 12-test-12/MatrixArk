@@ -162,7 +162,7 @@ export class TopicsController {
       const data = { ...item, publishedOn: item.publishedOn ? new Date(item.publishedOn) : null, importedAt };
       return this.prisma.topicWork.upsert({
         where: { workspaceId_platform_externalId: { workspaceId, platform: item.platform, externalId: item.externalId } },
-        create: { workspaceId, ...data, origin: 'report' },
+        create: { workspaceId, ...data, origin: 'report', legacyRuleRejected: false },
         update: { ...data, legacyRuleRejected: false, sourceUrl: item.sourceUrl ?? undefined },
         select: { id: true },
       });

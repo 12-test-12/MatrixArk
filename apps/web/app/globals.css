@@ -2004,7 +2004,7 @@ textarea {
 
 .filters button:hover {
   color: var(--accent);
-  background: #f5f4fd;
+  background: var(--accent-tint);
 }
 
 .filters button.active {

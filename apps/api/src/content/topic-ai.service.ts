@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { z } from 'zod';
 import { decryptPlatformSecret, encryptPlatformSecret } from '../accounts/platform-app';
 import { PrismaService } from '../prisma/prisma.service';
@@ -94,19 +94,23 @@ export const topicAiSettingSchema = z.object({
   model: z.string().trim().max(128).optional(),
 }).strict().superRefine((data, ctx) => {
   const isLocal = ['ollama', 'lmstudio', 'custom'].includes(data.provider);
-  if (!isLocal && (!data.apiKey || data.apiKey.length < 8)) {
+  if (!isLocal && data.apiKey && data.apiKey.length < 8) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: '请输入有效的 API Key（至少 8 位）',
       path: ['apiKey'],
     });
   }
-  if (data.endpoint && !URL.canParse(data.endpoint)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: '接口地址须为合法的 HTTP 或 HTTPS URL',
-      path: ['endpoint'],
-    });
+  if (data.endpoint) {
+    let url: URL | null = null;
+    try { url = new URL(data.endpoint); } catch {}
+    if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '接口地址须为普通的 HTTP 或 HTTPS URL',
+        path: ['endpoint'],
+      });
+    }
   }
 });
 
@@ -193,9 +197,21 @@ export class TopicAiService {
     const isLocal = Boolean(defaultProviders[provider].isLocal);
     const targetEndpoint = endpoint?.trim() || defaultProviders[provider].endpoint;
     const targetModel = model?.trim() || defaultProviders[provider].defaultModel;
-    const key = apiKey || (isLocal ? 'local' : '');
+    let key = apiKey;
+    if (!isLocal && !key) {
+      const existing = await this.db.topicAiSetting.findUnique({ where: { workspaceId } });
+      if (!existing || existing.provider !== provider) throw new BadRequestException('请填写模型服务的 API Key');
+      try {
+        const decrypted = decryptPlatformSecret(['topic-ai', workspaceId, provider], existing.keyCiphertext);
+        const stored: { apiKey?: unknown } = decrypted.startsWith('{') ? JSON.parse(decrypted) : { apiKey: decrypted };
+        key = typeof stored.apiKey === 'string' ? stored.apiKey : '';
+      } catch {
+        key = '';
+      }
+      if (!key) throw new BadRequestException('已保存的密钥无法读取，请重新填写 API Key');
+    }
     const payload = JSON.stringify({
-      apiKey: key,
+      apiKey: key || (isLocal ? 'local' : ''),
       endpoint: targetEndpoint,
       model: targetModel,
     });

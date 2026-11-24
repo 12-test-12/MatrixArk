@@ -55,7 +55,7 @@ export class TopicCollector {
           const { evidence, ...item } = items.get(key)!;
           const saved = await tx.topicWork.upsert({
             where: { workspaceId_platform_externalId: { workspaceId, platform: item.platform, externalId: key } },
-            create: { workspaceId, ...item, origin: 'feed', importedAt },
+            create: { workspaceId, ...item, origin: 'feed', legacyRuleRejected: false, importedAt },
             update: { ...item, origin: 'feed', legacyRuleRejected: false, sourceUrl: item.sourceUrl ?? undefined,
               coverUrl: item.coverUrl ?? undefined, importedAt },
             select: { id: true },

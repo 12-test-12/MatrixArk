@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { ArrowRight, BarChart3, CalendarDays, ChevronRight, ClipboardCheck, Copy, FileText, History, Radio, Search, Send, X } from 'lucide-react';
 import { platformLabel, platforms, roleLabel, type Platform, type Role, type TaskStatus } from './api';
 import { Empty, PageHeader, PlatformIcon, TaskBadge } from './ui';
@@ -79,18 +79,16 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
     ? samples.filter((sample) => role !== 'reviewer' || !sample.approved).map((manuscript) => ({ manuscript, task: undefined }))
     : tasks.filter((task) => !status || task.status === status).map((task) => ({ manuscript: task.manuscript, task }));
 
-  const items = useMemo(() => {
-    return rawItems.filter(({ manuscript }) => {
-      if (platformFilter !== 'all' && manuscript.platform !== platformFilter) return false;
-      if (keyword.trim()) {
-        const query = keyword.trim().toLowerCase();
-        const titleMatch = manuscript.title.toLowerCase().includes(query);
-        const bodyMatch = manuscript.body.toLowerCase().includes(query);
-        return titleMatch || bodyMatch;
-      }
-      return true;
-    });
-  }, [rawItems, keyword, platformFilter]);
+  const items = rawItems.filter(({ manuscript }) => {
+    if (platformFilter !== 'all' && manuscript.platform !== platformFilter) return false;
+    if (keyword.trim()) {
+      const query = keyword.trim().toLowerCase();
+      const titleMatch = manuscript.title.toLowerCase().includes(query);
+      const bodyMatch = manuscript.body.toLowerCase().includes(query);
+      return titleMatch || bodyMatch;
+    }
+    return true;
+  });
 
   const active = items.find(({ manuscript }) => manuscript.id === selection) ?? items[0];
   const Icon = manuscripts ? FileText : CalendarDays;

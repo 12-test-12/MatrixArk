@@ -308,7 +308,8 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
         <Bot size={16} aria-hidden="true" />{showAiSettings ? '收起 AI 设置' : '配置 AI 模型'}
       </button>}
     </PageHeader>
-    {canConfigureAi && showAiSettings && <TopicAiSettings path={aiPath} settings={ai.data} refresh={ai.refresh} error={ai.error} />}
+    {canConfigureAi && showAiSettings && <TopicAiSettings key={ai.data?.provider ?? 'loading'}
+      path={aiPath} settings={ai.data} refresh={ai.refresh} error={ai.error} />}
     <div className="filters" role="group" aria-label="选题台视图">
       <button type="button" className={!showCollection && !saved ? 'active' : ''} aria-pressed={!showCollection && !saved}
         onClick={() => { setShowCollection(false); setSaved(false); }}>对标作品</button>

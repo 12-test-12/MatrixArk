@@ -131,6 +131,7 @@ export function TopicAiSettings({ path, settings, refresh, error }: {
     .find((item) => item.id === provider) ?? fallbackItem;
 
   const isLocal = Boolean(currentItem.isLocal);
+  const canReuseKey = !isLocal && settings?.provider === provider && Boolean(settings.model);
 
   function handleProviderChange(nextId: string) {
     setProvider(nextId);
@@ -190,15 +191,15 @@ export function TopicAiSettings({ path, settings, refresh, error }: {
             disabled={action.busy}
           />
         </label>
-        <label>{isLocal ? 'API Key (本地服务通常免填)' : 'API Key (必填)'}
+        <label>{isLocal ? 'API Key (本地服务通常免填)' : canReuseKey ? 'API Key (留空沿用现有密钥)' : 'API Key (必填)'}
           <input
             name="apiKey"
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
-            required={!isLocal}
+            required={!isLocal && !canReuseKey}
             maxLength={1024}
-            placeholder={isLocal ? '本地默认免填，若有鉴权请输入' : settings?.model ? '已配置，输入新密钥可更换' : '粘贴模型服务提供的 API Key'}
+            placeholder={isLocal ? '本地默认免填，若有鉴权请输入' : canReuseKey ? '已配置，留空继续使用现有密钥' : '粘贴模型服务提供的 API Key'}
             autoComplete="new-password"
             disabled={action.busy}
           />
