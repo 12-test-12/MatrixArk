@@ -31,15 +31,20 @@ const work = z.object({
   comments: metric,
 }).strict();
 const importSchema = z.object({ works: z.array(work).min(1).max(50) }).strict();
+const emptyToUndefined = (v: unknown) => (typeof v === 'string' && !v.trim() ? undefined : v);
+
 const listSchema = z.object({
-  platform: referencePlatforms.optional(),
-  mediaType: mediaType.optional(),
-  creator: z.string().trim().max(120).optional(),
-  from: day.optional(),
-  to: day.optional(),
-  saved: z.enum(['true', 'false']).optional(),
+  platform: z.preprocess(emptyToUndefined, referencePlatforms.optional()),
+  mediaType: z.preprocess(emptyToUndefined, mediaType.optional()),
+  creator: z.preprocess(emptyToUndefined, z.string().trim().max(120).optional()),
+  from: z.preprocess(emptyToUndefined, day.optional()),
+  to: z.preprocess(emptyToUndefined, day.optional()),
+  saved: z.preprocess(emptyToUndefined, z.enum(['true', 'false']).optional()),
 }).refine(({ from, to }) => !from || !to || from <= to, '起始日期须早于或等于结束日期');
-const saveSchema = z.object({ saved: z.boolean(), note: z.string().trim().max(1000).optional() }).strict();
+const saveSchema = z.object({
+  saved: z.boolean(),
+  note: z.preprocess((v) => (typeof v === 'string' && !v.trim() ? null : v), z.string().trim().max(1000).nullable().optional()),
+}).strict();
 
 @Controller('workspaces/:workspaceId/topics/works')
 @UseGuards(WorkspaceGuard)

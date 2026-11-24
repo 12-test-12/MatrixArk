@@ -4,6 +4,25 @@ export const topicPlatforms = {
 };
 export const topicMediaTypes = { video: '视频', images: '图文', text: '文字', other: '其他' };
 
+const platformAliases: Record<string, keyof typeof topicPlatforms> = {
+  bilibili: 'bilibili', 'b 站': 'bilibili', 'b站': 'bilibili', '哔哩哔哩': 'bilibili',
+  xiaohongshu: 'xiaohongshu', xhs: 'xiaohongshu', '小红书': 'xiaohongshu',
+  douyin: 'douyin', '抖音': 'douyin',
+  kuaishou: 'kuaishou', '快手': 'kuaishou',
+  shipinhao: 'shipinhao', '视频号': 'shipinhao', '微信视频号': 'shipinhao',
+  rednote: 'rednote', '海外小红书': 'rednote',
+  tiktok: 'tiktok',
+  instagram: 'instagram', ins: 'instagram',
+  twitter: 'twitter', x: 'twitter',
+};
+
+const mediaTypeAliases: Record<string, keyof typeof topicMediaTypes> = {
+  video: 'video', '视频': 'video',
+  images: 'images', image: 'images', '图文': 'images', '图集': 'images', '图片': 'images',
+  text: 'text', '文字': 'text', '文本': 'text',
+  other: 'other', '其他': 'other',
+};
+
 export type ImportedWork = {
   platform: keyof typeof topicPlatforms;
   externalId: string;
@@ -30,7 +49,12 @@ function identifier(value: unknown) {
 }
 
 function metric(value: unknown) {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 2_147_483_647 ? value : null;
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 2_147_483_647) return value;
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    const num = Number(value.trim());
+    if (Number.isSafeInteger(num) && num >= 0 && num <= 2_147_483_647) return num;
+  }
+  return null;
 }
 
 export function parseCreatorHubWorks(rows: ReadonlyArray<ReadonlyArray<unknown>>) {
@@ -45,18 +69,18 @@ export function parseCreatorHubWorks(rows: ReadonlyArray<ReadonlyArray<unknown>>
   for (const row of body) {
     if (row.every((cell) => cell === null || cell === undefined || cell === '')) continue;
     const read = (name: string) => row[columns.get(name) ?? -1];
-    const platformCell = text(read('平台'), 30).toLowerCase();
-    const platform = (platformCell === 'xhs' ? 'xiaohongshu' : platformCell) as ImportedWork['platform'];
+    const rawPlatform = text(read('平台'), 30).toLowerCase();
+    const platform = platformAliases[rawPlatform];
     const externalId = identifier(read('作品ID'));
     const source = text(read('作品链接'), 2049);
     const url = URL.canParse(source) ? new URL(source) : undefined;
-    if (!Object.hasOwn(topicPlatforms, platform) || !externalId || !url || url.href.length > 2048
+    if (!platform || !externalId || !url || url.href.length > 2048
       || !['https:', 'http:'].includes(url.protocol) || url.username || url.password) {
       skipped++;
       continue;
     }
-    const type = text(read('媒体类型'), 30);
-    const mediaType = (Object.hasOwn(topicMediaTypes, type) ? type : 'other') as ImportedWork['mediaType'];
+    const rawType = text(read('媒体类型'), 30).toLowerCase();
+    const mediaType = mediaTypeAliases[rawType] ?? 'other';
     const day = read('发布时间');
     works.set(JSON.stringify([platform, externalId]), {
       platform, externalId, mediaType, sourceUrl: url.href,
