@@ -3,8 +3,10 @@ import { Bot, ImageOff, Telescope } from 'lucide-react';
 import { api, formatTime, messageOf, post, useAction, useResource } from './api';
 import { readCreatorHubReport, topicMediaTypes, topicPlatforms, type ImportedWork, type TopicWork } from './creatorhub-report';
 import { TopicAiGoal, TopicAiPanel, TopicAiSettings, useTopicAiAnalysis, type TopicAiStatus } from './topic-ai';
+import { pushToast } from './toast';
 import { useTopicNotes } from './topic-notes';
 import { TopicSources } from './topic-sources';
+import { TopicChanges, TopicInsights } from './topic-insights';
 import { Empty, Feedback, Loading, PageHeader } from './ui';
 
 function titleOf(item: TopicWork) {
@@ -132,6 +134,7 @@ function TopicDetail({ item, path, refresh, openManuscript, analysis, activeGoal
     } else {
       setAngleError('');
       notes.change(item.id, next, true);
+      pushToast('已加入「我的创作角度」备注。', 'success');
     }
   }
   function toggleSaved() {
@@ -164,7 +167,9 @@ function TopicDetail({ item, path, refresh, openManuscript, analysis, activeGoal
       </div> : <p className="muted small">来源未提供原作品链接。</p>}
       <p className="muted small">发布 {item.publishedOn?.slice(0, 10) ?? '日期未记录'} · 数据更新 {formatTime(item.importedAt)}</p>
       <p>播放 {item.views?.toLocaleString('zh-CN') ?? '未提供'} · 点赞 {item.likes ?? '未提供'} · 评论 {item.comments ?? '未提供'}</p>
+      <TopicInsights path={path} />
       <TopicAiPanel {...analysis} activeGoal={activeGoal} note={note} addAngle={addAngle} />
+      <TopicChanges path={path} eager />
       <section className="topic-evidence field-group">
         <h3>为什么收录</h3>
         {item.matches?.length ? <ul>
@@ -216,21 +221,23 @@ function TopicDetail({ item, path, refresh, openManuscript, analysis, activeGoal
 }
 
 const emptyFilters = { platform: '', mediaType: '', creator: '', from: '', to: '' };
+export type TopicView = 'works' | 'saved' | 'collection';
 
-export function Topics({ scope, openManuscript, canConfigureAi }: {
+export function Topics({ scope, openManuscript, canConfigureAi, view, selected, onView, onSelect }: {
   scope: string; openManuscript: (id: string) => void; canConfigureAi: boolean;
+  view: TopicView; selected: string; onView: (view: TopicView) => void; onSelect: (id: string) => void;
 }) {
-  const [saved, setSaved] = useState(false);
+  const saved = view === 'saved';
+  const showCollection = view === 'collection';
   const [filters, setFilters] = useState(emptyFilters);
   const [creatorText, setCreatorText] = useState('');
   const [composing, setComposing] = useState(false);
-  const [selected, setSelected] = useState('');
   const [goal, setGoal] = useState('');
   const [activeGoal, setActiveGoal] = useState('');
   const [notice, setNotice] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
-  const [showCollection, setShowCollection] = useState(false);
-  const [file, setFile] = useState<File>();
+  const [files, setFiles] = useState<File[]>([]);
+  const [reportIssues, setReportIssues] = useState<string[]>([]);
   const importAction = useAction();
   const fileHintId = useId();
   const dateErrorId = useId();
@@ -245,8 +252,8 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
   const list = useResource<{ items: TopicWork[]; total: number }>(invalidDates ? null : path + '?' + search, 10_000);
   const items = list.data?.items ?? [];
   const selectedItem = items.find(({ id }) => id === selected) ?? items[0];
-  const aiItem = !showCollection && selectedItem?.id === selected ? selectedItem : undefined;
-  const analysis = useTopicAiAnalysis(aiItem ? path + '/' + aiItem.id : null, activeGoal, ai.data?.model ?? null);
+  const workPath = !showCollection && selectedItem ? path + '/' + selectedItem.id : null;
+  const analysis = useTopicAiAnalysis(workPath, selectedItem?.id === selected ? activeGoal : '', ai.data?.model ?? null);
 
   useEffect(() => {
     if (composing || creatorText.trim() === filters.creator) return;
@@ -267,10 +274,31 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
     const form = event.currentTarget;
     setNotice('');
     void importAction.run(async () => {
-      if (!file?.name.toLowerCase().endsWith('.xlsx')) throw new Error('请上传 CreatorHub 导出的 .xlsx 采集报告。');
-      if (file.size > 8 * 1024 * 1024) throw new Error('报告不能超过 8 MiB，请缩小 CreatorHub 导出范围。');
-      const { works, skipped, missingDates } = await readCreatorHubReport(file);
-      if (!works.length) throw new Error('报表里没有可导入的作品。请检查平台、作品 ID 和已有的作品链接。');
+      if (!files.length || files.length > 10) throw new Error('一次请选择 1 至 10 份采集报表。');
+      const works = new Map<string, ImportedWork>();
+      const issues: string[] = [];
+      let skipped = 0;
+      let missingDates = 0;
+      let duplicates = 0;
+      for (const file of files) {
+        try {
+          if (!file.name.toLowerCase().endsWith('.xlsx')) throw new Error('请选择 .xlsx 文件。');
+          if (file.size > 8 * 1024 * 1024) throw new Error('单份报告不能超过 8 MiB。');
+          const report = await readCreatorHubReport(file);
+          if (!report.works.length) throw new Error('报表里没有可导入的作品。');
+          skipped += report.skipped;
+          missingDates += report.missingDates;
+          for (const work of report.works) {
+            const key = JSON.stringify([work.platform, work.externalId]);
+            const previous = works.get(key);
+            if (previous) duplicates++;
+            works.set(key, { ...work, sourceUrl: work.sourceUrl ?? previous?.sourceUrl ?? null,
+              views: work.views ?? previous?.views ?? null });
+          }
+        } catch (error) { issues.push(`${file.name}：${messageOf(error)}`); }
+      }
+      setReportIssues(issues);
+      if (!works.size) throw new Error('所选报表中没有可导入的作品。');
       const encoder = new TextEncoder();
       let imported = 0;
       let batch: ImportedWork[] = [];
@@ -283,7 +311,7 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
         size = 16;
       };
       try {
-        for (const item of works) {
+        for (const item of works.values()) {
           const bytes = encoder.encode(JSON.stringify(item)).length + 1;
           if (batch.length === 50 || size + bytes > 80_000) await flush();
           batch.push(item);
@@ -293,11 +321,15 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
       } catch (error) {
         throw new Error(imported ? `已导入 ${imported} 条，继续导入时失败。可以重试整份报告。` : messageOf(error));
       } finally { list.refresh(); }
-      form.reset(); setFile(undefined);
+      form.reset(); setFiles([]);
       const noticeParts = [`已导入或更新 ${imported} 条作品。`];
       if (skipped) noticeParts.push(`跳过 ${skipped} 条平台、作品 ID 或已有链接无效的记录。`);
       if (missingDates) noticeParts.push(`有 ${missingDates} 条缺少发布日期。`);
-      setNotice(noticeParts.join(' '));
+      if (duplicates) noticeParts.push(`合并了 ${duplicates} 条跨文件重复记录。`);
+      if (issues.length) noticeParts.push(`${issues.length} 份报表未导入，见下方原因。`);
+      const summary = noticeParts.join(' ');
+      setNotice(summary);
+      pushToast(summary, 'success');
     });
   }
 
@@ -312,11 +344,11 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
       path={aiPath} settings={ai.data} refresh={ai.refresh} error={ai.error} />}
     <div className="filters" role="group" aria-label="选题台视图">
       <button type="button" className={!showCollection && !saved ? 'active' : ''} aria-pressed={!showCollection && !saved}
-        onClick={() => { setShowCollection(false); setSaved(false); }}>对标作品</button>
+        onClick={() => onView('works')}>对标作品</button>
       <button type="button" className={!showCollection && saved ? 'active' : ''} aria-pressed={!showCollection && saved}
-        onClick={() => { setShowCollection(false); setSaved(true); }}>选题池</button>
+        onClick={() => onView('saved')}>选题池</button>
       <button type="button" className={showCollection ? 'active' : ''} aria-pressed={showCollection}
-        onClick={() => setShowCollection(true)}>采集与导入</button>
+        onClick={() => onView('collection')}>采集与导入</button>
     </div>
     <div className="topic-view" hidden={showCollection}>
     <section className="card form-card form-stack">
@@ -350,13 +382,15 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
         </div>
       </div>
     </section>
-    {ai.data?.provider && <details className="source topic-analysis">
-      <summary>AI 随选分析<span className="count">{activeGoal ? '已开启' : '未开启'}</span></summary>
+    {(ai.data?.provider || canConfigureAi) && <details className="source topic-analysis">
+      <summary>AI 随选分析<span className="count">{!ai.data?.provider ? '待配置' : activeGoal ? '已开启' : '未开启'}</span></summary>
       <div className="form-stack">
-      <TopicAiGoal settings={ai.data} goal={goal} activeGoal={activeGoal} setGoal={setGoal} start={() => {
-        setActiveGoal(goal.trim());
-        if (selectedItem) setSelected(selectedItem.id);
-      }} pause={() => setActiveGoal('')} />
+      <TopicAiGoal settings={ai.data} goal={goal} activeGoal={activeGoal} setGoal={setGoal}
+        canConfigure={canConfigureAi} onConfigure={() => setShowAiSettings(true)}
+        start={() => {
+          setActiveGoal(goal.trim());
+          if (selectedItem) onSelect(selectedItem.id);
+        }} pause={() => setActiveGoal('')} />
       </div>
     </details>}
     <Feedback error={list.error} />
@@ -366,9 +400,10 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
       <div className="split-panel">
         <section className="card item-list">
           <div className="card-heading"><h2>{saved ? '收藏选题' : '对标作品'}</h2><span className="count">{items.length}</span></div>
+          <div className="list-well scroll-shadow-y">
           {items.map((item) => <button key={item.id} type="button"
             className={`list-item${selectedItem?.id === item.id ? ' selected' : ''}`}
-            aria-pressed={selectedItem?.id === item.id} onClick={() => setSelected(item.id)}>
+            aria-pressed={selectedItem?.id === item.id} onClick={() => onSelect(item.id)}>
             <TopicCover key={coverOf(item)} url={coverOf(item)} platform={item.platform} />
             <span className="list-copy"><strong>{titleOf(item)}</strong>
               <small>{topicPlatforms[item.platform]} · {item.creator ?? '作者未记录'}{item.savedAt ? ' · 已收藏' : ''}</small>
@@ -378,6 +413,7 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
               ].filter(Boolean).join(' · ')}</small>
             </span>
           </button>)}
+          </div>
         </section>
         {selectedItem && <TopicDetail key={selectedItem.id} item={selectedItem} path={path + '/' + selectedItem.id}
           refresh={list.refresh} openManuscript={openManuscript} analysis={analysis} activeGoal={activeGoal} notes={notes} />}
@@ -385,18 +421,23 @@ export function Topics({ scope, openManuscript, canConfigureAi }: {
     </> : !list.error && !invalidDates && <section className="card"><Empty icon={Telescope}
       title={saved ? '暂无符合条件的收藏选题' : '暂无符合条件的作品'}>
       {Object.values(filters).some(Boolean) ? <button type="button" className="button" onClick={clearFilters}>查看全部作品</button>
-        : saved ? <button type="button" className="button" onClick={() => setSaved(false)}>浏览对标作品</button>
-          : <button type="button" className="button primary" onClick={() => setShowCollection(true)}>前往采集与导入</button>}
+        : saved ? <button type="button" className="button" onClick={() => onView('works')}>浏览对标作品</button>
+          : <button type="button" className="button primary" onClick={() => onView('collection')}>前往采集与导入</button>}
     </Empty></section>}
     </div>
     <div className="topic-view" hidden={!showCollection}>
     <TopicSources scope={scope} refreshWorks={list.refresh} />
     <section className="card form-card">
       <form className="form-stack" onSubmit={importReport}>
-        <label>CreatorHub 采集报告<input type="file" accept=".xlsx" required aria-describedby={fileHintId}
-          disabled={importAction.busy} onChange={(event) => { setFile(event.currentTarget.files?.[0]); importAction.reset(); setNotice(''); }} /></label>
-        <p className="muted small" id={fileHintId}>支持 CreatorHub 采集任务的「作品」表和监控报表的「作品数据」表。</p>
+        <label>CreatorHub 采集报告<input type="file" accept=".xlsx" multiple required aria-describedby={fileHintId}
+          disabled={importAction.busy} onChange={(event) => {
+            setFiles(Array.from(event.currentTarget.files ?? [])); importAction.reset(); setNotice(''); setReportIssues([]);
+          }} /></label>
+        <p className="muted small" id={fileHintId}>一次最多 10 份 .xlsx，每份最多 8 MiB、1000 行。支持「作品」与「作品数据」表。</p>
         <Feedback error={importAction.error} notice={notice} />
+        {reportIssues.length > 0 && <ul className="content-text" aria-label="未导入的报表">
+          {reportIssues.map((issue, index) => <li key={index}>{issue}</li>)}
+        </ul>}
         <div className="actions"><button type="submit" className="button primary" disabled={importAction.busy}>
           {importAction.busy ? '正在导入…' : '导入作品'}
         </button></div>

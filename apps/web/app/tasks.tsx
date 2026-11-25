@@ -1,23 +1,24 @@
-import { useId, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
-  ArrowLeft, ArrowRight, CalendarDays, ChevronRight, ClipboardCheck, Clock3, Copy, ExternalLink, History,
+  ArrowLeft, ArrowRight, CalendarDays, Check, ChevronRight, ClipboardCheck, Clock3, Copy, ExternalLink, History,
   Images, List, RefreshCw, Search, Send, Table2, X,
 } from 'lucide-react';
 import {
   api, canEdit, canRecord, fileBody, formatTime, platformLabel, platforms, publishPlatformLabel, post, taskLabel, useAction, useResource,
   type Handoff, type Platform, type Role, type Task, type TaskDetail, type TaskStatus, type WorkbenchSummary,
 } from './api';
+import { pushToast } from './toast';
 import { Empty, Feedback, Loading, PageHeader, TaskBadge } from './ui';
 import { roleView } from './workbench';
 
 const primaryFilters = [
-  { value: '', label: '全部' },
-  { value: 'scheduled', label: '待执行' },
-  { value: 'handed_off', label: '待回填' },
-  { value: 'under_review', label: '平台审核中' },
-  { value: 'published', label: '已发布' },
-  { value: 'unknown', label: '待核实' },
-  { value: 'verified', label: '已核实' },
+  { value: '', label: '全部任务', tone: 'neutral' },
+  { value: 'scheduled', label: '待执行', tone: 'violet' },
+  { value: 'handed_off', label: '待回填', tone: 'amber' },
+  { value: 'under_review', label: '平台审核中', tone: 'sky' },
+  { value: 'published', label: '已发布', tone: 'green' },
+  { value: 'unknown', label: '待核实', tone: 'amber' },
+  { value: 'verified', label: '已核实', tone: 'teal' },
 ] as const;
 
 const secondaryFilters = [
@@ -42,15 +43,44 @@ function externalUrl(value: string | null) {
   return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password ? url.href : null;
 }
 
+async function copyText(text: string) {
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall through to execCommand when headless/unfocused blocks Clipboard API.
+    }
+  }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.cssText = 'position:fixed;inset:0;opacity:0;pointer-events:none;';
+  document.body.appendChild(area);
+  area.select();
+  const ok = document.execCommand('copy');
+  area.remove();
+  if (!ok) throw new Error('浏览器暂不支持复制，可选中文案手动复制。');
+}
+
 function Package({ data }: { data: Handoff }) {
   const copy = useAction();
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | undefined>(undefined);
+  useEffect(() => () => { if (timerRef.current !== undefined) window.clearTimeout(timerRef.current); }, []);
+
   return <div className="task-section">
     <div className="section-line">
       <h3><Send size={17} aria-hidden="true" />已审交接包</h3>
-      <button type="button" className="button primary compact" disabled={copy.busy} onClick={() => void copy.run(async () => {
-        if (!navigator.clipboard) throw new Error('浏览器暂不支持复制，可选中文案手动复制。');
-        await navigator.clipboard.writeText(`${data.title}\n\n${data.body}`);
-      }, '已复制标题和正文。')}><Copy size={15} aria-hidden="true" />复制文案</button>
+      <button type="button" className={`button primary compact copy-action${copied ? ' is-confirmed' : ''}`} disabled={copy.busy} onClick={() => void copy.run(async () => {
+        await copyText(`${data.title}\n\n${data.body}`);
+        setCopied(true);
+        if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
+        timerRef.current = window.setTimeout(() => setCopied(false), 1800);
+      }, '已复制标题和正文。')}>
+        {copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
+        {copied ? '已复制' : '复制文案'}
+      </button>
     </div>
     <div className="variant-preview">
       <div className="section-line"><h3>{data.title || '未命名文案'}</h3><span className="version">V{data.version}</span></div>
@@ -67,7 +97,7 @@ function Package({ data }: { data: Handoff }) {
         </a>)}
       </div>}
     </div>
-    <Feedback error={copy.error} notice={copy.notice} />
+    <Feedback error={copy.error} />
   </div>;
 }
 
@@ -382,6 +412,7 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
   const [keyword, setKeyword] = useState('');
   const [platformFilter, setPlatformFilter] = useState<string>('all');
   const [tableView, setTableView] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const cursor = pages.at(-1);
   const search = new URLSearchParams({ limit: '20' });
   if (status) search.set('status', status);
@@ -421,28 +452,39 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
   return <>
     <PageHeader title="发布任务" description={role === 'operator' ? roleView.operator.description
       : canRecord(role) ? '查看交接进度、取得已审文案并记录发布结果。' : '查阅发布进度和回执。'}>
-      <button className="button" onClick={() => { list.refresh(); refreshSummary(); }}><RefreshCw size={16} aria-hidden="true" />
+      <button type="button" className="button" onClick={() => {
+        list.refresh();
+        refreshSummary();
+        setRefreshing(true);
+        window.setTimeout(() => setRefreshing(false), 460);
+        pushToast(listUnavailable ? '正在重试加载任务列表…' : '任务列表已刷新', 'info', 2200);
+      }}><RefreshCw size={16} aria-hidden="true" className={refreshing ? 'is-spinning' : undefined} />
         {listUnavailable ? '重试加载' : '刷新任务'}</button>
     </PageHeader>
-    <div className="filters" aria-label="按任务状态筛选">
+    <div className="kpi-strip scroll-fade-x" role="group" aria-label="按任务状态筛选">
       {primaryFilters.map((filter) => {
         const count = filter.value ? counts && (counts[filter.value] ?? 0) : total;
+        const selectedTab = status === filter.value;
         return (
           <button
-            className={status === filter.value ? 'active' : ''}
+            type="button"
+            className={`kpi-pill tone-${filter.tone}${selectedTab ? ' active' : ''}`}
             key={filter.value}
-            aria-pressed={status === filter.value}
+            aria-pressed={selectedTab}
             disabled={listUnavailable}
             onClick={() => { setStatus(filter.value); changePage([]); }}
           >
-            {filter.label}
-            {count !== undefined && <span className="tab-badge">{count.toLocaleString('zh-CN')}</span>}
+            {count !== undefined && <strong className="kpi-count">{count.toLocaleString('zh-CN')}</strong>}
+            <span className="kpi-meta">
+              <span className="kpi-dot" aria-hidden="true" />
+              <span className="kpi-label">{filter.label}</span>
+            </span>
           </button>
         );
       })}
-      <div className="filters-more">
+      <div className="kpi-more">
         <select
-          className="filter-select"
+          className={`filter-select${secondaryFilters.some((f) => f.value === status) ? ' active' : ''}`}
           aria-label="更多状态筛选"
           value={secondaryFilters.some((f) => f.value === status) ? status : ''}
           onChange={(e) => {
@@ -466,7 +508,13 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
     {!listUnavailable && <div className={tableView ? 'task-table-layout' : 'split-panel'}>
       <section className="card item-list">
         <div className="card-heading">
-          <h2>任务列表</h2>
+          <div className="card-heading-title">
+            <span className="card-heading-icon"><CalendarDays size={16} aria-hidden="true" /></span>
+            <div>
+              <h2>任务明细</h2>
+              <p className="card-heading-sub">按排期顺序查看各平台交接与回执状态</p>
+            </div>
+          </div>
           <div className="actions">
             <span className="count" aria-label={`本页 ${filteredItems.length} 条`}>{filteredItems.length}</span>
             <button type="button" className="button compact" aria-pressed={tableView} onClick={() => setTableView(!tableView)}>
@@ -476,37 +524,43 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
           </div>
         </div>
         <div className="list-toolbar">
-          <div className="search-box">
-            <Search size={14} className="search-icon" aria-hidden="true" />
-            <input
-              type="text"
-              placeholder="搜索本页任务或账号…"
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              aria-label="搜索任务或账号"
-            />
-            {keyword && (
-              <button
-                type="button"
-                className="clear-btn"
-                onClick={() => setKeyword('')}
-                aria-label="清除搜索"
-              >
-                <X size={13} aria-hidden="true" />
-              </button>
-            )}
-          </div>
-          <select
-            className="platform-select"
-            value={platformFilter}
-            onChange={(e) => setPlatformFilter(e.target.value)}
-            aria-label="按发布平台筛选"
-          >
-            <option value="all">全部平台</option>
-            {platforms.map((platform) => <option key={platform} value={platform}>{platform === 'bilibili' ? 'B 站' : platformLabel[platform]}</option>)}
-          </select>
+          <label className="toolbar-field toolbar-search">
+            <span className="toolbar-label">搜索</span>
+            <span className="search-box">
+              <Search size={14} className="search-icon" aria-hidden="true" />
+              <input
+                type="text"
+                placeholder="任务标题或发布账号…"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                aria-label="搜索任务或账号"
+              />
+              {keyword && (
+                <button
+                  type="button"
+                  className="clear-btn"
+                  onClick={() => setKeyword('')}
+                  aria-label="清除搜索"
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+              )}
+            </span>
+          </label>
+          <label className="toolbar-field toolbar-platform">
+            <span className="toolbar-label">平台范围</span>
+            <select
+              className="platform-select"
+              value={platformFilter}
+              onChange={(e) => setPlatformFilter(e.target.value)}
+              aria-label="按发布平台筛选"
+            >
+              <option value="all">全部平台</option>
+              {platforms.map((platform) => <option key={platform} value={platform}>{platform === 'bilibili' ? 'B 站' : platformLabel[platform]}</option>)}
+            </select>
+          </label>
         </div>
-        {list.loading ? <Loading /> : !filteredItems.length ? empty : tableView ? <div className="table-scroll" tabIndex={0}
+        {list.loading ? <Loading /> : !filteredItems.length ? empty : tableView ? <div className="table-well"><div className="table-scroll scroll-fade-x" tabIndex={0}
           role="region" aria-label="可横向滚动的任务明细">
           <table className="task-table" aria-label="发布任务明细">
             <thead><tr>{['任务', '平台', '账号', '计划时间', '状态', '异常'].map((label) => <th scope="col" key={label}>{label}</th>)}</tr></thead>
@@ -520,12 +574,12 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
               <td className="task-table-error">{task.lastError || '—'}</td>
             </tr>)}</tbody>
           </table>
-        </div> : filteredItems.map((task) => <button key={task.id} type="button" className={`list-item ${active === task.id ? 'selected' : ''}`}
+        </div></div> : <div className="list-well scroll-shadow-y">{filteredItems.map((task) => <button key={task.id} type="button" className={`list-item ${active === task.id ? 'selected' : ''}`}
           aria-pressed={active === task.id} onClick={() => chooseTask(task.id)}>
           <span className="list-icon"><CalendarDays size={17} aria-hidden="true" /></span>
           <span className="list-copy"><strong>{task.variant.title?.trim() || '未命名任务'}</strong><small>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))} · {task.account.displayName?.trim() || '未指定账号'} · {formatTime(task.scheduledAt)}</small></span>
           <TaskBadge status={task.status} /><ChevronRight className="row-chevron" size={14} aria-hidden="true" />
-        </button>)}
+        </button>)}</div>}
         {(cursor || list.data?.nextCursor) && <div className="pagination">
           <button className="icon-button" aria-label="上一页" disabled={!cursor} onClick={() => changePage(pages.slice(0, -1))}><ArrowLeft size={17} aria-hidden="true" /></button>
           <small>第 {pages.length + 1} 页</small>
@@ -536,6 +590,7 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
       {active ? <TaskDetails key={active} id={active} scope={scope} role={role} people={people} onRecorded={(title) => {
         if (status === 'handed_off') setSelected((current) => current === active ? '' : current);
         setRecordedTitle(title);
+        pushToast(title, 'success');
         list.refresh();
         refreshSummary();
       }} />

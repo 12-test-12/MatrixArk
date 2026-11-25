@@ -88,7 +88,7 @@ function NewManuscript({ scope, drafts, draftKey, onSave, onCancel }: {
       const { id } = await post<{ id: string }>(scope + '/manuscripts', body);
       if (drafts.get(draftKey) === submitted) drafts.delete(draftKey);
       onSave(id);
-    });
+    }, '原稿已创建。');
   }
   return <section className="card form-card detail-pane draft-compose">
     <div className="draft-compose-grid"><form className="form-stack" onSubmit={submit} onInput={(event) => {
@@ -159,7 +159,7 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
       });
       if (drafts.get(draftKey) === submitted) drafts.delete(draftKey);
       onSave();
-    });
+    }, '版本修改已保存。');
   }
   const available = assets.filter((asset) => !assetIds.includes(asset.id));
   const previewCover = firstImageIsCover ? assetIds[0] : coverAssetId;
@@ -254,7 +254,7 @@ function Schedule({ scope, variants, accounts, onSchedule, openAccounts }: {
       });
       if (!response.items[0]) throw new Error('未收到任务编号。');
       onSchedule(response.items[0].id);
-    });
+    }, '发布排期已创建。');
   }
   return <div className="schedule">
     <h3><CalendarPlus size={17} aria-hidden="true" />安排发布</h3>
@@ -355,7 +355,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
       check.refresh();
       refresh();
       onReview?.(`「${manuscript.title}」的${platformOfNotice(snapshot.platform, Boolean(snapshot.videoAsset))}版本已确认。`);
-    });
+    }, '已确认审核，可继续排期发布。');
   }
   function reject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -368,7 +368,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
       setRejecting(false);
       refresh();
       onReview?.(`「${manuscript.title}」的${platformOfNotice(snapshot.platform, Boolean(snapshot.videoAsset))}版本已退回。`);
-    });
+    }, '已退回给编辑修改。');
   }
   function upload(files: File[]) {
     if (!files.length) return;
@@ -607,7 +607,7 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
     <div className="split-panel">
       <section className="card item-list">
         <div className="card-heading"><h2>{showArchived ? '已归档原稿' : '原稿列表'}</h2><span className="count">{items.length}</span></div>
-        {list.loading ? <Loading /> : items.length > 0 ? items.map((item) => {
+        {list.loading ? <Loading /> : items.length > 0 ? <div className="list-well scroll-shadow-y">{items.map((item) => {
           const variants = item.variants.filter(({ status }) => status !== 'superseded');
           const pending = variants.filter(({ status, returned }) => status === 'draft' && !returned).length;
           const returned = variants.filter((variant) => variant.returned).length;
@@ -621,7 +621,7 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
               ? `${variants.length} 个版本 · ${review || '已审核'}` : '未生成版本'}</small></span>
             <ChevronRight className="row-chevron" size={15} aria-hidden="true" />
           </button>;
-        }) : !listError && <Empty icon={FileText} title={emptyTitle} />}
+        })}</div> : !listError && <Empty icon={FileText} title={emptyTitle} />}
         {(cursor || list.data?.nextCursor) && <div className="pagination" aria-label="稿件分页">
           <button type="button" className="icon-button" aria-label="上一页" disabled={!cursor}
             onClick={() => changePage(pages.slice(0, -1))}><ArrowLeft size={17} aria-hidden="true" /></button>

@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { BarChart3 } from 'lucide-react';
 import { api, ApiError, canRecord, formatTime, post, publishPlatformLabel, useAction, useResource, type Account, type Role, type Task } from './api';
+import { pushToast } from './toast';
 import { Empty, Feedback, Loading, PageHeader } from './ui';
 
 const fields = [
@@ -199,7 +200,7 @@ export function Performance({ scope, role, initialAccount, openTask }: {
 
   return <>
     <PageHeader title="作品成效" description="查看已发布作品的阅读、播放和互动，按平台、账号或内容类型筛选。">
-      <button type="button" className="button" onClick={result.refresh}>刷新列表</button>
+      <button type="button" className="button" onClick={() => { result.refresh(); pushToast('成效数据已刷新', 'info', 2200); }}>刷新列表</button>
     </PageHeader>
     <div className="performance-filters">
       <label>平台<select value={platform} onChange={(event) => {

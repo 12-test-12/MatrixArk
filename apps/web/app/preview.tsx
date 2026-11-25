@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { ArrowRight, BarChart3, CalendarDays, ChevronRight, ClipboardCheck, Copy, FileText, History, Radio, Search, Send, X } from 'lucide-react';
+import { ArrowRight, BarChart3, CalendarDays, Check, ChevronRight, ClipboardCheck, Copy, FileText, History, Radio, Search, Send, X } from 'lucide-react';
 import { platformLabel, platforms, roleLabel, type Platform, type Role, type TaskStatus } from './api';
+import { pushToast } from './toast';
 import { Empty, PageHeader, PlatformIcon, TaskBadge } from './ui';
 import { roleView, Workbench, type Section } from './workbench';
 
@@ -117,7 +118,7 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
               {keyword && (
                 <button
                   type="button"
-                  className="clear-button"
+                  className="clear-btn"
                   onClick={() => setKeyword('')}
                   aria-label="清除搜索"
                 >
@@ -135,11 +136,31 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
     </>;
   }
 
-  function handleCopy() {
+  async function handleCopy() {
+    const text = active?.manuscript.body ?? '';
+    let copiedOk = false;
     if (typeof navigator !== 'undefined' && navigator.clipboard) {
-      void navigator.clipboard.writeText(active?.manuscript.body ?? '');
+      try {
+        await navigator.clipboard.writeText(text);
+        copiedOk = true;
+      } catch {
+        // Fallback below when unfocused
+      }
+    }
+    if (!copiedOk && typeof document !== 'undefined') {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.cssText = 'position:fixed;inset:0;opacity:0;pointer-events:none;';
+      document.body.appendChild(area);
+      area.select();
+      copiedOk = document.execCommand('copy');
+      area.remove();
+    }
+    if (copiedOk) {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      pushToast('已复制正文文案。', 'success');
+      window.setTimeout(() => setCopied(false), 1800);
     }
   }
 
@@ -165,7 +186,7 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
             {keyword && (
               <button
                 type="button"
-                className="clear-button"
+                className="clear-btn"
                 onClick={() => setKeyword('')}
                 aria-label="清除搜索"
               >
@@ -184,6 +205,7 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
             <option value="bilibili">哔哩哔哩</option>
           </select>
         </div>
+        <div className="list-well scroll-shadow-y">
         {items.map(({ manuscript, task }) => <button type="button" key={manuscript.id}
           className={`list-item ${active.manuscript.id === manuscript.id ? 'selected' : ''}`}
           aria-pressed={active.manuscript.id === manuscript.id} onClick={() => setSelection(manuscript.id)}>
@@ -196,8 +218,9 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
             {manuscript.approved ? '已审核' : '待审核'}
           </span>}<ChevronRight className="row-chevron" size={15} aria-hidden="true" />
         </button>)}
+        </div>
       </section>
-      <section className="card detail-pane task-detail">
+      <section key={active.manuscript.id} className="card detail-pane task-detail">
         <div className="detail-heading">
           <div className="detail-icon"><Icon size={22} aria-hidden="true" /></div>
           <div>
@@ -216,20 +239,20 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
           <div className="task-section">
             <div className="section-line">
               <h3><Send size={17} aria-hidden="true" />{active.task ? '已审交接包' : '平台版本'}</h3>
-              <span className="version">V{active.manuscript.version}</span>
+              <button
+                type="button"
+                className={`button primary compact copy-action${copied ? ' is-confirmed' : ''}`}
+                onClick={() => void handleCopy()}
+                title="一键复制交接文案"
+              >
+                {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+                {copied ? '已复制' : '复制文案'}
+              </button>
             </div>
             <div className="variant-preview">
-              <div className="preview-top">
-                <span className="version">V{active.manuscript.version} · 正文文案</span>
-                <button
-                  type="button"
-                  className="button primary compact"
-                  onClick={handleCopy}
-                  title="一键复制交接文案"
-                >
-                  <Copy size={13} aria-hidden="true" />
-                  {copied ? '已复制！' : '复制文案'}
-                </button>
+              <div className="section-line">
+                <h3>{active.manuscript.title}</h3>
+                <span className="version">V{active.manuscript.version}</span>
               </div>
               <p className="content-text">{active.manuscript.body}</p>
             </div>

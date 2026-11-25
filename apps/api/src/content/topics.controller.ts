@@ -1,4 +1,4 @@
-import { Body, Controller, Get, NotFoundException, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, NotFoundException, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { createManuscriptSchema } from '@matrixark/shared';
 import type { Prisma, Role } from '@prisma/client';
 import { z } from 'zod';
@@ -12,6 +12,8 @@ import { TopicAiService, topicAiRequestSchema, topicAiSettingSchema } from './to
 import { TopicCollector } from './topic-collector.service';
 import { getFeed, topicProviders, topicSourceSchema } from './topic-feeds';
 import { hasValidTopicEvidence, screenLegacyTopics } from './topic-visibility';
+import { topicChange } from './topic-change';
+import { topicInsights } from './topic-insights';
 
 const referencePlatforms = z.enum(['bilibili', 'xiaohongshu', 'douyin', 'kuaishou', 'shipinhao', 'rednote', 'tiktok', 'instagram', 'twitter', ...topicProviders]);
 const mediaType = z.enum(['video', 'images', 'text', 'other']);
@@ -33,6 +35,7 @@ const work = z.object({
   publishedOn: day.nullable(),
   likes: metric,
   comments: metric,
+  views: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
 }).strict();
 const importSchema = z.object({ works: z.array(work).min(1).max(50) }).strict();
 const emptyToUndefined = (v: unknown) => (typeof v === 'string' && !v.trim() ? undefined : v);
@@ -67,21 +70,36 @@ export class TopicsController {
     return this.ai.configure(workspaceId, parse(topicAiSettingSchema, body));
   }
 
+  @Post('ai/test')
+  testAi(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Body() body: unknown) {
+    assertCan(role, 'workspace:settings');
+    return this.ai.testConnection(workspaceId, parse(topicAiSettingSchema, body));
+  }
+
   @Post('works/:id/analyze')
-  analyze(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Param('id') id: string, @Body() body: unknown) {
+  analyze(@CurrentRole() role: Role, @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string, @Param('id') id: string, @Body() body: unknown) {
     assertCan(role, 'content:write');
     const { goal } = parse(topicAiRequestSchema, body);
-    return this.ai.analyze(workspaceId, id, goal);
+    return this.ai.analyze(workspaceId, id, user.id, goal);
+  }
+
+  @Get('works/:id/analyses')
+  analyses(@CurrentRole() role: Role, @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
+    assertCan(role, 'content:write');
+    return this.ai.history(workspaceId, id, user.id);
   }
 
   @Get('sources')
   sources(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string) {
     assertCan(role, 'content:write');
-    return this.prisma.topicSource.findMany({ where: { workspaceId }, orderBy: [{ provider: 'asc' }, { target: 'asc' }] });
+    return this.prisma.topicSource.findMany({ where: { workspaceId, deletedAt: null }, orderBy: [{ provider: 'asc' }, { target: 'asc' }] });
   }
 
   @Post('sources')
-  addSource(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Body() body: unknown) {
+  addSource(@CurrentRole() role: Role, @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string, @Body() body: unknown) {
     assertCan(role, 'content:write');
     const input = parse(topicSourceSchema, body);
     const target = input.provider === 'google-trends' ? input.target.toUpperCase()
@@ -89,31 +107,75 @@ export class TopicsController {
     const source = { ...input, target };
     getFeed(source);
     const data = { workspaceId, ...source };
-    return this.prisma.topicSource.upsert({
-      where: { workspaceId_provider_target_keyword: data }, create: data, update: {},
+    return this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.topicSource.createMany({ data, skipDuplicates: true });
+      const restored = count ? null : await tx.topicSource.updateMany({
+        where: { ...data, deletedAt: { not: null } },
+        data: { deletedAt: null, enabled: true, nextRunAt: new Date(), leaseUntil: null, lastAttemptAt: null, lastError: null },
+      });
+      const item = await tx.topicSource.findUniqueOrThrow({ where: { workspaceId_provider_target_keyword: data } });
+      if (count || restored?.count) {
+        await tx.topicChange.create({ data: topicChange(workspaceId, 'source', item.id, count ? 'source_created' : 'source_restored', user) });
+      }
+      return item;
     });
   }
 
   @Patch('sources/:id')
-  async switchSource(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Param('id') id: string, @Body() body: unknown) {
+  async switchSource(@CurrentRole() role: Role, @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string, @Param('id') id: string, @Body() body: unknown) {
     assertCan(role, 'content:write');
     const { enabled } = parse(z.object({ enabled: z.boolean() }).strict(), body);
-    const result = await this.prisma.topicSource.updateMany({
-      where: { workspaceId, id, enabled: { not: enabled } },
-      data: { enabled, leaseUntil: null, ...(enabled && { nextRunAt: new Date(), lastAttemptAt: null }) },
+    return this.prisma.$transaction(async (tx) => {
+      const result = await tx.topicSource.updateMany({
+        where: { workspaceId, id, deletedAt: null, enabled: { not: enabled } },
+        data: { enabled, leaseUntil: null, ...(enabled && { nextRunAt: new Date(), lastAttemptAt: null }) },
+      });
+      if (result.count) await tx.topicChange.create({ data: topicChange(workspaceId, 'source', id, enabled ? 'source_resumed' : 'source_paused', user) });
+      else if (!await tx.topicSource.count({ where: { workspaceId, id, deletedAt: null } })) throw new NotFoundException('采集任务不存在');
+      return { ok: true };
     });
-    if (!result.count && !await this.prisma.topicSource.count({ where: { workspaceId, id } })) {
-      throw new NotFoundException('采集任务不存在');
-    }
-    return { ok: true };
+  }
+
+  @Delete('sources/:id')
+  deleteSource(@CurrentRole() role: Role, @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
+    assertCan(role, 'content:write');
+    return this.prisma.$transaction(async (tx) => {
+      const removed = await tx.topicSource.updateMany({
+        where: { workspaceId, id, deletedAt: null },
+        data: { deletedAt: new Date(), enabled: false, leaseUntil: null },
+      });
+      if (removed.count) await tx.topicChange.create({ data: topicChange(workspaceId, 'source', id, 'source_deleted', user) });
+      else if (!await tx.topicSource.count({ where: { workspaceId, id } })) throw new NotFoundException('采集任务不存在');
+      return { ok: true };
+    });
   }
 
   @Post('sources/:id/sync')
-  async syncSource(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
+  async syncSource(@CurrentRole() role: Role, @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
     assertCan(role, 'content:write');
-    const source = await this.prisma.topicSource.findFirst({ where: { id, workspaceId } });
+    const source = await this.prisma.topicSource.findFirst({ where: { id, workspaceId, deletedAt: null } });
     if (!source) throw new NotFoundException('采集任务不存在');
-    return this.collector.collect(source, true);
+    return this.collector.collect(source, true, user);
+  }
+
+  @Get('works/:id/insights')
+  insights(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
+    assertCan(role, 'content:write');
+    return topicInsights(this.prisma, workspaceId, id);
+  }
+
+  @Get(':entity/:id/changes')
+  async changes(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string,
+    @Param('entity') entity: string, @Param('id') id: string) {
+    assertCan(role, 'content:write');
+    if (entity !== 'works' && entity !== 'sources') throw new NotFoundException();
+    return this.prisma.topicChange.findMany({
+      where: { workspaceId, entityType: entity === 'works' ? 'work' : 'source', entityId: id },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 30,
+    });
   }
 
   @Get('works')
@@ -151,36 +213,53 @@ export class TopicsController {
   }
 
   @Post('works/import')
-  async importWorks(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Body() body: unknown) {
+  async importWorks(@CurrentRole() role: Role, @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string, @Body() body: unknown) {
     assertCan(role, 'content:write');
     const { works } = parse(importSchema, body);
     await screenLegacyTopics(this.prisma, workspaceId);
     const records = new Map(works.map((item) => [JSON.stringify([item.platform, item.externalId]), item]));
     const importedAt = new Date();
-    await this.prisma.$transaction([...records.keys()].sort().map((key) => {
-      const item = records.get(key)!;
-      const data = { ...item, publishedOn: item.publishedOn ? new Date(item.publishedOn) : null, importedAt };
-      return this.prisma.topicWork.upsert({
-        where: { workspaceId_platform_externalId: { workspaceId, platform: item.platform, externalId: item.externalId } },
-        create: { workspaceId, ...data, origin: 'report', legacyRuleRejected: false },
-        update: { ...data, legacyRuleRejected: false, sourceUrl: item.sourceUrl ?? undefined },
-        select: { id: true },
-      });
-    }));
+    await this.prisma.$transaction(async (tx) => {
+      const changes = [];
+      for (const key of [...records.keys()].sort()) {
+        const { views, ...item } = records.get(key)!;
+        const data = { ...item, views: views == null ? undefined : BigInt(views),
+          publishedOn: item.publishedOn ? new Date(item.publishedOn) : null, importedAt };
+        const result = await tx.topicWork.upsert({
+          where: { workspaceId_platform_externalId: { workspaceId, platform: item.platform, externalId: item.externalId } },
+          create: { workspaceId, ...data, origin: 'report', legacyRuleRejected: false },
+          update: { ...data, legacyRuleRejected: false, sourceUrl: item.sourceUrl ?? undefined },
+          select: { id: true },
+        });
+        changes.push(topicChange(workspaceId, 'work', result.id, 'report_imported', user));
+      }
+      await tx.topicChange.createMany({ data: changes });
+    });
     return { imported: records.size };
   }
 
   @Patch('works/:id')
-  async save(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Param('id') id: string, @Body() body: unknown) {
+  async save(@CurrentRole() role: Role, @CurrentUser() user: SessionUser,
+    @Param('workspaceId') workspaceId: string, @Param('id') id: string, @Body() body: unknown) {
     assertCan(role, 'content:write');
     const { saved, note } = parse(saveSchema, body);
     await screenLegacyTopics(this.prisma, workspaceId);
-    const { count } = await this.prisma.topicWork.updateMany({
-      where: { id, workspaceId, legacyRuleRejected: false },
-      data: { savedAt: saved === undefined ? undefined : saved ? new Date() : null, note },
+    return this.prisma.$transaction(async (tx) => {
+      const [previous] = await tx.$queryRaw<{ savedAt: Date | null; note: string | null }[]>`
+        SELECT "savedAt", "note" FROM "TopicWork"
+        WHERE "id" = ${id} AND "workspaceId" = ${workspaceId} AND "legacyRuleRejected" = false FOR UPDATE`;
+      if (!previous) throw new NotFoundException('参考作品不存在');
+      const savedChanged = saved !== undefined && saved !== Boolean(previous.savedAt);
+      const noteChanged = note !== undefined && note !== previous.note;
+      if (savedChanged || noteChanged) {
+        await tx.topicWork.update({ where: { id }, data: { savedAt: savedChanged ? saved ? new Date() : null : undefined, note } });
+        const details = { ...(savedChanged && { saved: { before: Boolean(previous.savedAt), after: saved! } }),
+          ...(noteChanged && { note: { before: previous.note, after: note! } }) };
+        await tx.topicChange.create({ data: topicChange(workspaceId, 'work', id, 'work_edited', user, details) });
+      }
+      return { ok: true };
     });
-    if (!count) throw new NotFoundException('参考作品不存在');
-    return { ok: true };
   }
 
   @Post('works/:id/manuscript')
@@ -193,9 +272,13 @@ export class TopicsController {
       where: { id, workspaceId, legacyRuleRejected: false }, select: { sourceUrl: true },
     });
     if (!reference) throw new NotFoundException('参考作品不存在');
-    return this.prisma.manuscript.create({
-      data: { ...input, workspaceId, createdById: user.id, referenceUrl: reference.sourceUrl },
-      select: { id: true },
+    return this.prisma.$transaction(async (tx) => {
+      const draft = await tx.manuscript.create({
+        data: { ...input, workspaceId, createdById: user.id, referenceUrl: reference.sourceUrl },
+        select: { id: true },
+      });
+      await tx.topicChange.create({ data: topicChange(workspaceId, 'work', id, 'draft_created', user, { manuscriptId: draft.id }) });
+      return draft;
     });
   }
 }

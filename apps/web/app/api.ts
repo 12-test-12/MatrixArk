@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { pushToast } from './toast';
 
 export type Role = 'owner' | 'editor' | 'reviewer' | 'operator' | 'viewer';
 export type Workspace = { id: string; name: string; role: Role };
@@ -186,7 +187,7 @@ export function useAction() {
     running.current = true;
     reset();
     setBusy(true);
-    try { await work(); setNotice(success); }
+    try { await work(); setNotice(success); if (success) pushToast(success, 'success'); }
     catch (failure) { setError(messageOf(failure)); }
     finally { running.current = false; setBusy(false); }
   }

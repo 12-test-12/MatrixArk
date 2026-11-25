@@ -1,0 +1,1 @@
+ALTER TABLE "TopicSource" ADD COLUMN "deletedAt" TIMESTAMPTZ(3);

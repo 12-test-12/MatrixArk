@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { flushSync } from 'react-dom';
 import { BarChart3, Bell, CalendarDays, ChevronRight, CircleUserRound, FileText, Telescope, UserRoundCog, UsersRound } from 'lucide-react';
 import type { Role, TaskStatus } from './api';
 import { ThemePicker } from './theme-picker';
@@ -44,7 +45,9 @@ export function Workbench({ sections, section, onSection, workspacePicker, profi
       };
       if (typeof doc.startViewTransition === 'function') {
         const transition = doc.startViewTransition(() => {
-          onSection(id);
+          flushSync(() => {
+            onSection(id);
+          });
         });
         transition?.finished?.finally?.(() => {
           doc.getElementById('workspace-content')?.focus();
@@ -84,12 +87,14 @@ export function Workbench({ sections, section, onSection, workspacePicker, profi
       {profile}
     </aside>
     <div className="shell-body">
-      <header className="topbar">
-        <div className="breadcrumb"><span>工作台</span>{section && <>
-          <ChevronRight size={15} aria-hidden="true" /><strong>{navigation[section].label}</strong>
-        </>}</div>
-        <div className="topbar-actions"><ThemePicker />{topbar}</div>
-      </header>
+      <div className="topbar-sticky">
+        <header className="topbar">
+          <div className="breadcrumb"><span>工作台</span>{section && <>
+            <ChevronRight size={15} aria-hidden="true" /><strong>{navigation[section].label}</strong>
+          </>}</div>
+          <div className="topbar-actions"><ThemePicker />{topbar}</div>
+        </header>
+      </div>
       <main id="workspace-content" tabIndex={-1} className="main">{children}</main>
     </div>
   </div>;

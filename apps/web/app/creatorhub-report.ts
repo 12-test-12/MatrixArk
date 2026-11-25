@@ -35,6 +35,7 @@ export type ImportedWork = {
   publishedOn: string | null;
   likes: number | null;
   comments: number | null;
+  views?: number | null;
 };
 export type TopicWork = ImportedWork & {
   id: string;
@@ -42,7 +43,6 @@ export type TopicWork = ImportedWork & {
   savedAt: string | null;
   note: string | null;
   coverUrl?: string | null;
-  views?: number | null;
   origin?: 'feed' | 'report' | 'legacy';
   matches?: {
     field: 'source' | 'title' | 'summary';
@@ -63,11 +63,11 @@ function identifier(value: unknown) {
   return result.length <= 128 ? result : '';
 }
 
-function metric(value: unknown) {
-  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 2_147_483_647) return value;
+function metric(value: unknown, limit = 2_147_483_647) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= limit) return value;
   if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
     const num = Number(value.trim());
-    if (Number.isSafeInteger(num) && num >= 0 && num <= 2_147_483_647) return num;
+    if (Number.isSafeInteger(num) && num >= 0 && num <= limit) return num;
   }
   return null;
 }
@@ -154,15 +154,18 @@ export function parseCreatorHubWorks(rows: ReadonlyArray<ReadonlyArray<unknown>>
     const day = read('发布时间') ?? read('发布日期') ?? read('发表时间');
     const publishedOn = parseDateCell(day);
     if (!publishedOn) missingDates++;
+    const description = text(read('描述') ?? read('作品描述'), 2000);
+    const title = text(read('标题') ?? read('作品标题'), 200);
 
     works.set(JSON.stringify([platform, externalId]), {
       platform, externalId, mediaType, sourceUrl: url?.href ?? null,
       creatorId: identifier(read('作者ID')) || null,
       creator: text(read('作者') ?? read('监控目标'), 120) || null,
-      description: text(read('描述') ?? read('作品描述'), 2000),
+      description: title && description.split('\n', 1)[0] !== title ? text([title, description].filter(Boolean).join('\n'), 2000) : description,
       publishedOn,
       likes: metric(read('点赞数')),
       comments: metric(read('平台评论数') ?? read('评论数')),
+      views: metric(read('播放量') ?? read('播放数') ?? read('观看次数'), Number.MAX_SAFE_INTEGER),
     });
   }
   return { works: [...works.values()], skipped, missingDates };

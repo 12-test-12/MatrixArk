@@ -484,6 +484,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     const fetch = globalThis.fetch;
     let requests = 0;
     let limited = false;
+    let waitingForDelete;
     globalThis.fetch = async (input, options) => {
       if (input instanceof URL && input.origin === 'https://www.youtube.com') {
         assert.equal(input.searchParams.get('channel_id'), 'UCBa659QWEk1AI4Tg--mrJ2A');
@@ -501,6 +502,13 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       if (!(input instanceof URL) || input.origin !== 'https://mastodon.social') return fetch(input, options);
       assert.equal(input.pathname, '/tags/%E9%AA%91%E8%A1%8C.rss');
       requests++;
+      if (waitingForDelete) {
+        waitingForDelete.started();
+        await waitingForDelete.release;
+        return new Response(`<rss version="2.0"><channel><title>骑行</title>
+          <item><title>最新地铁接驳</title><link>https://mastodon.social/@other/300</link></item>
+        </channel></rss>`);
+      }
       if (limited) return new Response(null, { status: 429 });
       return new Response(`<rss version="2.0"><channel><title>骑行</title>
         <item><title>地铁接驳怎么骑</title><link>https://mastodon.social/@other/100</link></item>
@@ -543,6 +551,37 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await call(sources + '/' + source.id, { cookie, method: 'PATCH', body: { enabled: false } });
     await rerun();
     assert.equal(requests, 3);
+
+    const sourcePath = sources + '/' + source.id;
+    await call(foreign + '/topics/sources/' + source.id, { cookie: otherCookie, method: 'DELETE', status: 404 });
+    await call(sourcePath, { cookie, method: 'PATCH', body: { enabled: true } });
+    const reachedFeed = Promise.withResolvers();
+    const releaseFeed = Promise.withResolvers();
+    waitingForDelete = { started: reachedFeed.resolve, release: releaseFeed.promise };
+    const inFlight = post(sync, {});
+    try {
+      await Promise.race([reachedFeed.promise, inFlight.then(() => { throw new Error('采集提前结束'); })]);
+      await call(sourcePath, { cookie, method: 'DELETE' });
+      await call(sourcePath, { cookie, method: 'DELETE' });
+    } finally { releaseFeed.resolve(); }
+    assert.equal((await inFlight).data.status, 'busy');
+    assert.equal((await call(sources, { cookie })).data.length, 0);
+    await post(sync, {}, 404);
+    await call(sourcePath, { cookie, method: 'PATCH', body: { enabled: true }, status: 404 });
+    await rerun();
+    assert.equal(requests, 4);
+    const retained = (await read()).data;
+    assert.equal(retained.total, 1);
+    assert.equal(retained.items[0].matches[0].source.id, source.id);
+    const history = (await call(sourcePath + '/changes', { cookie })).data;
+    const deletions = history.filter(({ action }) => action === 'source_deleted');
+    assert.equal(deletions.length, 1);
+    assert.equal(deletions[0].actorId, owner.user.id);
+    const readded = (await post(sources, { provider: 'mastodon', target: '#骑行', keyword: '地铁' })).data;
+    assert.equal(readded.id, source.id);
+    assert.equal(readded.enabled, true);
+    assert.equal(readded.deletedAt, null);
+    await call(sourcePath, { cookie, method: 'DELETE' });
 
     const youtube = (await post(sources, { provider: 'youtube', target: 'UCBa659QWEk1AI4Tg--mrJ2A', keyword: '地铁' })).data;
     await post(sources + '/' + youtube.id + '/sync', {});
@@ -599,7 +638,42 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     });
   });
 
-  await t.test('选题 AI 按需求分析、校验原文引用，并隔离模型密钥', async (aiTest) => {
+  await t.test('选题表现按同类样本计算，跨平台匹配和操作记录限当前工作室', async () => {
+    const works = own + '/topics/works';
+    const title = '周末骑行：两小时的城市路线';
+    const base = { creatorId: 'cycling-example', creator: '示例作者', mediaType: 'video', publishedOn: '2026-11-23',
+      likes: null, comments: null, sourceUrl: null, platform: 'douyin' };
+    const tracked = { ...base, externalId: 'riding-primary', description: title, views: 980 };
+    await post(works + '/import', { works: [
+      tracked, ...[100, 120, 180].map((views, index) => ({ ...base, externalId: 'riding-peer-' + index,
+        description: '同作者对照作品 ' + index, views })),
+      { ...base, platform: 'kuaishou', externalId: 'riding-possible', description: '周末骑行｜两小时的城市路线', views: 5 },
+      { ...base, platform: 'xiaohongshu', externalId: 'riding-old', description: title, publishedOn: '2026-11-10', views: 9 },
+    ] });
+    await call(foreign + '/topics/works/import', { cookie: otherCookie, method: 'POST', status: 201,
+      body: { works: [{ ...tracked, platform: 'instagram', externalId: 'from-another-workspace' }] } });
+    const { data: { items } } = await call(works + '?platform=douyin', { cookie });
+    const item = items.find(({ externalId }) => externalId === tracked.externalId);
+    const itemPath = works + '/' + item.id;
+    const { data } = await call(itemPath + '/insights', { cookie });
+    assert.equal(data.heat.signal, 'high');
+    assert.equal(data.heat.peers, 3);
+    assert.equal(data.heat.median, 120);
+    assert.deepEqual(data.matches.map(({ platform }) => platform), ['kuaishou']);
+    assert.equal((await call(foreign + '/topics/works/' + item.id + '/insights', { cookie: otherCookie, status: 404 })).data.statusCode, 404);
+    for (const note of ['初版备注', '更新备注', '更新备注']) {
+      await call(itemPath, { cookie, method: 'PATCH', body: { note, saved: true } });
+    }
+    const { data: history } = await call(itemPath + '/changes', { cookie });
+    assert.equal(history.length, 3);
+    assert.equal(history[0].actorEmail, owner.user.email);
+    assert.deepEqual(history[0].details.note, { before: '初版备注', after: '更新备注' });
+    assert.equal(history[1].details.saved.after, true);
+    assert.equal(history[2].action, 'report_imported');
+    assert.deepEqual((await call(foreign + '/topics/works/' + item.id + '/changes', { cookie: otherCookie })).data, []);
+  });
+
+  await t.test('选题 AI 按需求分析、保存并复用结果，隔离成员历史和模型密钥', async (aiTest) => {
     const url = own + '/topics/ai';
     const apiKey = 'sk-unpublished-fixture-key';
     const item = await prisma.topicWork.create({ data: {
@@ -608,50 +682,122 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       note: '私有备注',
     } });
     const endpoint = own + '/topics/works/' + item.id + '/analyze';
+    const historyUrl = own + '/topics/works/' + item.id + '/analyses';
     const goal = '为小商家做一期 AI 工具实测';
     const member = await prisma.membership.create({ data: { userId: other.user.id, workspaceId, role: 'editor' } });
     aiTest.after(() => prisma.membership.delete({ where: { id: member.id } }));
     assert.equal((await call(url, { cookie })).data.provider, null);
+    assert.deepEqual((await call(historyUrl, { cookie })).data, []);
     await post(endpoint, { goal }, 409);
     await call(url, { cookie: otherCookie, method: 'PATCH', body: { provider: 'deepseek', apiKey }, status: 403 });
-    const { data: config } = await call(url, { cookie, method: 'PATCH', body: { provider: 'deepseek', apiKey } });
+    const { data: config } = await call(url, { cookie, method: 'PATCH',
+      body: { provider: 'deepseek', endpoint: 'https://api.deepseek.com', apiKey } });
     assert.deepEqual(config, {
-      provider: 'deepseek', model: 'deepseek-chat',
+      provider: 'deepseek', model: 'deepseek-flash',
       endpoint: 'https://api.deepseek.com/chat/completions', isLocal: false,
     });
     const encrypted = await prisma.topicAiSetting.findUnique({ where: { workspaceId } });
     assert.ok(encrypted.keyCiphertext && !encrypted.keyCiphertext.includes(apiKey));
+    const { encryptPlatformSecret } = await import('../dist/accounts/platform-app.js');
+    const legacyCiphertext = encryptPlatformSecret(['topic-ai', workspaceId, 'deepseek'], JSON.stringify({
+      apiKey, endpoint: 'https://api.deepseek.com', model: config.model,
+    }));
+    await prisma.topicAiSetting.update({ where: { workspaceId }, data: { keyCiphertext: legacyCiphertext } });
+    assert.equal((await call(url, { cookie })).data.endpoint, 'https://api.deepseek.com/chat/completions');
     await call(foreign + '/topics/works/' + item.id + '/analyze', { cookie: otherCookie, method: 'POST', body: { goal }, status: 404 });
+    await call(foreign + '/topics/works/' + item.id + '/analyses', { cookie: otherCookie, status: 404 });
     assert.equal((await call(foreign + '/topics/ai', { cookie: otherCookie })).data.provider, null);
 
     const fetch = globalThis.fetch;
     let hallucination = false;
     let badKey = false;
+    let probeStatus = 200;
+    let probeCount = 0;
+    let analysisRequests = 0;
+    let probeBody = { choices: [{ finish_reason: 'stop', message: { content: 'OK, the service is reachable.' } }] };
+    const analysisReplies = [];
     globalThis.fetch = async (url, options) => {
       if (url !== 'https://api.deepseek.com/chat/completions') return fetch(url, options);
       assert.equal(options.headers.authorization, 'Bearer ' + apiKey);
       assert.equal(options.redirect, 'error');
       const request = JSON.parse(options.body);
+      assert.equal(request.stream, false);
+      assert.deepEqual(request.thinking, { type: 'disabled' });
+      if (request.messages.length === 1) {
+        probeCount++;
+        assert.equal(request.max_tokens, 128);
+        assert.equal(request.response_format, undefined);
+        assert.ok(!options.body.includes(item.note) && !options.body.includes(item.description));
+        return probeStatus === 200
+          ? Response.json(probeBody)
+          : Response.json({ error: { message: 'upstream-internal-marker' } }, { status: probeStatus });
+      }
+      analysisRequests++;
       const payload = JSON.parse(request.messages[1].content);
-      assert.equal(payload.goal, goal);
+      assert.ok(payload.goal.startsWith(goal));
       assert.equal(payload.summary, 'A flight training demonstration');
       assert.ok(!options.body.includes(item.note));
       if (badKey) return new Response(null, { status: 401 });
+      const next = analysisReplies.shift();
+      assert.deepEqual(request.response_format, next?.plain ? undefined : { type: 'json_object' });
+      if (next && 'content' in next) {
+        return Response.json({ choices: [{ finish_reason: next.reason ?? 'stop', message: {
+          content: next.content, reasoning_content: 'internal-reasoning-marker',
+        } }] });
+      }
       return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
         relevance: 'low', judgment: '公开摘要是飞行训练，与 AI 工具实测不相关。',
         evidence: [{ field: 'summary', quote: hallucination ? '这条作品介绍 AI' : 'flight training' }],
+        hook: { evidenceIndex: 0, device: '具体场景', effect: '飞行训练点明了场景。' },
         angles: [], nextCheck: '改找摘要明确提到工具名称和实测过程的作品。',
       }) } }] });
     };
     aiTest.after(() => { globalThis.fetch = fetch; });
+    const testUrl = url + '/test';
+    const probe = { provider: 'deepseek', endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-v4-pro' };
+    await call(testUrl, { cookie: otherCookie, method: 'POST', body: probe, status: 403 });
+    await post(testUrl, { ...probe, endpoint: 'https://api.deepseek.com/anthropic' }, 400);
+    await post(testUrl, { ...probe, endpoint: 'http://127.0.0.1:4000' }, 400);
+    assert.equal(probeCount, 0);
+    assert.deepEqual((await post(testUrl, probe)).data, { ok: true, model: 'deepseek-v4-pro' });
+    assert.equal((await prisma.topicAiSetting.findUnique({ where: { workspaceId } })).keyCiphertext, legacyCiphertext);
+    probeBody = { choices: [{ finish_reason: 'stop', message: { content: null } }] };
+    assert.match((await post(testUrl, probe)).data.message, /正文为空/);
+    probeBody = { output: [] };
+    assert.match((await post(testUrl, probe)).data.message, /Chat Completions 格式/);
+    probeStatus = 404;
+    const missing = (await post(testUrl, probe)).data;
+    assert.equal(missing.ok, false);
+    assert.match(missing.message, /404.*接口地址和模型标识/);
+    assert.ok(!JSON.stringify(missing).includes('upstream-internal-marker'));
     const analyzed = await call(endpoint, { cookie: otherCookie, method: 'POST', body: { goal }, status: 201 });
     assert.equal(analyzed.data.analysis.relevance, 'low');
+    assert.equal(analyzed.data.analysis.hook.device, '具体场景');
     assert.deepEqual(analyzed.data.analysis.angles, []);
+    const { ok: _ok, ...savedAnalysis } = analyzed.data;
+    assert.ok(savedAnalysis.id && savedAnalysis.goal === goal && Date.parse(savedAnalysis.createdAt));
+    assert.deepEqual((await call(historyUrl, { cookie: otherCookie })).data, [savedAnalysis]);
+    assert.deepEqual((await call(historyUrl, { cookie })).data, []);
+    assert.deepEqual((await call(endpoint, { cookie: otherCookie, method: 'POST', body: { goal }, status: 201 })).data, analyzed.data);
+    assert.equal(analysisRequests, 1);
+    const ownAnalysis = (await post(endpoint, { goal })).data;
+    assert.notEqual(ownAnalysis.id, savedAnalysis.id);
+    assert.equal(analysisRequests, 2);
+    analysisReplies.push({ content: ' \n ' }, { plain: true });
+    const fallback = (await post(endpoint, { goal: goal + '，补充画面建议' })).data;
+    assert.equal(fallback.ok, true);
+    assert.equal(analysisReplies.length, 0);
+    analysisReplies.push({ content: null, reason: 'length' });
+    const clipped = (await post(endpoint, { goal: goal + '，比较镜头长度' })).data;
+    assert.match(clipped.message, /超过长度限制/);
+    assert.ok(!JSON.stringify(clipped).includes('internal-reasoning-marker'));
     hallucination = true;
-    assert.match((await post(endpoint, { goal })).data.message, /引用无法/);
+    assert.match((await post(endpoint, { goal: goal + '，核对素材' })).data.message, /引用无法/);
     badKey = true;
-    assert.match((await post(endpoint, { goal })).data.message, /拒绝了密钥/);
-    assert.equal((await call(url, { cookie })).data.model, 'deepseek-chat');
+    assert.match((await post(endpoint, { goal: goal + '，比较分镜' })).data.message, /拒绝了密钥/);
+    const personalHistory = (await call(historyUrl, { cookie })).data;
+    assert.deepEqual(personalHistory.map(({ id }) => id), [fallback.id, ownAnalysis.id]);
+    assert.equal((await call(url, { cookie })).data.model, 'deepseek-flash');
   });
 
   await t.test('只能通过小红书官方身份核验新增账号', async (test) => {

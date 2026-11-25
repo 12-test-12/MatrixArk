@@ -1,6 +1,8 @@
 import { useId, useState, type FormEvent } from 'react';
 import { api, formatTime, post, useAction, useResource } from './api';
+import { pushToast } from './toast';
 import { Feedback, Loading } from './ui';
+import { TopicChanges } from './topic-insights';
 
 const targets = {
   youtube: { label: 'YouTube 频道', hint: '输入以 UC 开头的公开频道 ID。', placeholder: 'UC…' },
@@ -31,7 +33,9 @@ export function TopicSources({ scope, refreshWorks }: { scope: string; refreshWo
       await post(path, { provider, target: data.get('target'), keyword: data.get('keyword') });
       sources.refresh();
       form.reset();
-      setNotice('采集任务已保存。Worker 会自动拉取，也可点击「立即采集」。');
+      const msg = '采集任务已保存。Worker 会自动拉取，也可点击「立即采集」。';
+      setNotice(msg);
+      pushToast(msg, 'success');
     });
   }
   function sync(id: string) {
@@ -41,11 +45,26 @@ export function TopicSources({ scope, refreshWorks }: { scope: string; refreshWo
       sources.refresh();
       if (result.status === 'failed') throw new Error(result.reason || '采集失败');
       if (result.status === 'busy') {
-        setNotice('采集正在运行，或刚执行过，请稍等再试。');
+        const busyMsg = '采集正在运行，或刚执行过，请稍等再试。';
+        setNotice(busyMsg);
+        pushToast(busyMsg, 'info');
         return;
       }
       refreshWorks();
-      setNotice(`已采集 ${result.count ?? 0} 条匹配内容。`);
+      const okMsg = `已采集 ${result.count ?? 0} 条匹配内容。`;
+      setNotice(okMsg);
+      pushToast(okMsg, 'success');
+    });
+  }
+
+  function remove(source: Source) {
+    if (!window.confirm(`删除采集任务「${source.target}」？任务将停止执行，已采集的作品仍可查看。`)) return;
+    setNotice('');
+    void action.run(async () => {
+      await api(path + '/' + source.id, { method: 'DELETE' });
+      sources.refresh();
+      setNotice('采集任务已删除。');
+      pushToast('采集任务已删除。', 'success');
     });
   }
 
@@ -89,7 +108,11 @@ export function TopicSources({ scope, refreshWorks }: { scope: string; refreshWo
               sources.refresh();
             });
           }}>{source.enabled ? '暂停采集' : '恢复采集'}</button>
+          <button type="button" className="button compact" disabled={action.busy}
+            aria-label={`删除采集任务：${source.target}${source.keyword ? `（${source.keyword}）` : ''}`}
+            onClick={() => remove(source)}>删除任务</button>
         </div>
+        <TopicChanges path={path + '/' + source.id} />
       </div>;
     })}
   </section>;

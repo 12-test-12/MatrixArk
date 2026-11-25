@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import type { ReactNode } from 'react';
+import { ToastViewport } from './toast';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -19,6 +20,6 @@ const restoreTheme = `try {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return <html lang="zh-CN" suppressHydrationWarning>
     <head><script dangerouslySetInnerHTML={{ __html: restoreTheme }} /></head>
-    <body>{children}</body>
+    <body>{children}<ToastViewport /></body>
   </html>;
 }

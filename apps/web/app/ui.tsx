@@ -13,9 +13,14 @@ export function Brand({ detail = false }: { detail?: boolean }) {
   </div>;
 }
 
-export function PageHeader({ title, description, children }: { title: string; description: string; children?: ReactNode }) {
+export function PageHeader({ title, description, children }: {
+  title: string; description: string; children?: ReactNode;
+}) {
   return <div className="page-heading">
-    <div><h1>{title}</h1><p>{description}</p></div>
+    <div className="page-heading-copy">
+      <h1>{title}</h1>
+      <p>{description}</p>
+    </div>
     {children && <div className="actions">{children}</div>}
   </div>;
 }
@@ -88,6 +93,7 @@ export function TaskBadge({ status }: { status: TaskStatus }) {
   const tone = status === 'published' ? 'green'
     : status === 'handed_off' || status === 'unknown' ? 'amber'
       : status === 'failed' ? 'red'
-        : status === 'scheduled' || status === 'dispatching' ? 'violet' : 'gray';
-  return <span className={`badge ${tone}`}>{taskLabel[status]}</span>;
+        : status === 'scheduled' || status === 'dispatching' ? 'violet'
+          : status === 'under_review' || status === 'submitted' ? 'sky' : 'gray';
+  return <span className={`badge ${tone}`}><span className="badge-dot" aria-hidden="true" />{taskLabel[status]}</span>;
 }

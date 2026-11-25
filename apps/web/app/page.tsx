@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, CircleUserRound, LogOut, Radio, X } from 'lucide-react';
 import { Accounts } from './accounts';
 import {
@@ -8,7 +8,7 @@ import {
   type Account, type Session, type Workspace, type WorkbenchSummary,
 } from './api';
 import { Manuscripts, type ManuscriptDrafts } from './manuscripts';
-import { Topics } from './topics';
+import { Topics, type TopicView } from './topics';
 import { Members } from './members';
 import { FeishuSettings } from './notifications';
 import { Performance } from './performance';
@@ -17,6 +17,19 @@ import { Profile } from './profile';
 import { Tasks } from './tasks';
 import { Brand, Empty, Feedback, Loading } from './ui';
 import { roleView, Workbench, type Section } from './workbench';
+
+type WorkspaceLocation = { section?: Section; itemId?: string; topicView?: TopicView; topicWorkId?: string };
+type Navigation = { workspaceId: string; locations: Record<string, WorkspaceLocation> };
+const emptyNavigation: Navigation = { workspaceId: '', locations: {} };
+const navigationKey = (userId: string) => `matrixark-navigation:${userId}`;
+
+function readNavigation(userId: string): Navigation {
+  try {
+    const stored = JSON.parse(localStorage.getItem(navigationKey(userId)) ?? 'null');
+    if (typeof stored?.workspaceId === 'string' && stored.locations && typeof stored.locations === 'object') return stored;
+  } catch {}
+  return emptyNavigation;
+}
 
 function SignIn({ onSession, onClose, initialError }: {
   onSession: (session: Session) => void; onClose: () => void; initialError: string;
@@ -87,21 +100,22 @@ function SignIn({ onSession, onClose, initialError }: {
   </dialog>;
 }
 
-function WorkspaceBody({ workspace, section, taskId, performanceAccountId, manuscriptId, drafts, openTasks, openAccounts, openPerformance, openManuscript,
+function WorkspaceBody({ workspace, section, itemId, topicView, topicWorkId, onTopicView, onTopicWork, drafts, openTasks, openAccounts, openPerformance, openManuscript,
   openManuscripts, summary }: {
-  workspace: Workspace; section: Section; taskId: string; openTasks: (id: string) => void; openAccounts: () => void;
-  drafts: ManuscriptDrafts; performanceAccountId: string; openPerformance: (id: string) => void;
-  manuscriptId: string; openManuscript: (id: string) => void;
+  workspace: Workspace; section: Section; itemId: string; openTasks: (id: string) => void; openAccounts: () => void;
+  topicView: TopicView; topicWorkId: string; onTopicView: (view: TopicView) => void; onTopicWork: (id: string) => void;
+  drafts: ManuscriptDrafts; openPerformance: (id: string) => void; openManuscript: (id: string) => void;
   openManuscripts: () => void; summary: ReturnType<typeof useResource<WorkbenchSummary>>;
 }) {
   const scope = scopeFor(workspace.id);
   const accounts = useResource<Account[]>(section === 'accounts' || section === 'manuscripts' ? scope + '/accounts' : null);
-  if (section === 'manuscripts') return <Manuscripts scope={scope} role={workspace.role} accounts={accounts} drafts={drafts} initialId={manuscriptId}
+  if (section === 'manuscripts') return <Manuscripts scope={scope} role={workspace.role} accounts={accounts} drafts={drafts} initialId={itemId}
     openTasks={openTasks} openAccounts={openAccounts} refreshSummary={summary.refresh} />;
-  if (section === 'topics') return <Topics scope={scope} openManuscript={openManuscript} canConfigureAi={workspace.role === 'owner'} />;
-  if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={taskId}
+  if (section === 'topics') return <Topics scope={scope} openManuscript={openManuscript} canConfigureAi={workspace.role === 'owner'}
+    view={topicView} selected={topicWorkId} onView={onTopicView} onSelect={onTopicWork} />;
+  if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={itemId}
     openManuscripts={openManuscripts} counts={summary.data?.taskCounts} refreshSummary={summary.refresh} />;
-  if (section === 'performance') return <Performance scope={scope} role={workspace.role} initialAccount={performanceAccountId} openTask={openTasks} />;
+  if (section === 'performance') return <Performance scope={scope} role={workspace.role} initialAccount={itemId} openTask={openTasks} />;
   if (section === 'members') return <Members scope={scope} />;
   if (section === 'notifications') return <FeishuSettings scope={scope} />;
   return <Accounts scope={scope} canManage={canEdit(workspace.role)} canConfigure={workspace.role === 'owner'} resource={accounts}
@@ -112,44 +126,70 @@ export default function Home() {
   const [session, setSession] = useState<Session | null>();
   const [showSignIn, setShowSignIn] = useState(false);
   const [startupError, setStartupError] = useState('');
-  const [workspaceId, setWorkspaceId] = useState('');
-  const [activeSection, setSection] = useState<Section>();
-  const [taskId, setTaskId] = useState('');
-  const [manuscriptId, setManuscriptId] = useState('');
-  const [performanceAccountId, setPerformanceAccountId] = useState('');
+  const [navigation, setNavigation] = useState(emptyNavigation);
+  const activeNavigation = useRef({ userId: '', value: emptyNavigation });
   const [drafts] = useState<ManuscriptDrafts>(() => new Map());
   const logout = useAction();
-  const workspace = session?.workspaces.find(({ id }) => id === workspaceId)
-    ?? session?.workspaces.find(({ role }) => role !== 'owner') ?? session?.workspaces[0];
+  const workspace = session?.workspaces.find(({ id }) => id === navigation.workspaceId) ?? session?.workspaces[0];
   const summary = useResource<WorkbenchSummary>(workspace ? scopeFor(workspace.id) + '/workbench-summary' : null, 15_000);
+
+  const restoreNavigation = useCallback((userId: string) => {
+    const value = userId ? readNavigation(userId) : emptyNavigation;
+    activeNavigation.current = { userId, value };
+    setNavigation(value);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    const expired = () => { drafts.clear(); setStartupError('登录已过期，请重新登录。'); setShowSignIn(true); setSession(null); };
+    const expired = () => { drafts.clear(); restoreNavigation(''); setStartupError('登录已过期，请重新登录。'); setShowSignIn(true); setSession(null); };
     window.addEventListener('matrixark-session-expired', expired);
     void api<Session>('/auth/me', { signal: controller.signal }).then((current) => {
-      if (!controller.signal.aborted) setSession((active) => active ?? current);
+      if (!controller.signal.aborted) {
+        restoreNavigation(current.user.id);
+        setSession(current);
+      }
     }).catch((error: unknown) => {
       if (controller.signal.aborted) return;
       if (!(error instanceof ApiError && error.status === 401)) setStartupError(messageOf(error));
       setSession((active) => active ?? null);
     });
     return () => { controller.abort(); window.removeEventListener('matrixark-session-expired', expired); };
-  }, [drafts]);
+  }, [drafts, restoreNavigation]);
 
   if (session === undefined) return <main className="boot"><Brand /><Loading /></main>;
   if (!session) return <>
     <Preview onLogin={() => { setStartupError(''); setShowSignIn(true); }} />
     {showSignIn && <SignIn initialError={startupError} onClose={() => { setShowSignIn(false); setStartupError(''); }} onSession={(next) => {
-      setSession(next); setShowSignIn(false); setStartupError(''); setSection(undefined); setWorkspaceId(''); setTaskId(''); setPerformanceAccountId(''); setManuscriptId('');
+      restoreNavigation(next.user.id);
+      setSession(next); setShowSignIn(false); setStartupError('');
     }} />}
   </>;
   const sections: readonly Section[] = workspace ? [...roleView[workspace.role].sections, 'profile'] : ['profile'];
-  const section = activeSection && sections.includes(activeSection) ? activeSection : sections[0];
+  const location = workspace ? navigation.locations[workspace.id] : undefined;
+  const section = location?.section && sections.includes(location.section) ? location.section
+    : sections.includes('topics') ? 'topics' : sections[0];
+  const itemId = section === location?.section && typeof location?.itemId === 'string' ? location.itemId : '';
+  const topicView = location?.topicView === 'saved' || location?.topicView === 'collection' ? location.topicView : 'works';
+  const topicWorkId = typeof location?.topicWorkId === 'string' ? location.topicWorkId : '';
+  const userId = session.user.id;
+
+  function remember(next: Navigation) {
+    activeNavigation.current = { userId, value: next };
+    setNavigation(next);
+    try { localStorage.setItem(navigationKey(userId), JSON.stringify(next)); } catch {}
+  }
+  function updateLocation(change: WorkspaceLocation) {
+    const { userId: activeUserId, value: latest } = activeNavigation.current;
+    const activeWorkspace = session?.workspaces.find(({ id }) => id === latest.workspaceId) ?? session?.workspaces[0];
+    if (!workspace || activeUserId !== userId || activeWorkspace?.id !== workspace.id) return;
+    remember({ workspaceId: workspace.id, locations: { ...latest.locations, [workspace.id]: { ...latest.locations[workspace.id], ...change } } });
+  }
+  function openSection(next: Section, id?: string) { updateLocation({ section: next, itemId: id }); }
+
   const handoff = workspace && canRecord(workspace.role) ? summary.data?.taskCounts.handed_off ?? 0 : 0;
   const unknown = workspace && canEdit(workspace.role) ? summary.data?.taskCounts.unknown ?? 0 : 0;
   const review = summary.data?.pendingReview ?? 0;
-  return <Workbench sections={sections} section={section} onSection={(next) => { setSection(next); setTaskId(''); setPerformanceAccountId(''); setManuscriptId(''); }}
+  return <Workbench sections={sections} section={section} onSection={openSection}
     badges={{
       manuscripts: { count: review, label: `${review} 篇原稿待审核` },
       tasks: { count: handoff + unknown, label: [handoff && `${handoff} 项待回填`, unknown && `${unknown} 项待核实`].filter(Boolean).join(' · ') },
@@ -158,7 +198,7 @@ export default function Home() {
         <span className="workspace-icon"><Radio size={19} aria-hidden="true" /></span>
         <span><small>当前工作室</small>
           <select aria-label="切换工作室" value={workspace?.id ?? ''} onChange={(event) => {
-            setWorkspaceId(event.target.value); setSection(undefined); setTaskId(''); setPerformanceAccountId(''); setManuscriptId('');
+            remember({ ...activeNavigation.current.value, workspaceId: event.target.value });
           }}>
             {session.workspaces.length ? session.workspaces.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)
               : <option value="">暂无工作室</option>}
@@ -172,6 +212,7 @@ export default function Home() {
           try { await post('/auth/logout', {}); }
           catch (error) { if (!(error instanceof ApiError && error.status === 401)) throw error; }
           drafts.clear();
+          restoreNavigation('');
           setStartupError('');
           setShowSignIn(false);
           setSession(null);
@@ -180,11 +221,12 @@ export default function Home() {
       <Feedback error={logout.error} /></>}
     topbar={workspace && <span className="workspace-role"><CircleUserRound size={15} aria-hidden="true" />{roleLabel[workspace.role]}</span>}>
     {section === 'profile' ? <Profile user={session.user} onSave={(user) => setSession((current) => current ? { ...current, user } : current)} />
-      : workspace && section ? <WorkspaceBody key={workspace.id} workspace={workspace} section={section} taskId={taskId} drafts={drafts}
-      performanceAccountId={performanceAccountId} openPerformance={(id) => { setPerformanceAccountId(id); setSection('performance'); }}
-      manuscriptId={manuscriptId} openManuscript={(id) => { setManuscriptId(id); setSection('manuscripts'); }}
-      openTasks={(id) => { summary.refresh(); setTaskId(id); setSection('tasks'); }} openAccounts={() => setSection('accounts')}
-      openManuscripts={() => { setManuscriptId(''); setSection('manuscripts'); }} summary={summary} />
+      : workspace && section ? <WorkspaceBody key={workspace.id} workspace={workspace} section={section} itemId={itemId} drafts={drafts}
+      topicView={topicView} topicWorkId={topicWorkId} onTopicView={(view) => updateLocation({ topicView: view })}
+      onTopicWork={(id) => updateLocation({ topicWorkId: id })}
+      openPerformance={(id) => openSection('performance', id)} openManuscript={(id) => openSection('manuscripts', id)}
+      openTasks={(id) => { summary.refresh(); openSection('tasks', id); }} openAccounts={() => openSection('accounts')}
+      openManuscripts={() => openSection('manuscripts')} summary={summary} />
       : <section className="card"><Empty icon={Check} title="暂无可访问的工作室" description="加入工作室后可查看稿件和任务。" /></section>}
   </Workbench>;
 }

@@ -130,6 +130,7 @@ model User {
   notificationSettings NotificationSetting[]
   platformAppSettings   PlatformAppSetting[]
   oauthStates          OAuthState[]
+  topicAiAnalyses      TopicAiAnalysis[]
 }
 
 model Session {
@@ -162,6 +163,7 @@ model Workspace {
   platformAppSettings    PlatformAppSetting[]
   oauthStates            OAuthState[]
   topicWorks             TopicWork[]
+  topicChanges           TopicChange[]
   topicSources           TopicSource[]
   topicAiSetting         TopicAiSetting?
 }
@@ -220,6 +222,7 @@ model TopicSource {
   target        String
   keyword       String    @default("")
   enabled       Boolean   @default(true)
+  deletedAt     DateTime? @db.Timestamptz(3)
   nextRunAt     DateTime  @default(now()) @db.Timestamptz(3)
   leaseUntil    DateTime? @db.Timestamptz(3)
   lastAttemptAt DateTime? @db.Timestamptz(3)
@@ -258,11 +261,48 @@ model TopicWork {
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   matches   TopicMatch[]
+  analyses  TopicAiAnalysis[]
 
   @@unique([workspaceId, platform, externalId])
   @@unique([workspaceId, id])
   @@index([workspaceId, importedAt(sort: Desc), id(sort: Desc)])
   @@index([workspaceId, savedAt(sort: Desc), id(sort: Desc)])
+}
+
+model TopicAiAnalysis {
+  id          String   @id @default(uuid())
+  workspaceId String
+  workId      String
+  userId      String
+  inputHash   String
+  goal        String
+  model       String
+  analysis    Json
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  work TopicWork @relation(fields: [workspaceId, workId], references: [workspaceId, id], onDelete: Cascade)
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, workId, userId, inputHash], map: "TopicAiAnalysis_input_key")
+  @@index([workspaceId, workId, userId, createdAt(sort: Desc), id(sort: Desc)], map: "TopicAiAnalysis_history_idx")
+  @@index([userId])
+}
+
+model TopicChange {
+  id          String   @id @default(uuid())
+  workspaceId String
+  entityType  String
+  entityId    String
+  action      String
+  actorId     String?
+  actorName   String?
+  actorEmail  String?
+  details     Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, entityType, entityId, createdAt(sort: Desc), id(sort: Desc)], map: "TopicChange_entity_time_idx")
 }
 
 model TopicMatch {
