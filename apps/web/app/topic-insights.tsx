@@ -55,9 +55,15 @@ const actorOf = (change: Change) => change.actorEmail ? `${change.actorName}（$
 
 export function TopicChanges({ path, eager = false }: { path: string; eager?: boolean }) {
   const [open, setOpen] = useState(false);
-  const history = useResource<Change[]>(open || eager ? path + '/changes' : null, 5_000);
+  // Keep the loaded list after the first open, so the collapsed summary still shows the latest action.
+  const [loaded, setLoaded] = useState(eager);
+  const history = useResource<Change[]>(loaded ? path + '/changes' : null, open || eager ? 5_000 : 0);
   const recent = history.data?.[0];
-  return <details className="source topic-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details className="source topic-evidence" onToggle={(event) => {
+    const next = event.currentTarget.open;
+    setOpen(next);
+    if (next) setLoaded(true);
+  }}>
     <summary>操作记录{recent && ` · ${actorOf(recent)} · ${actions[recent.action] ?? recent.action} · ${formatTime(recent.createdAt)}`}</summary>
     <Feedback error={history.error} />
     {history.loading && <p className="muted small">正在读取操作记录…</p>}

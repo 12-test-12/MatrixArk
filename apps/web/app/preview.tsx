@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ArrowRight, BarChart3, CalendarDays, Check, ChevronRight, ClipboardCheck, Copy, FileText, History, Radio, Search, Send, X } from 'lucide-react';
 import { platformLabel, platforms, roleLabel, type Platform, type Role, type TaskStatus } from './api';
+import { copyText } from './clipboard';
 import { pushToast } from './toast';
 import { Empty, PageHeader, PlatformIcon, TaskBadge } from './ui';
 import { roleView, Workbench, type Section } from './workbench';
@@ -137,26 +138,7 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
   }
 
   async function handleCopy() {
-    const text = active?.manuscript.body ?? '';
-    let copiedOk = false;
-    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-      try {
-        await navigator.clipboard.writeText(text);
-        copiedOk = true;
-      } catch {
-        // Fallback below when unfocused
-      }
-    }
-    if (!copiedOk && typeof document !== 'undefined') {
-      const area = document.createElement('textarea');
-      area.value = text;
-      area.setAttribute('readonly', '');
-      area.style.cssText = 'position:fixed;inset:0;opacity:0;pointer-events:none;';
-      document.body.appendChild(area);
-      area.select();
-      copiedOk = document.execCommand('copy');
-      area.remove();
-    }
+    const copiedOk = await copyText(active?.manuscript.body ?? '');
     if (copiedOk) {
       setCopied(true);
       pushToast('已复制正文文案。', 'success');

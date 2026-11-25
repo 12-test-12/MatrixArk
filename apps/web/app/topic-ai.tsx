@@ -5,6 +5,7 @@ import {
   type AiPromptOption, type ThoughtStep,
 } from './ai-ui';
 import { api, formatTime, messageOf, post, useAction, useResource } from './api';
+import { copyText } from './clipboard';
 import { pushToast } from './toast';
 import { Feedback } from './ui';
 
@@ -99,26 +100,6 @@ type Analysis = {
 };
 type SavedAnalysis = { id: string; goal: string; model: string; createdAt: string; analysis: Analysis };
 type Response = ({ ok: true } & SavedAnalysis) | { ok: false; message: string };
-
-async function copyText(text: string) {
-  if (navigator.clipboard) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // Fallback below
-    }
-  }
-  const area = document.createElement('textarea');
-  area.value = text;
-  area.setAttribute('readonly', '');
-  area.style.cssText = 'position:fixed;inset:0;opacity:0;pointer-events:none;';
-  document.body.appendChild(area);
-  area.select();
-  const ok = document.execCommand('copy');
-  area.remove();
-  return ok;
-}
 
 export function useTopicAiAnalysis(path: string | null, goal: string, model: string | null) {
   const key = path && goal && model ? JSON.stringify([path, goal, model]) : null;
@@ -363,6 +344,8 @@ export function TopicAiPanel({ activeGoal, history, historyError, response, pend
   const [historyId, setHistoryId] = useState('');
   const [copiedAll, setCopiedAll] = useState(false);
   const generated = response?.ok ? response : undefined;
+  // A freshly generated analysis replaces whichever older entry the history picker had pinned.
+  useEffect(() => { if (generated) setHistoryId(''); }, [generated?.id]);
   const saved = history ?? [];
   const entries = generated && !saved.some(({ id }) => id === generated.id) ? [generated, ...saved] : saved;
   const latest = generated ?? entries[0];

@@ -7,6 +7,7 @@ import {
   api, canEdit, canRecord, fileBody, formatTime, platformLabel, platforms, publishPlatformLabel, post, taskLabel, useAction, useResource,
   type Handoff, type Platform, type Role, type Task, type TaskDetail, type TaskStatus, type WorkbenchSummary,
 } from './api';
+import { copyText } from './clipboard';
 import { pushToast } from './toast';
 import { Empty, Feedback, Loading, PageHeader, TaskBadge } from './ui';
 import { roleView } from './workbench';
@@ -43,26 +44,6 @@ function externalUrl(value: string | null) {
   return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password ? url.href : null;
 }
 
-async function copyText(text: string) {
-  if (navigator.clipboard) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch {
-      // Fall through to execCommand when headless/unfocused blocks Clipboard API.
-    }
-  }
-  const area = document.createElement('textarea');
-  area.value = text;
-  area.setAttribute('readonly', '');
-  area.style.cssText = 'position:fixed;inset:0;opacity:0;pointer-events:none;';
-  document.body.appendChild(area);
-  area.select();
-  const ok = document.execCommand('copy');
-  area.remove();
-  if (!ok) throw new Error('浏览器暂不支持复制，可选中文案手动复制。');
-}
-
 function Package({ data }: { data: Handoff }) {
   const copy = useAction();
   const [copied, setCopied] = useState(false);
@@ -73,7 +54,7 @@ function Package({ data }: { data: Handoff }) {
     <div className="section-line">
       <h3><Send size={17} aria-hidden="true" />已审交接包</h3>
       <button type="button" className={`button primary compact copy-action${copied ? ' is-confirmed' : ''}`} disabled={copy.busy} onClick={() => void copy.run(async () => {
-        await copyText(`${data.title}\n\n${data.body}`);
+        if (!(await copyText(`${data.title}\n\n${data.body}`))) throw new Error('浏览器暂不支持复制，可选中文案手动复制。');
         setCopied(true);
         if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
         timerRef.current = window.setTimeout(() => setCopied(false), 1800);

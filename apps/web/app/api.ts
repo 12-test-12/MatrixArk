@@ -187,7 +187,7 @@ export function useAction() {
     running.current = true;
     reset();
     setBusy(true);
-    try { await work(); setNotice(success); if (success) pushToast(success, 'success'); }
+    try { await work(); if (success) { setNotice(success); pushToast(success, 'success'); } }
     catch (failure) { setError(messageOf(failure)); }
     finally { running.current = false; setBusy(false); }
   }
