@@ -2,8 +2,9 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
-    "module": "CommonJS",
-    "moduleResolution": "Node10",
+    // node10 解析在 TS 7 移除；产物仍是 CommonJS（package.json 无 type: module）。
+    "module": "Node16",
+    "moduleResolution": "Node16",
     "outDir": "dist",
     "rootDir": "src",
     "declaration": true,
