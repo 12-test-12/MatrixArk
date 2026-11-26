@@ -1,7 +1,16 @@
 import { BadRequestException } from '@nestjs/common';
 import { decryptPlatformSecret, encryptPlatformSecret, platformKeyId } from './platform-app';
 
-export type AccountSecretKind = 'password' | 'cookie';
+export type AccountSecretKind = 'password' | 'cookie' | 'read-cookie';
+
+export function normalizeEgressIp(raw?: string | null) {
+  const cleaned = raw?.trim();
+  if (!cleaned) return null;
+  if (cleaned.length > 64 || /[\r\n\0\s]/.test(cleaned)) {
+    throw new BadRequestException('出口 IP 或代理节点标识格式无效（不能包含空格且不超过 64 字符）');
+  }
+  return cleaned;
+}
 
 export function encryptAccountSecret(kind: AccountSecretKind, workspaceId: string, accountId: string, value: string) {
   return {
@@ -50,12 +59,26 @@ export function parseCookieHeader(rawInput: string) {
     throw new BadRequestException('Cookie 内容不能为空且长度不能超过 32 KiB');
   }
   const entries: Record<string, string> = {};
-  const put = (name: unknown, value: unknown) => {
+  let earliestExpiryMs: number | null = null;
+  const recordExpiry = (candidate: unknown) => {
+    let ms: number | null = null;
+    if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) {
+      ms = candidate < 1e12 ? candidate * 1000 : candidate;
+    } else if (typeof candidate === 'string' && candidate.trim()) {
+      const parsed = Date.parse(candidate.trim());
+      if (Number.isFinite(parsed) && parsed > 0) ms = parsed;
+    }
+    if (ms !== null && ms > 946_684_800_000 && ms < 4_102_444_800_000) {
+      earliestExpiryMs = earliestExpiryMs === null ? ms : Math.min(earliestExpiryMs, ms);
+    }
+  };
+  const put = (name: unknown, value: unknown, expiry?: unknown) => {
     if (typeof name !== 'string' || typeof value !== 'string') return;
     const k = name.trim();
     const v = value.trim();
     if (!k || !v || /[\r\n\0;]/.test(k) || /[\r\n\0;]/.test(v)) return;
     entries[k] = v;
+    if (expiry !== undefined) recordExpiry(expiry);
   };
 
   if (raw.startsWith('[') || raw.startsWith('{')) {
@@ -65,7 +88,7 @@ export function parseCookieHeader(rawInput: string) {
         for (const item of parsed) {
           if (item && typeof item === 'object') {
             const row = item as Record<string, unknown>;
-            put(row.name ?? row.key, row.value);
+            put(row.name ?? row.key, row.value, row.expirationDate ?? row.expires ?? row.expiresAt);
           }
         }
       } else if (parsed && typeof parsed === 'object') {
@@ -94,6 +117,7 @@ export function parseCookieHeader(rawInput: string) {
   return {
     entries,
     header: pairs.map(([k, v]) => `${k}=${v}`).join('; '),
+    expiresAt: earliestExpiryMs ? new Date(earliestExpiryMs) : null,
   };
 }
 

@@ -14,6 +14,7 @@ import {
   decryptAccountSecret,
   encryptAccountSecret,
   maskLoginIdentifier,
+  normalizeEgressIp,
   parseCookieHeader,
   validatePlatformCookie,
 } from './account-secrets';
@@ -56,6 +57,8 @@ export const passwordAccountSchema = z.object({
   groupId: z.string().min(1).nullable().optional(),
   alias: z.string().trim().max(60).optional(),
   tags: z.array(z.string().trim().min(1).max(24)).max(12).optional(),
+  egressIp: z.string().trim().max(64).nullable().optional(),
+  profileLabel: z.string().trim().max(64).nullable().optional(),
 }).strict();
 
 export const cookieImportSchema = z.object({
@@ -67,6 +70,15 @@ export const cookieImportSchema = z.object({
   groupId: z.string().min(1).nullable().optional(),
   alias: z.string().trim().max(60).optional(),
   tags: z.array(z.string().trim().min(1).max(24)).max(12).optional(),
+  cookieExpiresAt: z.string().datetime({ offset: true }).transform((v) => new Date(v)).nullable().optional(),
+  egressIp: z.string().trim().max(64).nullable().optional(),
+  profileLabel: z.string().trim().max(64).nullable().optional(),
+}).strict();
+
+export const readSessionSchema = z.object({
+  readAccountId: z.string().min(1).nullable().optional(),
+  readCookie: z.string().trim().max(32_768).nullable().optional(),
+  readCookieLabel: z.string().trim().max(60).nullable().optional(),
 }).strict();
 
 type BiliQrTicket = {
@@ -302,6 +314,9 @@ export class AccountOnboardingService {
       groupId?: string | null;
       alias?: string;
       tags?: string[];
+      cookieExpiresAt?: Date | null;
+      egressIp?: string | null;
+      profileLabel?: string | null;
     },
   ) {
     const webId = bilibiliWebUidPrefix + params.mid;
@@ -340,6 +355,9 @@ export class AccountOnboardingService {
         cookieCiphertext: ciphertext,
         cookieKeyId: keyId,
         cookieUpdatedAt: now,
+        ...(params.cookieExpiresAt !== undefined && { cookieExpiresAt: params.cookieExpiresAt }),
+        ...(params.egressIp !== undefined && { egressIp: params.egressIp }),
+        ...(params.profileLabel !== undefined && { profileLabel: params.profileLabel }),
         riskStatus: 'normal' as const,
         riskReason: null,
         riskDetectedAt: null,
@@ -374,6 +392,8 @@ export class AccountOnboardingService {
     const uid = input.platform === 'bilibili' ? parseBiliUid(input.profile) : null;
     const now = new Date();
     const masked = maskLoginIdentifier(input.loginIdentifier);
+    const egressIp = input.egressIp !== undefined ? normalizeEgressIp(input.egressIp) : undefined;
+    const profileLabel = input.profileLabel !== undefined ? (input.profileLabel?.trim() || null) : undefined;
     const id = randomUUID();
     const { ciphertext, keyId } = encryptAccountSecret(
       'password',
@@ -412,6 +432,8 @@ export class AccountOnboardingService {
             groupId,
             alias: input.alias?.trim() || null,
             tags: cleanTags(input.tags),
+            ...(egressIp !== undefined && { egressIp }),
+            ...(profileLabel !== undefined && { profileLabel }),
             loginIdentifier: masked,
             passwordCiphertext: ciphertext,
             passwordKeyId: keyId,
@@ -432,8 +454,11 @@ export class AccountOnboardingService {
   }
 
   async importCookieAccount(workspaceId: string, userId: string, input: z.infer<typeof cookieImportSchema>) {
-    const { entries, header } = parseCookieHeader(input.cookie);
+    const { entries, header, expiresAt } = parseCookieHeader(input.cookie);
     validatePlatformCookie(input.platform, entries);
+    const cookieExpiresAt = input.cookieExpiresAt !== undefined ? input.cookieExpiresAt : expiresAt;
+    const egressIp = input.egressIp !== undefined ? normalizeEgressIp(input.egressIp) : undefined;
+    const profileLabel = input.profileLabel !== undefined ? (input.profileLabel?.trim() || null) : undefined;
 
     if (input.platform === 'bilibili') {
       const { mid, uname } = await this.verifyBilibiliCookie(header);
@@ -448,6 +473,9 @@ export class AccountOnboardingService {
         groupId: input.groupId,
         alias: input.alias,
         tags: input.tags,
+        cookieExpiresAt,
+        egressIp,
+        profileLabel,
       });
       return { id, platform: 'bilibili' as const };
     }
@@ -488,6 +516,9 @@ export class AccountOnboardingService {
         cookieCiphertext: ciphertext,
         cookieKeyId: keyId,
         cookieUpdatedAt: now,
+        ...(cookieExpiresAt !== undefined && { cookieExpiresAt }),
+        ...(egressIp !== undefined && { egressIp }),
+        ...(profileLabel !== undefined && { profileLabel }),
         riskStatus: 'normal' as const,
         riskReason: null,
         riskDetectedAt: null,
@@ -521,6 +552,72 @@ export class AccountOnboardingService {
     return { id: accountId, platform: 'xiaohongshu' as const };
   }
 
+  async configureReadSession(workspaceId: string, accountId: string, input: z.infer<typeof readSessionSchema>) {
+    const now = new Date();
+    const parsedCookie = input.readCookie ? parseCookieHeader(input.readCookie) : null;
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+      const account = await tx.channelAccount.findFirst({ where: { id: accountId, workspaceId } });
+      if (!account || account.archivedAt) throw new NotFoundException('账号不存在或已归档');
+
+      let nextReadAccountId = account.readAccountId;
+      if (input.readAccountId !== undefined) {
+        if (input.readAccountId === null) {
+          nextReadAccountId = null;
+        } else {
+          if (input.readAccountId === accountId) {
+            throw new BadRequestException('读取小号不能绑定账号本身，请选择同平台其他辅助采集号或直接配置独立读取 Cookie');
+          }
+          const readAcc = await tx.channelAccount.findFirst({
+            where: { id: input.readAccountId, workspaceId, archivedAt: null },
+            select: { id: true, platform: true },
+          });
+          if (!readAcc) throw new NotFoundException('指定的采集小号不存在或已归档');
+          if (readAcc.platform !== account.platform) {
+            throw new BadRequestException('读写分离账号必须属于同一平台');
+          }
+          nextReadAccountId = readAcc.id;
+        }
+      }
+
+      let readCookieUpdate: Record<string, unknown> = {};
+      if (input.readCookie === null) {
+        readCookieUpdate = {
+          readCookieCiphertext: null,
+          readCookieKeyId: null,
+          readCookieLabel: null,
+          readCookieUpdatedAt: null,
+        };
+      } else if (parsedCookie) {
+        validatePlatformCookie(account.platform, parsedCookie.entries);
+        const { ciphertext, keyId } = encryptAccountSecret('read-cookie', workspaceId, accountId, parsedCookie.header);
+        readCookieUpdate = {
+          readCookieCiphertext: ciphertext,
+          readCookieKeyId: keyId,
+          readCookieLabel: input.readCookieLabel?.trim() || '独立只读会话',
+          readCookieUpdatedAt: now,
+        };
+      } else if (input.readCookieLabel !== undefined) {
+        readCookieUpdate = { readCookieLabel: input.readCookieLabel?.trim() || null };
+      }
+
+      return tx.channelAccount.update({
+        where: { id: accountId },
+        data: {
+          ...(input.readAccountId !== undefined && { readAccountId: nextReadAccountId }),
+          ...readCookieUpdate,
+        },
+        select: {
+          id: true,
+          readAccountId: true,
+          readAccount: { select: { id: true, displayName: true, alias: true } },
+          readCookieLabel: true,
+          readCookieUpdatedAt: true,
+        },
+      });
+    });
+  }
+
   async getManagedCredentials(workspaceId: string, accountId: string) {
     const account = await this.prisma.channelAccount.findFirst({
       where: { id: accountId, workspaceId },
@@ -535,6 +632,10 @@ export class AccountOnboardingService {
         cookieCiphertext: true,
         cookieKeyId: true,
         cookieUpdatedAt: true,
+        readCookieCiphertext: true,
+        readCookieKeyId: true,
+        readCookieLabel: true,
+        readCookieUpdatedAt: true,
       },
     });
     if (!account) throw new NotFoundException('账号不存在');
@@ -551,6 +652,9 @@ export class AccountOnboardingService {
     const cookie = account.cookieCiphertext
       ? decryptAccountSecret('cookie', workspaceId, accountId, account.cookieCiphertext, account.cookieKeyId)
       : undefined;
+    const readCookie = account.readCookieCiphertext
+      ? decryptAccountSecret('read-cookie', workspaceId, accountId, account.readCookieCiphertext, account.readCookieKeyId)
+      : undefined;
 
     return {
       id: account.id,
@@ -562,6 +666,10 @@ export class AccountOnboardingService {
       hasCookie: Boolean(account.cookieCiphertext),
       cookie: cookie ?? null,
       cookieUpdatedAt: account.cookieUpdatedAt,
+      hasReadCookie: Boolean(account.readCookieCiphertext),
+      readCookie: readCookie ?? null,
+      readCookieLabel: account.readCookieLabel ?? null,
+      readCookieUpdatedAt: account.readCookieUpdatedAt,
     };
   }
 }

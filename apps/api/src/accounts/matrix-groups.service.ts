@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { cleanTags } from './account-secrets';
-import { publishChannel } from './publish-account';
+import { resolveAccountCapabilities } from './account-capabilities';
 
 export const matrixGroupColors = ['blue', 'rose', 'emerald', 'amber', 'violet', 'cyan', 'slate'] as const;
 
@@ -49,7 +49,7 @@ export class MatrixGroupsService {
       if (!account.groupId) continue;
       const entry = counts.get(account.groupId) ?? { total: 0, available: 0, risk: 0 };
       entry.total += 1;
-      if (publishChannel(account, now, trial)) entry.available += 1;
+      if (resolveAccountCapabilities(account, now, trial).channel) entry.available += 1;
       if (account.riskStatus !== 'normal') entry.risk += 1;
       counts.set(account.groupId, entry);
     }

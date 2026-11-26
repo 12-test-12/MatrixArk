@@ -33,7 +33,7 @@ const secondaryFilters = [
 const eventLabels: Record<string, string> = {
   created: '创建排期', claimed: '领取任务', handed_off: '完成人工交接', result: '回填发布结果', paused: '暂停任务',
   rescheduled: '调整排期', verified: '核对结果', canceled: '取消任务', retried: '重试任务', corrected: '更正结果',
-  late_receipt: '迟到的回执', reminder: '飞书投递记录',
+  late_receipt: '迟到的回执', reminder: '飞书投递记录', circuit_break: '触发验证熔断转交接',
 };
 
 const deliveryLabels = { pending: '待投递', sending: '投递中', sent: '已送达', failed: '投递失败', skipped: '已跳过' } as const;
@@ -278,7 +278,7 @@ function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
   // 只拦截后端认定为「仅 UID 历史账号」的 B 站人工任务；扫码 / Cookie 接入的 B 站账号可以正常交接与回填。
   const blockedHandoff = task?.status === 'handed_off' && task.account.platform === 'bilibili'
     && task.account.channelKind === 'manual' && task.account.accessMethod === 'manual_uid';
-  const handoff = useResource<Handoff>(recordable && !blockedHandoff && task?.handedOffAt && task.executionChannel === 'manual'
+  const handoff = useResource<Handoff>(recordable && !blockedHandoff && task?.handedOffAt && (task.executionChannel === 'manual' || task.status === 'handed_off')
     ? path + '/handoff' : null);
   if (!task) return <section className="card detail-pane">
     {detail.loading ? <Loading /> : <Feedback error={detail.error} />}
@@ -332,7 +332,7 @@ function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
           target="_blank" rel="noreferrer"><ExternalLink size={15} aria-hidden="true" />打开平台创作中心</a>
       </div>}
       {handoff.loading ? <Loading /> : handoff.data && <Package data={handoff.data} />}
-      {recordable && !blockedHandoff && task.status === 'handed_off' && task.executionChannel === 'manual' && <RecordResult path={path} action={recordAction} trial={trial} saved={() => {
+      {recordable && !blockedHandoff && task.status === 'handed_off' && <RecordResult path={path} action={recordAction} trial={trial} saved={() => {
         detail.refresh();
         onRecorded(`「${task.variant.title}」的发布结果已保存。`);
       }} />}

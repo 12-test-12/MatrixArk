@@ -18,6 +18,11 @@ function int(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function boundedInt(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = int(value, fallback);
+  return Math.max(min, Math.min(max, parsed));
+}
+
 const storageDir = process.env.STORAGE_LOCAL_DIR ?? './storage';
 const storageDriver = process.env.STORAGE_DRIVER ?? 'local';
 const sandboxChannel = boolean(process.env.SANDBOX_CHANNEL, 'SANDBOX_CHANNEL');
@@ -68,4 +73,15 @@ export const config = {
     localDir: isAbsolute(storageDir) ? storageDir : join(repoRoot, storageDir),
   },
   publicBaseUrl,
+  worker: {
+    dispatchConcurrency: boundedInt(process.env.WORKER_DISPATCH_CONCURRENCY, 4, 1, 16),
+    receiptConcurrency: boundedInt(process.env.WORKER_RECEIPT_CONCURRENCY, 4, 1, 16),
+    metricsConcurrency: boundedInt(process.env.WORKER_METRICS_CONCURRENCY, 2, 1, 8),
+    leaseDurationMs: boundedInt(process.env.WORKER_LEASE_MS, 90_000, 15_000, 600_000),
+    leaseRenewIntervalMs: boundedInt(process.env.WORKER_LEASE_RENEW_MS, 30_000, 5_000, 120_000),
+    heartbeatIntervalMs: boundedInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 15_000, 5_000, 120_000),
+    heartbeatTtlMs: boundedInt(process.env.WORKER_HEARTBEAT_TTL_MS, 45_000, 15_000, 300_000),
+    monitorIntervalMs: boundedInt(process.env.WORKER_MONITOR_INTERVAL_MS, 30_000, 5_000, 300_000),
+    backlogWarningThreshold: boundedInt(process.env.WORKER_BACKLOG_WARNING_THRESHOLD, 50, 1, 10_000),
+  },
 } as const;

@@ -64,10 +64,17 @@ const workEvidence = {
   evidenceAssetId: z.string().uuid().optional(),
 };
 
+export const scheduleJitterSchema = z.object({
+  enabled: z.boolean().default(true),
+  minSeconds: z.number().int().min(0).max(600).default(30),
+  maxSeconds: z.number().int().min(0).max(1800).default(180),
+}).strict().refine((value) => value.maxSeconds >= value.minSeconds, '最大抖动延迟不能小于最小延迟');
+
 export const scheduleTasksSchema = z.object({
   variantIds: z.array(z.string().uuid()).min(1, '至少选一个平台版本'),
   accountIds: z.array(z.string().uuid()).min(1, '至少选一个账号'),
   scheduledAt,
+  jitter: scheduleJitterSchema.optional(),
 });
 
 export const recordResultSchema = z.object({

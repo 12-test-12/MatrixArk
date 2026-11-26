@@ -8,11 +8,16 @@ import { decryptAccountSecret } from './account-secrets';
 
 const sixHours = 6 * 3_600_000;
 const oneDay = 24 * 3_600_000;
+const cookieExpiringWindow = 72 * 3_600_000;
+const staleCookieWindow = 25 * oneDay;
 const autoManagedKinds = new Set([
   'cookie_expired',
+  'cookie_expiring',
   'auth_expired',
   'auth_expiring',
   'rate_limited',
+  'ip_collision',
+  'read_session_expired',
   'health_check_failed',
 ]);
 
@@ -184,10 +189,43 @@ export class AccountRiskService {
   async checkAccountHealth(workspaceId: string, accountId: string, actorId?: string | null, forceNotify = false) {
     const account = await this.prisma.channelAccount.findFirst({
       where: { id: accountId, workspaceId, archivedAt: null },
+      include: {
+        readAccount: { select: { id: true, displayName: true, archivedAt: true, riskStatus: true } },
+      },
     });
     if (!account) throw new NotFoundException('账号不存在或已归档');
 
     const now = new Date();
+    const siblingCollisions = account.egressIp ? await this.prisma.channelAccount.count({
+      where: { workspaceId, platform: account.platform, egressIp: account.egressIp, archivedAt: null, id: { not: accountId } },
+    }) : 0;
+    const egressIpCollision = siblingCollisions > 0;
+    const readWriteSeparated = Boolean(account.readAccountId || account.readCookieCiphertext);
+    const cookieState: 'none' | 'valid' | 'expiring' | 'expired' = !account.cookieCiphertext
+      ? 'none'
+      : account.cookieExpiresAt && account.cookieExpiresAt <= now
+        ? 'expired'
+        : (account.cookieExpiresAt && account.cookieExpiresAt.getTime() - now.getTime() <= cookieExpiringWindow)
+          || (!account.cookieExpiresAt && account.cookieUpdatedAt && now.getTime() - account.cookieUpdatedAt.getTime() >= staleCookieWindow)
+          ? 'expiring'
+          : 'valid';
+
+    const buildDiagnostics = (loginState: string) => ({
+      loginState,
+      cookieState,
+      egressIp: account.egressIp ?? null,
+      egressIpCollision,
+      siblingCollisions,
+      profileLabel: account.profileLabel ?? null,
+      readWriteSeparated,
+      cookieExpiresAt: account.cookieExpiresAt,
+      checkedAt: now,
+    });
+
+    await this.prisma.channelAccount.update({
+      where: { id: accountId },
+      data: { envCheckedAt: now },
+    });
 
     if (account.rateLimitedUntil && account.rateLimitedUntil > now) {
       const event = await this.recordRisk({
@@ -199,7 +237,7 @@ export class AccountRiskService {
         actorId,
         forceNotify,
       });
-      return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus };
+      return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('rate_limited') };
     }
 
     if (account.channelKind === 'official' && account.authExpiresAt) {
@@ -217,7 +255,7 @@ export class AccountRiskService {
           actorId,
           forceNotify,
         });
-        return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus };
+        return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('expired') };
       }
       if (account.authExpiresAt.getTime() - now.getTime() <= oneDay) {
         const event = await this.recordRisk({
@@ -229,7 +267,7 @@ export class AccountRiskService {
           actorId,
           forceNotify,
         });
-        return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus };
+        return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('expiring') };
       }
       // 授权仍在有效期内：记录本次体检时间，否则巡检队列会一直卡在这批账号上。
       await this.prisma.channelAccount.update({ where: { id: accountId }, data: { authCheckedAt: now } });
@@ -247,7 +285,7 @@ export class AccountRiskService {
           actorId,
           forceNotify,
         });
-        return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus };
+        return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('invalid') };
       }
 
       if (account.platform === 'bilibili') {
@@ -263,7 +301,7 @@ export class AccountRiskService {
             actorId,
             forceNotify,
           });
-          return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus };
+          return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('invalid') };
         }
         if (check.state === 'error') {
           const event = await this.recordRisk({
@@ -275,7 +313,7 @@ export class AccountRiskService {
             actorId,
             forceNotify,
           });
-          return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus };
+          return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('probe_error') };
         }
         await this.prisma.channelAccount.update({
           where: { id: accountId },
@@ -292,11 +330,96 @@ export class AccountRiskService {
             actorId,
             forceNotify,
           });
-          return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus };
+          return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('invalid') };
         }
         // 小红书没有可调用的登录态接口，只能确认会话字段齐全；同样推进体检时间，保证巡检轮得到其他账号。
         await this.prisma.channelAccount.update({ where: { id: accountId }, data: { authCheckedAt: now } });
       }
+
+      if (cookieState === 'expired') {
+        const event = await this.recordRisk({
+          workspaceId,
+          accountId,
+          level: 'risk',
+          kind: 'cookie_expired',
+          message: 'Cookie 标注有效期已到期，请及时扫码或重新导入以防发布中断。',
+          actorId,
+          forceNotify,
+        });
+        return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('expired') };
+      }
+      if (cookieState === 'expiring') {
+        const detail = account.cookieExpiresAt
+          ? `Cookie 将于 ${account.cookieExpiresAt.toLocaleString('zh-CN')} 到期`
+          : 'Cookie 已连续使用超过 25 天';
+        const event = await this.recordRisk({
+          workspaceId,
+          accountId,
+          level: 'warning',
+          kind: 'cookie_expiring',
+          message: `${detail}，建议提前扫码或更新 Cookie 续期。`,
+          actorId,
+          forceNotify,
+        });
+        return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('expiring') };
+      }
+    }
+
+    if (account.readCookieCiphertext) {
+      const readCookie = decryptAccountSecret('read-cookie', workspaceId, accountId, account.readCookieCiphertext, account.readCookieKeyId);
+      if (!readCookie || (account.platform === 'xiaohongshu' && !hasXhsSessionKeys(readCookie))) {
+        const event = await this.recordRisk({
+          workspaceId,
+          accountId,
+          level: 'warning',
+          kind: 'read_session_expired',
+          message: '配置的独立「读取采集 Cookie」无效或无法解密，请更新读取会话（不影响主号发布）。',
+          actorId,
+          forceNotify,
+        });
+        return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('read_invalid') };
+      }
+      if (account.platform === 'bilibili') {
+        const readProbe = await this.probeBilibiliCookie(readCookie);
+        if (readProbe.state === 'invalid') {
+          const event = await this.recordRisk({
+            workspaceId,
+            accountId,
+            level: 'warning',
+            kind: 'read_session_expired',
+            message: '独立「读取采集 Cookie」登录态已失效，请更新读取会话以免影响数据回读。',
+            actorId,
+            forceNotify,
+          });
+          return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('read_invalid') };
+        }
+      }
+    }
+
+    if (account.readAccount && (account.readAccount.archivedAt || account.readAccount.riskStatus === 'risk')) {
+      const event = await this.recordRisk({
+        workspaceId,
+        accountId,
+        level: 'warning',
+        kind: 'read_session_expired',
+        message: `绑定的采集小号「${account.readAccount.displayName}」当前异常或已归档，请检查读取链路。`,
+        actorId,
+        forceNotify,
+      });
+      return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('read_invalid') };
+    }
+
+    if (egressIpCollision) {
+      const event = await this.recordRisk({
+        workspaceId,
+        accountId,
+        level: 'warning',
+        kind: 'ip_collision',
+        message: `检测到同平台共有 ${siblingCollisions + 1} 个账号共用出口 IP（${account.egressIp}），建议错开代理节点降低关联风险。`,
+        actorId,
+        forceNotify,
+      });
+      return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('ip_collision') };
     }
 
     if (account.riskStatus !== 'normal') {
@@ -307,12 +430,12 @@ export class AccountRiskService {
       });
       if (!latestOpen || autoManagedKinds.has(latestOpen.kind)) {
         await this.resolveRisk(workspaceId, accountId, actorId ?? null, '账号体检通过，风险已自动解除');
-        return { status: 'normal' as const, reason: '账号状态正常', feishuStatus: 'skipped' as const };
+        return { status: 'normal' as const, reason: '账号与网络环境体检正常', feishuStatus: 'skipped' as const, diagnostics: buildDiagnostics('ok') };
       }
-      return { status: account.riskStatus, reason: account.riskReason ?? '存在人工标记的风险', feishuStatus: 'skipped' as const };
+      return { status: account.riskStatus, reason: account.riskReason ?? '存在人工标记的风险', feishuStatus: 'skipped' as const, diagnostics: buildDiagnostics('manual_risk') };
     }
 
-    return { status: 'normal' as const, reason: '账号状态正常', feishuStatus: 'skipped' as const };
+    return { status: 'normal' as const, reason: '账号与网络环境体检正常', feishuStatus: 'skipped' as const, diagnostics: buildDiagnostics('ok') };
   }
 
   private async probeBilibiliCookie(cookie: string): Promise<
@@ -350,6 +473,8 @@ export class AccountRiskService {
       workspace: { trialOwnerId: null },
       OR: [
         { cookieCiphertext: { not: null } },
+        { readCookieCiphertext: { not: null } },
+        { egressIp: { not: null } },
         { channelKind: 'official' },
         { rateLimitedUntil: { not: null } },
       ],

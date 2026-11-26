@@ -284,6 +284,8 @@ function OnboardingPanel({
         alias: String(data.get('alias') ?? '').trim() || undefined,
         groupId: groupId || null,
         tags,
+        egressIp: String(data.get('egressIp') ?? '').trim() || undefined,
+        profileLabel: String(data.get('profileLabel') ?? '').trim() || undefined,
       });
       form.reset();
       pushToast('账号密码凭据已加密保存并加入发布列表。', 'success');
@@ -306,6 +308,8 @@ function OnboardingPanel({
         alias: String(data.get('alias') ?? '').trim() || undefined,
         groupId: groupId || null,
         tags,
+        egressIp: String(data.get('egressIp') ?? '').trim() || undefined,
+        profileLabel: String(data.get('profileLabel') ?? '').trim() || undefined,
       });
       form.reset();
       pushToast('Cookie 校验通过并已加密导入。', 'success');
@@ -429,6 +433,17 @@ function OnboardingPanel({
           <label>内部备注名 <small>选填</small><input name="alias" maxLength={60} placeholder="如 科技测评-大号" disabled={pwdAction.busy} /></label>
         </div>
         <label>标签 <small>逗号或空格分隔，最多 12 个</small><input name="tags" maxLength={160} placeholder="主号 科技测评" disabled={pwdAction.busy} /></label>
+        <details className="source">
+          <summary>网络与环境隔离标签（选填，用于 IP 碰撞与体检）</summary>
+          <div className="account-form-fields">
+            <label>出口 IP / 代理节点 <small>同平台同 IP 将触发冲突提醒</small>
+              <input name="egressIp" maxLength={64} placeholder="例如 203.0.113.10 或 HK-住宅-01" disabled={pwdAction.busy} />
+            </label>
+            <label>浏览器 Profile / 设备槽位 <small>选填</small>
+              <input name="profileLabel" maxLength={64} placeholder="例如 XHS-Env-01" disabled={pwdAction.busy} />
+            </label>
+          </div>
+        </details>
         <Feedback error={pwdAction.error} notice={pwdAction.notice} />
         <div className="actions">
           <button type="submit" className="button primary" disabled={pwdAction.busy}>{pwdAction.busy ? '正在加密保存…' : '加密保存账号密码'}</button>
@@ -438,7 +453,7 @@ function OnboardingPanel({
       {tab === 'cookie' && <form className="form-stack onboarding-panel" onSubmit={submitCookie}>
         <p className="muted small">
           {platform === 'bilibili'
-            ? '粘贴浏览器登录后包含 SESSDATA 的 Cookie（文本或 JSON 数组），服务端会自动调用 B 站接口核验有效性与昵称。'
+            ? '粘贴浏览器登录后包含 SESSDATA 的 Cookie（文本或 JSON 数组），服务端会自动调用 B 站接口核验有效性与昵称，并解析过期时间。'
             : '粘贴小红书网页版 / 创作平台包含 web_session 或 a1 的 Cookie（文本或 JSON 数组），服务端加密保存并纳入状态巡检。'}
         </p>
         <label>Cookie 内容<textarea name="cookie" rows={3} required maxLength={32768} spellCheck={false}
@@ -451,6 +466,17 @@ function OnboardingPanel({
           <label>内部备注名 <small>选填</small><input name="alias" maxLength={60} disabled={cookieAction.busy} /></label>
           <label>标签 <small>选填</small><input name="tags" maxLength={160} placeholder="主号 图文" disabled={cookieAction.busy} /></label>
         </div>
+        <details className="source">
+          <summary>网络与环境隔离标签（选填，用于 IP 碰撞与体检）</summary>
+          <div className="account-form-fields">
+            <label>出口 IP / 代理节点 <small>同平台同 IP 将触发冲突提醒</small>
+              <input name="egressIp" maxLength={64} placeholder="例如 203.0.113.10 或 SH-静态-02" disabled={cookieAction.busy} />
+            </label>
+            <label>浏览器 Profile / 设备槽位 <small>选填</small>
+              <input name="profileLabel" maxLength={64} placeholder="例如 Bili-Env-02" disabled={cookieAction.busy} />
+            </label>
+          </div>
+        </details>
         <Feedback error={cookieAction.error} notice={cookieAction.notice} />
         <div className="actions">
           <button type="submit" className="button primary" disabled={cookieAction.busy}>{cookieAction.busy ? '正在校验导入…' : '校验并导入 Cookie'}</button>
@@ -460,16 +486,32 @@ function OnboardingPanel({
   </section>;
 }
 
+type HealthCheckDiagnostics = {
+  loginState: string;
+  cookieState: 'none' | 'valid' | 'expiring' | 'expired';
+  egressIp: string | null;
+  egressIpCollision: boolean;
+  siblingCollisions: number;
+  profileLabel: string | null;
+  readWriteSeparated: boolean;
+  cookieExpiresAt: string | null;
+  checkedAt: string;
+};
+
 function AccountRow({
-  account, trial, showArchived, canManage, canReportRisk, groups, accountsPath, selected, onToggleSelect,
+  account, trial, showArchived, canManage, canReportRisk, groups, samePlatformPeers, accountsPath, selected, onToggleSelect,
   openPerformance, onChanged, onArchive, archiveBusy,
 }: {
   account: Account; trial?: boolean; showArchived: boolean; canManage: boolean; canReportRisk: boolean; groups: MatrixGroup[];
+  samePlatformPeers: Account[];
   accountsPath: string; selected: boolean; onToggleSelect: (id: string) => void;
   openPerformance: (id: string) => void; onChanged: () => void; onArchive: (account: Account) => void; archiveBusy: boolean;
 }) {
-  const [panel, setPanel] = useState<'meta' | 'risk' | 'creds' | null>(null);
-  const [creds, setCreds] = useState<{ loginIdentifier: string | null; password: string | null; cookie: string | null }>();
+  const [panel, setPanel] = useState<'health' | 'meta' | 'risk' | 'creds' | null>(null);
+  const [creds, setCreds] = useState<{
+    loginIdentifier: string | null; password: string | null; cookie: string | null; readCookie?: string | null; readCookieLabel?: string | null;
+  }>();
+  const [diag, setDiag] = useState<HealthCheckDiagnostics>();
   const action = useAction();
   const healthAction = useAction();
 
@@ -490,6 +532,10 @@ function AccountRow({
     const rawTags = String(data.get('tags') ?? '');
     const tags = rawTags.split(/[,，、\s]+/).map((t) => t.trim()).filter(Boolean);
     const nextGroupId = String(data.get('groupId') ?? '').trim() || null;
+    const nextReadAccountId = String(data.get('readAccountId') ?? '').trim() || null;
+    const rawReadCookie = String(data.get('readCookie') ?? '').trim();
+    const clearReadCookie = data.get('clearReadCookie') === 'on';
+    const nextReadLabel = String(data.get('readCookieLabel') ?? '').trim();
     void action.run(async () => {
       await api(`${accountsPath}/${account.id}`, {
         method: 'PATCH',
@@ -498,10 +544,19 @@ function AccountRow({
           alias: String(data.get('alias') ?? '').trim() || null,
           operator: String(data.get('operator') ?? '').trim(),
           tags,
+          egressIp: String(data.get('egressIp') ?? '').trim() || null,
+          profileLabel: String(data.get('profileLabel') ?? '').trim() || null,
         },
       });
+      if (!trial && (nextReadAccountId !== (account.readAccountId ?? null) || rawReadCookie || clearReadCookie || nextReadLabel !== (account.readCookieLabel ?? ''))) {
+        await post(`${accountsPath}/${account.id}/read-session`, {
+          readAccountId: nextReadAccountId,
+          ...(clearReadCookie ? { readCookie: null } : rawReadCookie ? { readCookie: rawReadCookie } : {}),
+          ...(nextReadLabel ? { readCookieLabel: nextReadLabel } : {}),
+        });
+      }
       setPanel(null);
-      pushToast('账号分组与备注已保存。', 'success');
+      pushToast('账号分组、环境与读写分离配置已保存。', 'success');
       onChanged();
     });
   }
@@ -513,7 +568,9 @@ function AccountRow({
       return;
     }
     void action.run(async () => {
-      const data = await api<{ loginIdentifier: string | null; password: string | null; cookie: string | null }>(
+      const data = await api<{
+        loginIdentifier: string | null; password: string | null; cookie: string | null; readCookie?: string | null; readCookieLabel?: string | null;
+      }>(
         `${accountsPath}/${account.id}/credentials`,
       );
       setCreds(data);
@@ -523,12 +580,16 @@ function AccountRow({
 
   function runHealthCheck() {
     void healthAction.run(async () => {
-      const res = await post<{ status: AccountRiskStatus; reason: string; feishuStatus: string }>(
+      const res = await post<{
+        status: AccountRiskStatus; reason: string; feishuStatus: string; diagnostics?: HealthCheckDiagnostics;
+      }>(
         `${accountsPath}/${account.id}/health-check`, {},
       );
+      if (res.diagnostics) setDiag(res.diagnostics);
+      setPanel('health');
       pushToast(
         res.status === 'normal'
-          ? '体检正常：登录态与授权有效。'
+          ? '体检正常：登录态、读写分离与网络环境通过。'
           : `发现${res.status === 'risk' ? '风险' : '预警'}：${res.reason}${res.feishuStatus === 'sent' ? '（已发送飞书通知）' : ''}`,
         res.status === 'normal' ? 'success' : 'info',
         4500,
@@ -565,6 +626,9 @@ function AccountRow({
     });
   }
 
+  const effectiveIpCollision = diag?.egressIpCollision ?? Boolean(account.egressIpCollision);
+  const effectiveSeparated = diag?.readWriteSeparated ?? Boolean(account.readWriteSeparated);
+
   return <li className={`account-row-shell${account.riskStatus === 'risk' ? ' has-risk' : account.riskStatus === 'warning' ? ' has-warning' : ''}`}>
     <div className="account-row account-management-row">
       {canManage && !showArchived && <label className="row-checkbox" aria-label={`勾选账号 ${account.displayName}`}>
@@ -587,33 +651,37 @@ function AccountRow({
         <small>
           {account.operator ? `负责人 ${account.operator} · ` : ''}
           {account.loginIdentifier ? `登录标识 ${account.loginIdentifier} · ` : ''}
+          {account.egressIp ? `节点 ${account.egressIp} · ` : ''}
           {account.identityCheckedAt ? `核验于 ${formatTime(account.identityCheckedAt)}` : '待核验或托管账号'}
           {(account.tags?.length ?? 0) > 0 && ` · 标签：${account.tags!.join(' / ')}`}
         </small>
-        {account.riskStatus && account.riskStatus !== 'normal' && account.riskReason && (
-          <p className="risk-reason-line"><AlertTriangle size={13} aria-hidden="true" />{account.riskReason}</p>
-        )}
       </div>
       <div className="account-badges">
         <span className={`badge ${statusBadge.tone}`}>{statusBadge.label}</span>
-        {!showArchived && <span className={`badge ${rBadge.tone}`}>{rBadge.label}</span>}
+        {!showArchived && <button type="button" className={`badge ${rBadge.tone}`} title={account.riskReason ?? '点击查看体检与环境详情'}
+          onClick={() => setPanel(panel === 'health' ? null : 'health')}>
+          {rBadge.label}
+        </button>}
+        {!showArchived && effectiveSeparated && <span className="badge green">读写分离</span>}
+        {!showArchived && effectiveIpCollision && <span className="badge amber">IP 同网</span>}
       </div>
       <div className="actions account-row-actions">
         {!showArchived && canManage && <button type="button" className="button compact"
-          onClick={() => setPanel(panel === 'meta' ? null : 'meta')}>
-          <Pencil size={13} aria-hidden="true" />分组/备注
+          onClick={() => setPanel(panel === 'health' ? null : 'health')}>
+          <ShieldCheck size={13} aria-hidden="true" />{panel === 'health' ? '收起体检' : '环境体检'}
         </button>}
-        {!showArchived && !trial && canManage && (account.hasPassword || account.hasCookie) && (
+        {!showArchived && canManage && <button type="button" className="button compact"
+          onClick={() => setPanel(panel === 'meta' ? null : 'meta')}>
+          <Pencil size={13} aria-hidden="true" />配置
+        </button>}
+        {!showArchived && !trial && canManage && (account.hasPassword || account.hasCookie || account.hasReadCookie) && (
           <button type="button" className="button compact" onClick={openCreds} disabled={action.busy}>
-            <KeyRound size={13} aria-hidden="true" />{panel === 'creds' ? '隐藏凭据' : '查看凭据'}
+            <KeyRound size={13} aria-hidden="true" />{panel === 'creds' ? '隐藏凭据' : '凭据'}
           </button>
         )}
-        {!showArchived && canManage && <button type="button" className="button compact" onClick={runHealthCheck} disabled={healthAction.busy}>
-          <ShieldCheck size={13} aria-hidden="true" />{healthAction.busy ? '体检中…' : '体检'}
-        </button>}
         {!showArchived && canReportRisk && <button type="button" className="button compact"
           onClick={() => setPanel(panel === 'risk' ? null : 'risk')}>
-          <ShieldAlert size={13} aria-hidden="true" />{account.riskStatus && account.riskStatus !== 'normal' ? '处理风险' : '上报风险'}
+          <ShieldAlert size={13} aria-hidden="true" />{account.riskStatus && account.riskStatus !== 'normal' ? '处理风险' : '风险上报'}
         </button>}
         {account.profileUrl && <a className="button compact" href={account.profileUrl} target="_blank" rel="noreferrer"
           aria-label={`查看 B 站主页 · ${account.displayName}`}>主页</a>}
@@ -628,6 +696,57 @@ function AccountRow({
 
     {(action.error || healthAction.error) && <Feedback error={action.error || healthAction.error} />}
 
+    {panel === 'health' && <div className="account-inline-drawer form-stack">
+      <div className="card-heading">
+        <strong>发布前环境与风险体检详情</strong>
+        <div className="actions">
+          {canManage && <button type="button" className="button primary compact" onClick={runHealthCheck} disabled={healthAction.busy}>
+            <ShieldCheck size={13} aria-hidden="true" />{healthAction.busy ? '体检中…' : '立即联网体检'}
+          </button>}
+          <button type="button" className="button compact" onClick={() => setPanel(null)}>收起</button>
+        </div>
+      </div>
+      {account.riskStatus && account.riskStatus !== 'normal' && account.riskReason && (
+        <p className="risk-reason-line"><AlertTriangle size={13} aria-hidden="true" />{account.riskReason}</p>
+      )}
+      <div className="env-diag-grid">
+        <div className="env-diag-item">
+          <small>健康与登录态</small>
+          <strong>{rBadge.label}{diag?.loginState ? ` · ${diag.loginState}` : ''}</strong>
+        </div>
+        <div className="env-diag-item">
+          <small>Cookie 有效期</small>
+          <strong>
+            {account.cookieExpiresAt
+              ? `${diag?.cookieState === 'expired' ? '已过期' : diag?.cookieState === 'expiring' ? '即将到期' : '有效'} (${formatTime(account.cookieExpiresAt)})`
+              : account.hasCookie ? '已保存（未标注到期日）' : '未配置 Cookie'}
+          </strong>
+        </div>
+        <div className="env-diag-item">
+          <small>出口 IP / 节点隔离</small>
+          <strong>
+            {account.egressIp
+              ? `${account.egressIp}${effectiveIpCollision ? '（同平台 IP 碰撞）' : '（未发现碰撞）'}`
+              : '未配置出口标识'}
+          </strong>
+        </div>
+        <div className="env-diag-item">
+          <small>读写登录分离</small>
+          <strong>
+            {account.readAccount
+              ? `采集小号：${account.readAccount.alias || account.readAccount.displayName}`
+              : account.hasReadCookie
+                ? `独立读会话${account.readCookieLabel ? `（${account.readCookieLabel}）` : ''}`
+                : '未启用（使用主号读取）'}
+          </strong>
+        </div>
+      </div>
+      <small className="muted">
+        {account.profileLabel ? `浏览器槽位：${account.profileLabel} · ` : ''}
+        {account.envCheckedAt ? `最近体检：${formatTime(account.envCheckedAt)}` : '尚未执行主动环境体检'}
+      </small>
+    </div>}
+
     {panel === 'meta' && <form className="account-inline-drawer form-stack" onSubmit={saveMeta}>
       <div className="account-form-fields">
         <label>所属单一矩阵组
@@ -639,9 +758,38 @@ function AccountRow({
         <label>内部备注名<input name="alias" maxLength={60} defaultValue={account.alias ?? ''} placeholder="不修改平台原昵称" /></label>
         <label>运营负责人<input name="operator" maxLength={40} defaultValue={account.operator ?? ''} /></label>
         <label>标签（空格或逗号分隔）<input name="tags" maxLength={160} defaultValue={(account.tags ?? []).join(' ')} /></label>
+        <label>出口 IP / 代理节点 <small>选填，检测同平台碰撞</small>
+          <input name="egressIp" maxLength={64} defaultValue={account.egressIp ?? ''} placeholder="例如 203.0.113.10" />
+        </label>
+        <label>环境槽位 / Profile 标签 <small>选填</small>
+          <input name="profileLabel" maxLength={64} defaultValue={account.profileLabel ?? ''} placeholder="例如 XHS-Env-01" />
+        </label>
       </div>
+      {!trial && <div className="form-stack">
+        <strong className="small">读写登录分离（采集成效/查状态优先使用读取会话，降低主号风险）</strong>
+        <div className="account-form-fields">
+          <label>方式一：绑定同平台辅助采集小号
+            <select name="readAccountId" defaultValue={account.readAccountId ?? ''}>
+              <option value="">不绑定采集小号</option>
+              {samePlatformPeers.map((peer) => (
+                <option key={peer.id} value={peer.id}>{peer.alias ? `${peer.alias}（${peer.displayName}）` : peer.displayName}</option>
+              ))}
+            </select>
+          </label>
+          <label>方式二：独立只读 Cookie 标签 <small>选填</small>
+            <input name="readCookieLabel" maxLength={60} defaultValue={account.readCookieLabel ?? ''} placeholder="例如 只读采集 Cookie" />
+          </label>
+        </div>
+        <label>方式二：粘贴或更新独立只读采集 Cookie <small>{account.hasReadCookie ? '已保存，留空则保持不变' : '选填'}</small>
+          <textarea name="readCookie" rows={2} maxLength={32768} spellCheck={false} placeholder="粘贴只读小号 Cookie，与主发布凭据隔离加密存储" />
+        </label>
+        {account.hasReadCookie && <label className="checkbox-line">
+          <input type="checkbox" name="clearReadCookie" />
+          <span>清除已保存的独立只读 Cookie</span>
+        </label>}
+      </div>}
       <div className="actions">
-        <button type="submit" className="button primary compact" disabled={action.busy}>保存归属与备注</button>
+        <button type="submit" className="button primary compact" disabled={action.busy}>保存配置</button>
         <button type="button" className="button compact" onClick={() => setPanel(null)}>取消</button>
       </div>
     </form>}
@@ -661,9 +809,15 @@ function AccountRow({
         </button>
       </div>}
       {creds.cookie && <div className="cred-row">
-        <span>已保存 Cookie（{creds.cookie.length} 字符）</span>
-        <button type="button" className="button compact" onClick={() => void copyText(creds.cookie!).then(() => pushToast('已复制 Cookie', 'success'))}>
-          <Copy size={13} aria-hidden="true" />复制 Cookie
+        <span>主写通道 Cookie（{creds.cookie.length} 字符）</span>
+        <button type="button" className="button compact" onClick={() => void copyText(creds.cookie!).then(() => pushToast('已复制主 Cookie', 'success'))}>
+          <Copy size={13} aria-hidden="true" />复制主 Cookie
+        </button>
+      </div>}
+      {creds.readCookie && <div className="cred-row">
+        <span>只读采集 Cookie{creds.readCookieLabel ? ` · ${creds.readCookieLabel}` : ''}（{creds.readCookie.length} 字符）</span>
+        <button type="button" className="button compact" onClick={() => void copyText(creds.readCookie!).then(() => pushToast('已复制只读采集 Cookie', 'success'))}>
+          <Copy size={13} aria-hidden="true" />复制只读 Cookie
         </button>
       </div>}
     </div>}
@@ -1008,7 +1162,9 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
             </div>
             {items.length > 0 ? <ul className="account-group-list">
               {items.map((account) => <AccountRow key={account.id} account={account} trial={trial} showArchived={false}
-                canManage={canManage} canReportRisk={canReportRisk} groups={groups} accountsPath={accountsPath}
+                canManage={canManage} canReportRisk={canReportRisk} groups={groups}
+                samePlatformPeers={accounts.filter((peer) => peer.platform === account.platform && peer.id !== account.id)}
+                accountsPath={accountsPath}
                 selected={selectedIds.includes(account.id)} onToggleSelect={toggleSelect}
                 openPerformance={openPerformance} onChanged={refreshAll} onArchive={archive} archiveBusy={archiveAction.busy} />)}
             </ul> : <p className="account-group-empty muted small">该矩阵组下暂无匹配账号，可在上方列表勾选账号移入。</p>}
@@ -1029,7 +1185,9 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
             </div>
             {ungrouped.length > 0 ? <ul className="account-group-list">
               {ungrouped.map((account) => <AccountRow key={account.id} account={account} trial={trial} showArchived={false}
-                canManage={canManage} canReportRisk={canReportRisk} groups={groups} accountsPath={accountsPath}
+                canManage={canManage} canReportRisk={canReportRisk} groups={groups}
+                samePlatformPeers={accounts.filter((peer) => peer.platform === account.platform && peer.id !== account.id)}
+                accountsPath={accountsPath}
                 selected={selectedIds.includes(account.id)} onToggleSelect={toggleSelect}
                 openPerformance={openPerformance} onChanged={refreshAll} onArchive={archive} archiveBusy={archiveAction.busy} />)}
             </ul> : <p className="account-group-empty muted small">暂无未分组账号。</p>}
@@ -1051,7 +1209,9 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
             </div>
             {matches.length > 0 ? <ul className="account-group-list">
               {matches.map((account) => <AccountRow key={account.id} account={account} trial={trial} showArchived={showArchived}
-                canManage={canManage} canReportRisk={canReportRisk} groups={groups} accountsPath={accountsPath}
+                canManage={canManage} canReportRisk={canReportRisk} groups={groups}
+                samePlatformPeers={accounts.filter((peer) => peer.platform === account.platform && peer.id !== account.id)}
+                accountsPath={accountsPath}
                 selected={selectedIds.includes(account.id)} onToggleSelect={toggleSelect}
                 openPerformance={openPerformance} onChanged={refreshAll} onArchive={archive} archiveBusy={archiveAction.busy} />)}
             </ul> : <p className="account-group-empty muted small">

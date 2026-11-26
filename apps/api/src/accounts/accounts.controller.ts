@@ -27,9 +27,10 @@ import {
   AccountOnboardingService,
   cookieImportSchema,
   passwordAccountSchema,
+  readSessionSchema,
 } from './account-onboarding.service';
 import { AccountRiskService } from './account-risk.service';
-import { cleanTags } from './account-secrets';
+import { cleanTags, normalizeEgressIp } from './account-secrets';
 import { bindBilibiliAccount } from './bilibili-account';
 import { BilibiliOAuthService, configuredBilibiliOAuthOrigin } from './bilibili-oauth';
 import {
@@ -39,7 +40,8 @@ import {
   updateMatrixGroupSchema,
 } from './matrix-groups.service';
 import { encryptPlatformSecret, readPlatformApp, workspacePlatformApp } from './platform-app';
-import { bilibiliManualProfile, isUnverifiedBilibiliAccount, publishChannel } from './publish-account';
+import { bilibiliManualProfile } from './publish-account';
+import { resolveAccountCapabilities } from './account-capabilities';
 import { XiaohongshuIdentityService } from './xiaohongshu-identity.service';
 
 const updateAccountSchema = z.object({
@@ -49,6 +51,9 @@ const updateAccountSchema = z.object({
   alias: z.string().trim().max(60).nullable().optional(),
   tags: z.array(z.string().trim().min(1).max(24)).max(12).optional(),
   pinned: z.boolean().optional(),
+  egressIp: z.string().trim().max(64).nullable().optional(),
+  profileLabel: z.string().trim().max(64).nullable().optional(),
+  cookieExpiresAt: z.string().datetime({ offset: true }).transform((v) => new Date(v)).nullable().optional(),
 }).strict();
 const platformSchema = z.enum(['xiaohongshu', 'bilibili']);
 const demoAccountSchema = z.object({ platform: platformSchema, groupId: z.string().min(1).nullable().optional() }).strict();
@@ -97,14 +102,21 @@ export class AccountsController {
       include: {
         _count: { select: { tasks: true } },
         group: { select: { id: true, name: true, color: true } },
+        readAccount: { select: { id: true, displayName: true, alias: true } },
       },
     });
+    const ipCounts = new Map<string, number>();
+    if (archived !== 'true') {
+      for (const account of accounts) {
+        if (!account.egressIp) continue;
+        const key = `${account.platform}:${account.egressIp}`;
+        ipCounts.set(key, (ipCounts.get(key) ?? 0) + 1);
+      }
+    }
     const now = new Date();
     return accounts.map((account) => {
-      const channel = publishChannel(account, now, trial);
-      const unverifiedManualBili = isUnverifiedBilibiliAccount(account);
-      const identityCheckedAt = trial || unverifiedManualBili || account.accessMethod === 'password'
-        ? null : account.authCheckedAt;
+      const capabilities = resolveAccountCapabilities(account, now, trial);
+      const ipKey = account.egressIp ? `${account.platform}:${account.egressIp}` : null;
       return {
         id: account.id,
         platform: account.platform,
@@ -117,6 +129,17 @@ export class AccountsController {
         pinned: account.pinned,
         groupId: account.groupId,
         group: account.group,
+        readAccountId: account.readAccountId,
+        readAccount: account.readAccount,
+        hasReadCookie: Boolean(account.readCookieCiphertext),
+        readCookieLabel: account.readCookieLabel,
+        readCookieUpdatedAt: account.readCookieUpdatedAt,
+        readWriteSeparated: Boolean(account.readAccountId || account.readCookieCiphertext),
+        egressIp: account.egressIp,
+        egressIpCollision: Boolean(ipKey && (ipCounts.get(ipKey) ?? 0) > 1),
+        profileLabel: account.profileLabel,
+        cookieExpiresAt: account.cookieExpiresAt,
+        envCheckedAt: account.envCheckedAt,
         profileUrl: bilibiliManualProfile(account),
         loginIdentifier: account.loginIdentifier,
         hasPassword: Boolean(account.passwordCiphertext),
@@ -125,10 +148,10 @@ export class AccountsController {
         riskStatus: account.riskStatus,
         riskReason: account.riskReason,
         riskDetectedAt: account.riskDetectedAt,
-        identityVerified: !trial && account.channelKind !== 'sandbox' && Boolean(account.externalId && identityCheckedAt),
-        identityCheckedAt,
-        availableForHandoff: channel === 'manual',
-        availableForOfficial: channel === 'official' || channel === 'sandbox',
+        identityVerified: capabilities.identityVerified,
+        identityCheckedAt: capabilities.identityCheckedAt,
+        availableForHandoff: capabilities.availableForHandoff,
+        availableForOfficial: capabilities.availableForOfficial,
         hasCredentials: Boolean(account.credentialsCiphertext || account.credentials),
         taskCount: account._count.tasks,
         createdAt: account.createdAt,
@@ -430,6 +453,20 @@ export class AccountsController {
     return this.risks.resolveRisk(workspaceId, id, user.id, input?.note || '人工确认风险已解除', Boolean(input?.notify));
   }
 
+  @Post(':id/read-session')
+  @HttpCode(200)
+  configureReadSession(
+    @CurrentMembership() membership: { role: Role },
+    @CurrentTrial() trial: boolean,
+    @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    assertCan(membership.role, 'account:manage');
+    if (trial) throw new ConflictException('试用账号不支持配置真实读取会话');
+    return this.onboarding.configureReadSession(workspaceId, id, parse(readSessionSchema, body));
+  }
+
   @Patch(':id')
   async update(
     @CurrentMembership() membership: { role: Role },
@@ -439,6 +476,8 @@ export class AccountsController {
   ) {
     assertCan(membership.role, 'account:manage');
     const input = parse(updateAccountSchema, body);
+    const nextEgressIp = input.egressIp !== undefined ? normalizeEgressIp(input.egressIp) : undefined;
+    const nextProfileLabel = input.profileLabel !== undefined ? (input.profileLabel?.trim() || null) : undefined;
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.channelAccount.findFirst({ where: { id, workspaceId } });
       if (!existing) throw new NotFoundException('账号不存在');
@@ -457,6 +496,9 @@ export class AccountsController {
           ...(input.alias !== undefined && { alias: input.alias?.trim() || null }),
           ...(input.tags !== undefined && { tags: cleanTags(input.tags) }),
           ...(input.pinned !== undefined && { pinned: input.pinned }),
+          ...(nextEgressIp !== undefined && { egressIp: nextEgressIp }),
+          ...(nextProfileLabel !== undefined && { profileLabel: nextProfileLabel }),
+          ...(input.cookieExpiresAt !== undefined && { cookieExpiresAt: input.cookieExpiresAt }),
         },
         select: {
           id: true,
@@ -470,6 +512,9 @@ export class AccountsController {
           pinned: true,
           groupId: true,
           group: { select: { id: true, name: true, color: true } },
+          egressIp: true,
+          profileLabel: true,
+          cookieExpiresAt: true,
         },
       });
     });

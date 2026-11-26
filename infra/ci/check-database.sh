@@ -76,6 +76,10 @@ BEGIN
   ASSERT has_table_privilege('matrixark_app', '"PublicationMetricSnapshot"', 'INSERT')
     AND NOT has_table_privilege('matrixark_app', '"PublicationMetricSnapshot"', 'UPDATE')
     AND NOT has_table_privilege('matrixark_app', '"PublicationMetricSnapshot"', 'DELETE'), 'Publication metric history must be append only';
+  ASSERT has_table_privilege('matrixark_app', '"WorkerHeartbeat"', 'SELECT')
+    AND has_table_privilege('matrixark_app', '"WorkerHeartbeat"', 'INSERT')
+    AND has_table_privilege('matrixark_app', '"WorkerHeartbeat"', 'UPDATE')
+    AND NOT has_table_privilege('matrixark_app', '"WorkerHeartbeat"', 'DELETE'), 'WorkerHeartbeat privileges are incorrect';
   IF current_database() = 'matrixark_upgrade_test' THEN
     ASSERT EXISTS (SELECT 1 FROM "PublishTask" t JOIN "TaskEvent" e ON e."taskId" = t.id
       WHERE t.id = 'legacy-task' AND t.status = 'paused' AND t."idempotencyKey" = 'legacy-key'
@@ -95,4 +99,4 @@ done
 pnpm db:generate
 pnpm --filter '@matrixark/api...' build
 STORAGE_LOCAL_DIR="$cluster/storage" PUBLIC_BASE_URL=http://127.0.0.1 SANDBOX_CHANNEL=false STORAGE_DRIVER=local \
-  node --test --test-concurrency=1 apps/api/test/variant-snapshot.test.mjs apps/api/test/manual-handoff.test.mjs
+  node --test --test-concurrency=1 apps/api/test/platform-policies.test.mjs apps/api/test/variant-snapshot.test.mjs apps/api/test/manual-handoff.test.mjs

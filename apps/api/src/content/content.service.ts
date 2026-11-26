@@ -10,6 +10,7 @@ import {
 } from '@matrixark/shared';
 import type { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
+import { pauseScheduledTasks } from '../tasks/domain/task-transition';
 
 export const variantSnapshot = {
   approval: true,
@@ -75,24 +76,10 @@ export class ContentService {
         archivedAt: archive ? new Date() : null, archivedById: archive ? userId : null,
       } });
       if (archive) {
-        await this.pauseScheduledTasks(tx, workspaceId, { variant: { manuscriptId: id } }, '原稿已归档，待发任务已暂停', userId);
+        await pauseScheduledTasks(tx, workspaceId, { variant: { manuscriptId: id } }, '原稿已归档，待发任务已暂停', userId);
       }
       return { ok: true };
     });
-  }
-
-  private async pauseScheduledTasks(tx: Prisma.TransactionClient, workspaceId: string,
-    target: Prisma.PublishTaskWhereInput, reason: string, userId: string) {
-    const paused = await tx.publishTask.updateManyAndReturn({
-      where: { ...target, workspaceId, status: 'scheduled' },
-      data: { status: 'paused', lastError: reason },
-      select: { id: true },
-    });
-    if (paused.length) await tx.taskEvent.createMany({
-      data: paused.map(({ id: taskId }) => ({ workspaceId, taskId, kind: 'paused',
-        fromStatus: 'scheduled', toStatus: 'paused', actorId: userId, reason })),
-    });
-    return paused.length;
   }
 
   private async lockCurrentVariant(tx: Prisma.TransactionClient, workspaceId: string, id: string) {
@@ -207,7 +194,7 @@ export class ContentService {
       data: { status: 'superseded', supersededAt: new Date() },
       select: { id: true },
     });
-    return this.pauseScheduledTasks(tx, manuscript.workspaceId,
+    return pauseScheduledTasks(tx, manuscript.workspaceId,
       { variantId: { in: superseded.map(({ id }) => id) } }, pauseReason, userId);
   }
 

@@ -35,6 +35,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: node --test infra/ci/select-targets.test.mjs
       - id: targets
         env:
           CHANGED_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -81,6 +85,7 @@ jobs:
           node-version: '24'
       - run: corepack enable && pnpm install --frozen-lockfile
       - run: pnpm db:generate && pnpm build && pnpm typecheck && pnpm test
+      - run: node --test apps/api/test/platform-policies.test.mjs apps/api/test/worker-concurrency.test.mjs
 
   package:
     name: 最终 Docker 打包

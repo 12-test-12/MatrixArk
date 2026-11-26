@@ -244,6 +244,7 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
   const [search, setSearch] = useState('');
   const [selection, setSelection] = useState<string[]>([]);
   const [groupNotice, setGroupNotice] = useState('');
+  const [jitterEnabled, setJitterEnabled] = useState(true);
   const [scheduledAt, setScheduledAt] = useState(() => localDateTime(new Date(Date.now() + 5 * 60_000)));
   const now = new Date();
   const tonight = new Date(now);
@@ -286,10 +287,12 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
     void action.run(async () => {
       if (!Number.isFinite(date.getTime())) throw new Error('请选择有效的排期时间。');
       if (!immediately && date.getTime() <= Date.now()) throw new Error('请选择未来的排期时间。');
+      const useJitter = !immediately && jitterEnabled && selected.length > 1;
       const response = await post<{ items: { id: string; disposition?: 'created' | 'existing' }[] }>(scope + '/tasks', {
         variantIds: variants.filter(({ platform }) => selected.some((account) => account.platform === platform)).map(({ id }) => id),
         accountIds: selected.map(({ id }) => id),
         scheduledAt: date.toISOString(),
+        ...(useJitter ? { jitter: { enabled: true, minSeconds: 30, maxSeconds: 180 } } : {}),
       });
       if (!response.items[0]) throw new Error('未收到任务编号。');
       const createdCount = response.items.filter(({ disposition }) => disposition !== 'existing').length;
@@ -391,6 +394,11 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
             <button type="button" disabled={action.busy || tonight <= now} onClick={() => setScheduledAt(localDateTime(tonight))}>今晚 20:00</button>
             <button type="button" disabled={action.busy} onClick={() => setScheduledAt(localDateTime(tomorrow))}>明早 09:00</button>
           </div>
+          {selected.length > 1 && <label className="checkbox-line">
+            <input type="checkbox" checked={jitterEnabled} disabled={action.busy}
+              onChange={(event) => setJitterEnabled(event.currentTarget.checked)} />
+            <span>启用风控错峰节流（多账号随机错开 30~180 秒依次执行；遇平台验证自动熔断转人工交接）</span>
+          </label>}
         </div>
         <Feedback error={action.error} />
         <div className="actions">

@@ -199,7 +199,8 @@ export class NotificationsService {
     account: { platform: Platform; channelKind: ChannelKind; accessMethod: AccountAccessMethod; externalId: string | null };
   }) {
     // 人工交接提醒覆盖小红书和已核验的 B 站账号；历史仅 UID 的 B 站账号连交接包都被拦截，不再提醒。
-    return task.status === 'handed_off' && task.executionChannel === 'manual' && task.handedOffAt
+    // 官方投稿熔断后保留原执行通道供审计，已交接任务同样需要提醒运营回填。
+    return task.status === 'handed_off' && (task.executionChannel === 'manual' || task.executionChannel === 'official') && task.handedOffAt
       && !isUnverifiedBilibiliAccount(task.account)
       && delivery.dedupeKey === dedupeKey(delivery.kind, task.handedOffAt);
   }
@@ -211,7 +212,8 @@ export class NotificationsService {
         where: { id: candidate.id },
         include: { task: { include: {
           variant: { select: { title: true } },
-          account: { select: { displayName: true, platform: true, channelKind: true, accessMethod: true, externalId: true } },
+          account: { select: { displayName: true, operator: true, platform: true, channelKind: true, accessMethod: true, externalId: true } },
+          createdBy: { select: { name: true, email: true } },
         } }, workspace: { select: { notificationSetting: true, name: true, trialOwnerId: true } } },
       });
       if (!delivery) return;
@@ -241,11 +243,14 @@ export class NotificationsService {
         data: { status: 'sending', attempts: { increment: 1 }, nextAttemptAt: null,
           leaseId: randomUUID(), leaseExpiresAt: new Date(now.getTime() + 20_000) },
       });
-      const { variant, account } = delivery.task;
+      const { variant, account, createdBy } = delivery.task;
       const headline = delivery.kind === 'handoff_ready' ? '发布任务待交接处理' : '发布任务交接后 4 小时仍未回填';
       const platformText = account.platform === 'xiaohongshu' ? '小红书' : 'B 站';
       const text = [`MatrixArk · ${headline}`, `${delivery.workspace.name} · ${platformText} · ${account.displayName}`,
-        variant.title, '请在工作台打开「发布任务 → 待回填」查看并处理。',
+        variant.title,
+        `任务创建人：${createdBy.name}（账号：${createdBy.email}）`,
+        `发布账号负责人：${account.operator?.trim() || '未填写'}`,
+        '请在工作台打开「发布任务 → 待回填」查看并处理。',
         ...(config.publicBaseUrl ? [config.publicBaseUrl] : [])].join('\n').replaceAll('<', '＜').replaceAll('>', '＞');
       return { delivery: claimed, setting, text };
     });

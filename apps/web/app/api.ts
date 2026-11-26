@@ -42,6 +42,11 @@ export type Account = {
   groupId?: string | null; group?: { id: string; name: string; color: string } | null;
   profileUrl?: string | null;
   loginIdentifier?: string | null; hasPassword?: boolean; hasCookie?: boolean; cookieUpdatedAt?: string | null;
+  readAccountId?: string | null; readAccount?: { id: string; displayName: string; alias: string | null } | null;
+  hasReadCookie?: boolean; readCookieLabel?: string | null; readCookieUpdatedAt?: string | null;
+  readWriteSeparated?: boolean;
+  egressIp?: string | null; egressIpCollision?: boolean; profileLabel?: string | null;
+  cookieExpiresAt?: string | null; envCheckedAt?: string | null;
   riskStatus?: AccountRiskStatus; riskReason?: string | null; riskDetectedAt?: string | null;
   identityVerified: boolean; identityCheckedAt: string | null; availableForHandoff: boolean; availableForOfficial: boolean;
 };

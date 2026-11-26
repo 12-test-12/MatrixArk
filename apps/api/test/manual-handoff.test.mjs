@@ -1374,6 +1374,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(sends.length, 3);
     assert.equal((await firstReady()).status, 'sent');
     assert.match(sends.at(-1), /飞书测试稿/u);
+    assert.ok(sends.at(-1).includes(`任务创建人：${owner.user.name}（账号：${owner.user.email}）`));
+    assert.ok(sends.at(-1).includes('发布账号负责人：未填写'));
     assert.ok(!sends.at(-1).includes('提醒正文'));
 
     const past = new Date(Date.now() - 4 * 60 * 60_000 - 1500);
@@ -1384,6 +1386,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await services[0].deliverDue();
     assert.equal(sends.length, 4);
     assert.match(sends.at(-1), /4 小时仍未回填/u);
+    assert.ok(sends.at(-1).includes(`任务创建人：${owner.user.name}（账号：${owner.user.email}）`));
     const { data: detail } = await call(firstPath, { cookie });
     assert.deepEqual(detail.notificationDeliveries.map(({ status }) => status).sort(), ['sent', 'sent']);
     assert.ok(!JSON.stringify(detail).includes(webhook));
@@ -1424,6 +1427,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     // 已核验的 B 站人工账号也要收到交接提醒；历史仅 UID 账号没有交接包，不再提醒。
     const biliManual = await prisma.channelAccount.create({ data: {
       workspaceId, platform: 'bilibili', channelKind: 'manual', displayName: 'B 站人工提醒账号',
+      operator: '运营小李',
       externalId: 'bili-web-uid:900001', accessMethod: 'qr_login', authStatus: 'active', authCheckedAt: new Date(),
     } });
     const { data: biliDraft } = await post(own + '/manuscripts', {
@@ -1435,8 +1439,9 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       method: 'PATCH', cookie, body: { platformFields: { category: 100, summary: '专栏摘要'.repeat(60) } },
     });
     await post(own + '/variants/' + biliArticle.id + '/confirm', {});
-    const { data: { items: [biliTask] } } = await post(own + '/tasks', {
-      variantIds: [biliArticle.id], accountIds: [biliManual.id], scheduledAt,
+    const { data: { items: [biliTask] } } = await call(own + '/tasks', {
+      method: 'POST', cookie: otherCookie, status: 201,
+      body: { variantIds: [biliArticle.id], accountIds: [biliManual.id], scheduledAt },
     });
     assert.equal(await worker.get(TasksService).dispatchDue(), 1);
     const { data: biliHandoff } = await call(own + '/tasks/' + biliTask.id + '/handoff', { cookie });
@@ -1451,6 +1456,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await services[0].deliverDue();
     assert.equal(sends.length, beforeBili + 1);
     assert.match(sends.at(-1), /· B 站 · B 站人工提醒账号/u);
+    assert.ok(sends.at(-1).includes(`任务创建人：${other.user.name}（账号：${other.user.email}）`));
+    assert.ok(sends.at(-1).includes('发布账号负责人：运营小李'));
 
     const legacy = await prisma.channelAccount.create({ data: {
       workspaceId, platform: 'bilibili', channelKind: 'manual', displayName: 'B 站旧 UID 账号',
@@ -1880,5 +1887,402 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await post(`${own}/accounts/${pwdAccount.id}/risk/resolve`, { note: '已重新验证通过', notify: true }, 200);
     assert.equal(riskFeishuMessages.length, 3);
     assert.match(riskFeishuMessages[2], /风险已解除/);
+  });
+
+  await t.test('读写登录分离、环境IP碰撞与Cookie临期体检、排期抖动与验证码熔断', async (hardcoreTest) => {
+    const { BilibiliAdapter } = await import('@matrixark/adapters');
+    const { encryptBilibiliCredentials } = await import('../dist/accounts/publish-account.js');
+    const webhook = 'https://open.feishu.cn/open-apis/bot/v2/hook/matrixark-test-fixture';
+    const secret = 'matrixark-sign-fixture';
+    await call(own + '/notifications/feishu', {
+      method: 'PATCH',
+      cookie,
+      body: { enabled: true, riskAlertEnabled: true, webhook, signSecret: secret },
+    });
+
+    const alerts = [];
+    const realFetch = globalThis.fetch;
+    hardcoreTest.mock.method(globalThis, 'fetch', (input, options) => {
+      const parsed = new URL(input);
+      if (parsed.hostname === '127.0.0.1') return realFetch(input, options);
+      if (parsed.hostname === 'open.feishu.cn') {
+        alerts.push(JSON.parse(options.body).content.text);
+        return Promise.resolve(Response.json({ code: 0 }));
+      }
+      throw new Error(`Unexpected fetch in hardcoreTest: ${input}`);
+    });
+
+    // 1) 同平台导出 JSON Cookie 自动提取到期时间 + 出口 IP 碰撞体检
+    const expiringEpochSec = Math.floor((Date.now() + 24 * 3600_000) / 1000);
+    const { data: xhsMain } = await call(own + '/accounts/cookie', {
+      method: 'POST',
+      cookie,
+      status: 200,
+      body: {
+        platform: 'xiaohongshu',
+        displayName: '环境主号A',
+        egressIp: '203.0.113.88',
+        profileLabel: 'XHS-Profile-A',
+        cookie: JSON.stringify([
+          { name: 'a1', value: 'xhs_main_a1', expirationDate: expiringEpochSec },
+          { name: 'web_session', value: 'xhs_main_sess' },
+        ]),
+      },
+    });
+    const { data: xhsPeer } = await call(own + '/accounts/cookie', {
+      method: 'POST',
+      cookie,
+      status: 200,
+      body: {
+        platform: 'xiaohongshu',
+        displayName: '采集小号B',
+        egressIp: '203.0.113.88',
+        profileLabel: 'XHS-Profile-B',
+        cookie: 'a1=xhs_peer_a1; web_session=xhs_peer_sess',
+      },
+    });
+
+    // 绑定读写分离：绑定同平台采集小号 + 配置独立读取 Cookie
+    await post(`${own}/accounts/${xhsMain.id}/read-session`, { readAccountId: xhsMain.id }, 400);
+    const { data: readCfg } = await post(`${own}/accounts/${xhsMain.id}/read-session`, {
+      readAccountId: xhsPeer.id,
+      readCookie: 'a1=read_only_a1; web_session=read_only_sess',
+      readCookieLabel: '红薯只读小号',
+    }, 200);
+    assert.equal(readCfg.readAccountId, xhsPeer.id);
+    const { data: credsWithRead } = await call(`${own}/accounts/${xhsMain.id}/credentials`, { cookie });
+    assert.match(credsWithRead.readCookie, /web_session=read_only_sess/);
+
+    // 主号体检先触发 Cookie 临期预警
+    const { data: expiringDiag } = await post(`${own}/accounts/${xhsMain.id}/health-check`, {}, 200);
+    assert.equal(expiringDiag.status, 'warning');
+    assert.equal(expiringDiag.diagnostics.cookieState, 'expiring');
+    assert.equal(expiringDiag.diagnostics.readWriteSeparated, true);
+    assert.equal(expiringDiag.diagnostics.egressIpCollision, true);
+
+    // 延后 Cookie 到期时间后再次体检，触发同平台 IP 碰撞警告；错开 IP 后自动恢复 normal
+    await call(`${own}/accounts/${xhsMain.id}`, {
+      method: 'PATCH',
+      cookie,
+      body: { cookieExpiresAt: new Date(Date.now() + 20 * 86_400_000).toISOString() },
+    });
+    const { data: ipDiag } = await post(`${own}/accounts/${xhsMain.id}/health-check`, {}, 200);
+    assert.equal(ipDiag.status, 'warning');
+    assert.equal(ipDiag.diagnostics.egressIpCollision, true);
+    assert.match(ipDiag.reason, /共用出口 IP/);
+
+    await call(`${own}/accounts/${xhsPeer.id}`, {
+      method: 'PATCH',
+      cookie,
+      body: { egressIp: '203.0.113.99' },
+    });
+    const { data: clearDiag } = await post(`${own}/accounts/${xhsMain.id}/health-check`, {}, 200);
+    assert.equal(clearDiag.status, 'normal');
+    assert.equal(clearDiag.diagnostics.egressIpCollision, false);
+
+    // 2) 排期风控错峰延迟（Jitter）+ 审计事件记录
+    const { data: draft } = await post(own + '/manuscripts', {
+      title: '抖动与熔断测试稿',
+      body: '正文测试内容'.repeat(45),
+      tags: ['风控节流'],
+    });
+    await post(`${own}/manuscripts/${draft.id}/assets`, file(sourcePng));
+    const { data: [xhsVariant, biliVariant] } = await post(`${own}/manuscripts/${draft.id}/generate`, {
+      platforms: ['xiaohongshu', 'bilibili'],
+    });
+    const { data: { variant: biliReady } } = await call(`${own}/variants/${biliVariant.id}`, {
+      method: 'PATCH',
+      cookie,
+      body: {
+        title: '抖动与熔断测试专栏标题',
+        body: '正文测试内容'.repeat(45),
+        coverAssetId: (await call(`${own}/manuscripts/${draft.id}`, { cookie })).data.assets[0].id,
+        platformFields: { category: 100, summary: '测试摘要字段内容'.repeat(25) },
+      },
+    });
+    await post(`${own}/variants/${xhsVariant.id}/confirm`, {});
+    await post(`${own}/variants/${biliReady.id}/confirm`, {});
+
+    const baseSchedule = new Date(Date.now() + 60 * 60_000);
+    const { data: jitterBatch } = await post(own + '/tasks', {
+      variantIds: [xhsVariant.id],
+      accountIds: [xhsMain.id, xhsPeer.id],
+      scheduledAt: baseSchedule.toISOString(),
+      jitter: { enabled: true, minSeconds: 30, maxSeconds: 60 },
+    });
+    const times = jitterBatch.items.map((item) => new Date(item.scheduledAt).getTime()).sort((a, b) => a - b);
+    assert.equal(times[0], baseSchedule.getTime());
+    assert.ok(times[1] - times[0] >= 30_000 && times[1] - times[0] <= 60_000);
+    const secondTaskDetail = await call(`${own}/tasks/${jitterBatch.items.find((i) => new Date(i.scheduledAt).getTime() === times[1]).id}`, { cookie });
+    assert.ok(secondTaskDetail.data.events[0].details.jitterSeconds >= 30);
+
+    // 3) 官方通道遇平台验证码 -> 绝不自动绕过，自动熔断并流转人工交接 + 飞书告警
+    const officialBiliId = randomUUID();
+    const officialExt = 'bili-captcha-fixture';
+    const officialCreds = encryptBilibiliCredentials({ id: officialBiliId, workspaceId, externalId: officialExt }, 'captcha-token');
+    await prisma.channelAccount.create({
+      data: {
+        id: officialBiliId,
+        workspaceId,
+        platform: 'bilibili',
+        channelKind: 'official',
+        accessMethod: 'oauth',
+        displayName: 'B站验证码测试号',
+        externalId: officialExt,
+        authStatus: 'active',
+        authCheckedAt: new Date(),
+        authExpiresAt: new Date(Date.now() + 3_600_000),
+        authScope: ['USER_INFO', 'ATC_BASE', 'ATC_DATA'],
+        credentialsUpdatedAt: new Date(),
+        ...officialCreds,
+      },
+    });
+
+    hardcoreTest.mock.method(BilibiliAdapter.prototype, 'publish', async () => ({
+      status: 'failed',
+      message: '提交触发平台安全滑块验证码，请转人工完成验证后发布',
+      raw: { captchaRequired: true, platformCode: -401 },
+    }));
+    const pastSlot = new Date(Date.now() - 5_000).toISOString();
+    const { data: biliTaskRes } = await post(own + '/tasks', {
+      variantIds: [biliReady.id],
+      accountIds: [officialBiliId],
+      scheduledAt: pastSlot,
+    });
+    const biliTaskId = biliTaskRes.items[0].id;
+    assert.equal(await worker.get(TasksService).dispatchDue(), 1);
+
+    const { data: brokenTask } = await call(`${own}/tasks/${biliTaskId}`, { cookie });
+    assert.equal(brokenTask.status, 'handed_off');
+    assert.equal(brokenTask.executionChannel, 'official');
+    const cbEvent = brokenTask.events.find((e) => e.kind === 'circuit_break');
+    assert.ok(cbEvent);
+    assert.equal(cbEvent.details.circuitBreak, true);
+    assert.equal(cbEvent.details.policy, 'never_bypass_captcha');
+    assert.equal(cbEvent.details.newChannel, 'manual');
+    // 已转人工交接后可直接领取交接包并由运营人工补录回执
+    const { data: handoffPkg } = await call(`${own}/tasks/${biliTaskId}/handoff`, { cookie });
+    assert.equal(handoffPkg.title, '抖动与熔断测试专栏标题');
+    const { NotificationsService } = await import('../dist/notifications/notifications.service.js');
+    const notifications = worker.get(NotificationsService);
+    await notifications.deliverDue();
+    assert.ok(alerts.some((msg) => msg.includes('发布任务待交接处理') && msg.includes(handoffPkg.title)));
+    const overdueAt = new Date(Date.now() - 4 * 60 * 60_000 - 1500);
+    await prisma.publishTask.update({ where: { id: biliTaskId }, data: { handedOffAt: overdueAt } });
+    await prisma.notificationDelivery.updateMany({
+      where: { taskId: biliTaskId, kind: 'overdue_reminder' },
+      data: { scheduledAt: new Date(overdueAt.getTime() + 4 * 60 * 60_000), nextAttemptAt: new Date(0),
+        dedupeKey: 'overdue:' + overdueAt.toISOString() },
+    });
+    await notifications.deliverDue();
+    assert.ok(alerts.some((msg) => msg.includes('4 小时仍未回填') && msg.includes(handoffPkg.title)));
+    await post(`${own}/tasks/${biliTaskId}/result`, {
+      state: 'published',
+      remoteUrl: 'https://www.bilibili.com/read/cv999999',
+    }, 200);
+    assert.equal((await call(`${own}/tasks/${biliTaskId}`, { cookie })).data.status, 'published');
+    // 同步触发飞书风险通知且不会绕过验证
+    assert.ok(alerts.some((msg) => msg.includes('B站验证码测试号') && msg.includes('验证码')));
+  });
+
+  await t.test('任务迁移在事件写入失败时回滚，并原子保存领取租约', async () => {
+    const { transitionTask } = await import('../dist/tasks/domain/task-transition.js');
+    const { lockRow } = await import('../dist/tasks/infrastructure/task-locks.js');
+    const isolatedAccount = await prisma.channelAccount.create({ data: {
+      workspaceId, platform: 'xiaohongshu', channelKind: 'manual', displayName: '迁移事务测试账号',
+    } });
+    const isolatedTask = await prisma.publishTask.create({ data: {
+      workspaceId, accountId: isolatedAccount.id, variantId: variant.id, variantContentHash: variant.contentHash,
+      scheduledAt: new Date(), createdById: owner.user.id, idempotencyKey: randomUUID(),
+    } });
+    const leaseId = randomUUID();
+    const leaseExpiresAt = new Date(Date.now() + 90_000);
+    const claim = (actorId) => prisma.$transaction(async (tx) => {
+      assert.equal(await lockRow(tx, 'task', workspaceId, isolatedTask.id), true);
+      return transitionTask(tx, isolatedTask, {
+        status: 'dispatching', executionChannel: 'manual', claimedAt: new Date(),
+        attempts: { increment: 1 }, leaseId, leaseExpiresAt,
+      }, { kind: 'claimed', actorId, leaseId });
+    });
+    await assert.rejects(claim('missing-user'), { code: 'P2003' });
+    const rolledBack = await prisma.publishTask.findUniqueOrThrow({ where: { id: isolatedTask.id } });
+    assert.equal(rolledBack.status, 'scheduled');
+    assert.equal(rolledBack.leaseId, null);
+    assert.equal(rolledBack.attempts, 0);
+    assert.equal(await prisma.taskEvent.count({ where: { taskId: isolatedTask.id } }), 0);
+    const claimed = await claim(owner.user.id);
+    assert.equal(claimed.status, 'dispatching');
+    assert.equal(claimed.leaseId, leaseId);
+    assert.equal(claimed.leaseExpiresAt.getTime(), leaseExpiresAt.getTime());
+    const [event] = await prisma.taskEvent.findMany({ where: { taskId: isolatedTask.id } });
+    assert.equal(event.fromStatus, 'scheduled');
+    assert.equal(event.toStatus, claimed.status);
+    assert.equal(event.leaseId, leaseId);
+    await assert.rejects(prisma.$transaction(tx => transitionTask(tx, claimed, { status: 'scheduled' }, { kind: 'retried' })),
+      { name: 'IllegalTransitionError' });
+    await assert.rejects(prisma.$transaction(tx => transitionTask(tx, { ...isolatedTask, workspaceId: other.workspaces[0].id },
+      { status: 'paused' }, { kind: 'paused' })), { code: 'P2025' });
+    assert.equal((await prisma.publishTask.findUniqueOrThrow({ where: { id: isolatedTask.id } })).status, 'dispatching');
+  });
+
+  await t.test('WorkerModule 独立启动、有界并发、租约心跳续期与积压监控', async (workerTest) => {
+    const { ModulesContainer } = await import('@nestjs/core');
+    const { BilibiliAdapter } = await import('@matrixark/adapters');
+    const { encryptBilibiliCredentials } = await import('../dist/accounts/publish-account.js');
+    const { WorkerModule } = await import('../dist/worker/worker.module.js');
+    const { TaskDispatchService } = await import('../dist/tasks/dispatch/task-dispatch.service.js');
+    const { WorkerHeartbeatService } = await import('../dist/worker/worker-heartbeat.service.js');
+    const { WorkerRunnerService } = await import('../dist/worker/worker-runner.service.js');
+
+    const isolatedWorker = await NestFactory.createApplicationContext(WorkerModule, { logger: ['error'], abortOnError: false });
+    workerTest.after(() => isolatedWorker.close());
+    const modules = isolatedWorker.get(ModulesContainer);
+    const loadedControllers = [];
+    for (const mod of modules.values()) {
+      for (const ctrl of mod.controllers.values()) loadedControllers.push(ctrl.name);
+    }
+    assert.deepEqual(loadedControllers, []);
+
+    const { data: workerDraft } = await post(own + '/manuscripts', {
+      title: 'Worker 有界并发测试稿',
+      body: '并发测试正文内容'.repeat(45),
+      tags: ['Worker测试'],
+    });
+    await post(`${own}/manuscripts/${workerDraft.id}/assets`, file(sourcePng));
+    const { data: [biliV] } = await post(`${own}/manuscripts/${workerDraft.id}/generate`, { platforms: ['bilibili'] });
+    const coverAssetId = (await call(`${own}/manuscripts/${workerDraft.id}`, { cookie })).data.assets[0].id;
+    const { data: { variant: approvedBili } } = await call(`${own}/variants/${biliV.id}`, {
+      method: 'PATCH',
+      cookie,
+      body: {
+        title: 'Worker 并发测试专栏',
+        body: '并发测试正文内容'.repeat(45),
+        coverAssetId,
+        platformFields: { category: 100, summary: '测试摘要内容'.repeat(45) },
+      },
+    });
+    await post(`${own}/variants/${approvedBili.id}/confirm`, {});
+
+    const officialAccountIds = [];
+    for (let i = 1; i <= 3; i++) {
+      const accId = randomUUID();
+      const ext = `bili-worker-concurrent-${i}`;
+      const creds = encryptBilibiliCredentials({ id: accId, workspaceId, externalId: ext }, `worker-token-${i}`);
+      await prisma.channelAccount.create({
+        data: {
+          id: accId,
+          workspaceId,
+          platform: 'bilibili',
+          channelKind: 'official',
+          accessMethod: 'oauth',
+          displayName: `Worker并发测试号-${i}`,
+          externalId: ext,
+          authStatus: 'active',
+          authCheckedAt: new Date(),
+          authExpiresAt: new Date(Date.now() + 3_600_000),
+          authScope: ['USER_INFO', 'ATC_BASE', 'ATC_DATA'],
+          credentialsUpdatedAt: new Date(),
+          ...creds,
+        },
+      });
+      officialAccountIds.push(accId);
+    }
+
+    const pastDue = new Date(Date.now() - 5_000).toISOString();
+    const { data: scheduledBatch } = await post(own + '/tasks', {
+      variantIds: [approvedBili.id],
+      accountIds: officialAccountIds,
+      scheduledAt: pastDue,
+    });
+    const scheduledTaskIds = scheduledBatch.items.map((item) => item.id);
+
+    let maxConcurrent = 0;
+    const seenRenewedExpiry = new Map();
+    const heartbeats = isolatedWorker.get(WorkerHeartbeatService);
+    const dispatch = isolatedWorker.get(TaskDispatchService);
+    const runner = isolatedWorker.get(WorkerRunnerService);
+
+    workerTest.mock.method(BilibiliAdapter.prototype, 'publish', async (input) => {
+      maxConcurrent = Math.max(maxConcurrent, heartbeats.getActiveCount());
+      const taskRow = await prisma.publishTask.findUniqueOrThrow({
+        where: { idempotencyKey: input.slot.idempotencyKey },
+        select: { id: true, leaseExpiresAt: true },
+      });
+      const initialExpiry = taskRow.leaseExpiresAt.getTime();
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      const refreshedRow = await prisma.publishTask.findUniqueOrThrow({
+        where: { id: taskRow.id },
+        select: { leaseExpiresAt: true },
+      });
+      seenRenewedExpiry.set(taskRow.id, refreshedRow.leaseExpiresAt.getTime() > initialExpiry);
+      return {
+        status: 'submitted',
+        remoteId: String(9000 + seenRenewedExpiry.size),
+        message: 'Worker 并发测试受理',
+      };
+    });
+
+    const count = await dispatch.dispatchDue({
+      concurrency: 2,
+      leaseRenewIntervalMs: 50,
+      leaseExtendMs: 240_000,
+      onActiveChange: heartbeats.trackActive,
+    });
+    assert.equal(count, 3);
+    assert.equal(maxConcurrent, 2);
+    assert.equal(heartbeats.getActiveCount(), 0);
+    assert.equal(seenRenewedExpiry.size, 3);
+    for (const tid of scheduledTaskIds) {
+      assert.equal(seenRenewedExpiry.get(tid), true);
+      assert.equal((await call(`${own}/tasks/${tid}`, { cookie })).data.status, 'submitted');
+    }
+
+    // 积压监控与 /api/health/worker 检查
+    const backlogAccount = await prisma.channelAccount.create({
+      data: {
+        workspaceId,
+        platform: 'xiaohongshu',
+        channelKind: 'manual',
+        accessMethod: 'qr_login',
+        displayName: '积压监控测试号',
+        externalId: `xhs-monitor-${randomUUID()}`,
+        authStatus: 'active',
+        authCheckedAt: new Date(),
+      },
+    });
+    await prisma.publishTask.create({
+      data: {
+        workspaceId,
+        accountId: backlogAccount.id,
+        variantId: variant.id,
+        variantContentHash: variant.contentHash,
+        scheduledAt: new Date(Date.now() - 400_000),
+        createdById: owner.user.id,
+        idempotencyKey: randomUUID(),
+      },
+    });
+    heartbeats.recordLoopResult('dispatch', {
+      startedAt: new Date(Date.now() - 25),
+      completedAt: new Date(),
+      ok: true,
+    });
+    await heartbeats.beat('running');
+    const healthRoot = await call('/health');
+    assert.deepEqual(healthRoot.data, { ok: true });
+    const { data: workerHealth } = await call('/health/worker');
+    assert.equal(workerHealth.workers.activeCount >= 1, true);
+    const selfWorker = workerHealth.workers.items.find((w) => w.workerId === heartbeats.workerId);
+    assert.ok(selfWorker);
+    assert.equal(selfWorker.status, 'running');
+    assert.equal(selfWorker.stale, false);
+    assert.ok(selfWorker.loopStates.dispatch);
+    assert.ok(workerHealth.backlog.dueScheduledTasks >= 1);
+    assert.ok(workerHealth.backlog.oldestDueScheduledAgeSeconds >= 390);
+    const runnerSnapshot = await runner.checkBacklog();
+    assert.ok(runnerSnapshot.warnings.some((w) => w.includes('尚未领取的任务')));
+
+    await heartbeats.beat('stopped', 0);
+    const { data: afterStop } = await call('/health/worker');
+    assert.equal(afterStop.workers.items.find((w) => w.workerId === heartbeats.workerId).status, 'stopped');
   });
 });

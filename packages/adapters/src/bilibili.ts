@@ -1,3 +1,5 @@
+import { articleFields, articleId, record } from './policies/bilibili-content.js';
+export { validateBilibiliArticle } from './policies/bilibili-content.js';
 import { request as httpsRequest } from 'node:https';
 import { biliSignedHeaders } from './bilibili-signature.js';
 import { ChannelNotConfiguredError, type ChannelAdapter, type PublishInput, type PublishReceipt } from './types.js';
@@ -11,35 +13,6 @@ const receiptIdPattern = /^[1-9]\d{0,19}$/;
 type Reply = { code?: unknown; request_id?: unknown; data?: unknown };
 type Transport = (path: string, method: 'GET' | 'POST', form: FormData | undefined, headers: Record<string, string>,
   signal: AbortSignal) => Promise<{ status: number; reply: Reply }>;
-
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function articleId(value: unknown) {
-  if (typeof value !== 'string' && (typeof value !== 'number' || !Number.isSafeInteger(value))) return undefined;
-  return receiptIdPattern.test(String(value)) ? String(value) : undefined;
-}
-
-function articleFields(variant: PublishInput['variant']) {
-  const fields = record(variant.platformFields);
-  const category = articleId(fields.category);
-  const summary = typeof fields.summary === 'string' ? fields.summary.trim() : '';
-  const bodyLength = [...variant.body.trim()].length;
-  if (!category) throw new Error('请选择 B 站专栏子分类');
-  if ([...variant.title.trim()].length < 1 || [...variant.title.trim()].length > 40) {
-    throw new Error('B 站专栏标题须为 1–40 字');
-  }
-  if ([...summary].length < 200) throw new Error('B 站专栏摘要至少需要 200 字');
-  if (bodyLength > 40_000 || (bodyLength < 200 && (variant.imageCount ?? variant.images?.length ?? 0) < 3)) {
-    throw new Error('B 站专栏正文须为 200–40,000 字，不足 200 字时至少需要三张图片');
-  }
-  return { category, summary };
-}
-
-export function validateBilibiliArticle(variant: PublishInput['variant']) {
-  articleFields(variant);
-}
 
 function escapeHtml(text: string) {
   return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -205,6 +178,10 @@ export class BilibiliAdapter implements ChannelAdapter {
     return receipt.status === 'submitted'
       ? { status: 'under_review', remoteId: receipt.remoteId, raw, message: '文章尚未确认发表' }
       : receipt;
+  }
+
+  async fetchMetrics(remoteId: string, account: Pick<PublishInput['account'], 'credentials'>) {
+    return this.fetchArticleMetrics(remoteId, account);
   }
 
   async fetchArticleMetrics(remoteId: string, account: Pick<PublishInput['account'], 'credentials'>) {

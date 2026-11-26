@@ -26,6 +26,9 @@ if (!manual) {
       path.startsWith('apps/api/prisma/') || path.startsWith('apps/api/scripts/') ||
       path.startsWith('apps/api/src/content/') || path.startsWith('apps/api/src/tasks/') ||
       path.startsWith('apps/api/src/accounts/') || path === 'apps/api/src/app.module.ts' ||
+      path.startsWith('apps/api/src/auth/') || path.startsWith('apps/api/src/workspaces/') ||
+      path.startsWith('apps/api/src/notifications/') || path.startsWith('apps/api/src/common/') ||
+      path.startsWith('apps/api/src/worker/') ||
       path.startsWith('apps/api/test/') || path === 'apps/api/src/worker.ts' ||
       path.startsWith('packages/adapters/src/') ||
       ['infra/ci/check-database.sh', 'packages/shared/src/platform.ts', 'packages/shared/src/schemas.ts',

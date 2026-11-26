@@ -67,6 +67,7 @@ enum TaskEventKind {
   paused
   claimed
   handed_off
+  circuit_break
   result
   verified
   canceled
@@ -118,6 +119,12 @@ enum AccountRiskStatus {
   normal
   warning
   risk
+}
+
+enum WorkerStatus {
+  running
+  draining
+  stopped
 }
 
 model User {
@@ -455,17 +462,29 @@ model ChannelAccount {
   riskStatus            AccountRiskStatus   @default(normal)
   riskReason            String?
   riskDetectedAt        DateTime?           @db.Timestamptz(3)
+  readAccountId         String?
+  readCookieCiphertext  String?
+  readCookieKeyId       String?
+  readCookieLabel       String?
+  readCookieUpdatedAt   DateTime?           @db.Timestamptz(3)
+  egressIp              String?
+  profileLabel          String?
+  cookieExpiresAt       DateTime?           @db.Timestamptz(3)
+  envCheckedAt          DateTime?           @db.Timestamptz(3)
 
-  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
-  archivedBy  User?              @relation(fields: [archivedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
-  group       MatrixGroup?       @relation(fields: [workspaceId, groupId], references: [workspaceId, id], onDelete: Restrict, onUpdate: NoAction)
-  tasks       PublishTask[]
-  oauthStates OAuthState[]
-  riskEvents  AccountRiskEvent[]
+  workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  archivedBy    User?              @relation(fields: [archivedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  group         MatrixGroup?       @relation(fields: [workspaceId, groupId], references: [workspaceId, id], onDelete: Restrict, onUpdate: NoAction)
+  readAccount   ChannelAccount?    @relation("AccountReadSeparation", fields: [workspaceId, readAccountId], references: [workspaceId, id], onDelete: NoAction, onUpdate: NoAction)
+  writeAccounts ChannelAccount[]   @relation("AccountReadSeparation")
+  tasks         PublishTask[]
+  oauthStates   OAuthState[]
+  riskEvents    AccountRiskEvent[]
 
   @@unique([workspaceId, id])
   @@index([workspaceId, groupId])
   @@index([workspaceId, riskStatus])
+  @@index([workspaceId, platform, egressIp])
 }
 
 model MatrixGroup {
@@ -732,4 +751,21 @@ model OAuthState {
   workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   account   ChannelAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   user      User           @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model WorkerHeartbeat {
+  workerId        String       @id
+  hostname        String
+  pid             Int
+  status          WorkerStatus @default(running)
+  maxConcurrency  Int          @default(4)
+  activeTasks     Int          @default(0)
+  loopStates      Json         @default("{}")
+  lastError       String?
+  startedAt       DateTime     @default(now()) @db.Timestamptz(3)
+  lastHeartbeatAt DateTime     @default(now()) @db.Timestamptz(3)
+  expiresAt       DateTime     @db.Timestamptz(3)
+  updatedAt       DateTime     @updatedAt @db.Timestamptz(3)
+
+  @@index([status, expiresAt])
 }

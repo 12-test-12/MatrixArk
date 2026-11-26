@@ -1,16 +1,13 @@
 import { Module } from '@nestjs/common';
 import { AssetsController } from './assets.controller';
-import { ContentService } from './content.service';
+import { ContentRuntimeModule } from './content-runtime.module';
 import { ManuscriptsController } from './manuscripts.controller';
-import { StorageService } from './storage.service';
-import { TopicAiService } from './topic-ai.service';
-import { TopicCollector } from './topic-collector.service';
 import { TopicsController } from './topics.controller';
 import { VariantsController } from './variants.controller';
 
 @Module({
+  imports: [ContentRuntimeModule],
   controllers: [ManuscriptsController, VariantsController, AssetsController, TopicsController],
-  providers: [ContentService, StorageService, TopicCollector, TopicAiService],
-  exports: [ContentService, StorageService, TopicCollector],
+  exports: [ContentRuntimeModule],
 })
 export class ContentModule {}

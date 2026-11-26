@@ -40,6 +40,20 @@ export interface PublishReceipt {
   platformPublishedAt?: string;
 }
 
+export interface PublishMetrics {
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+  favorites: number | null;
+  shares: number | null;
+}
+
+export interface PlatformContentPolicy {
+  readonly supportsVideo: boolean;
+  readonly requiresImageFiles: boolean;
+  validate(variant: PublishInput['variant']): void;
+}
+
 /** 通道未配置好：不是业务失败，是环境问题，不能算成「发布失败」 */
 export class ChannelNotConfiguredError extends Error {
   constructor(message: string) {
@@ -56,4 +70,5 @@ export interface ChannelAdapter {
   publish(input: PublishInput): Promise<PublishReceipt>;
   /** 待核实任务的唯一合法出口：去平台问一次到底发没发 */
   fetchStatus(receipt: PublishReceipt, account: PublishInput['account']): Promise<PublishReceipt>;
+  fetchMetrics?(remoteId: string, account: Pick<PublishInput['account'], 'credentials'>): Promise<PublishMetrics | undefined>;
 }
