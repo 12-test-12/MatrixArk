@@ -189,7 +189,7 @@ export class TopicsController {
       savedAt: saved ? { not: null } : undefined,
       publishedOn: filters.from || filters.to ? {
         gte: filters.from ? new Date(filters.from) : undefined,
-        lte: filters.to ? new Date(filters.to) : undefined,
+        lt: filters.to ? new Date(new Date(filters.to).getTime() + 86_400_000) : undefined,
       } : undefined,
       OR: filters.creator ? [
         { creator: { contains: filters.creator, mode: 'insensitive' } },

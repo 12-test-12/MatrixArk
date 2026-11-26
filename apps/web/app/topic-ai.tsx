@@ -78,7 +78,7 @@ const relevanceTones: Record<keyof typeof relevance, 'green' | 'sky' | 'gray' | 
 
 const quickPrompts: readonly AiPromptOption[] = [
   { id: 'smb-ai', label: '小店老板 AI 实测角度', prompt: '面向小店老板或线下实体创业者，评估这条作品能拆出什么实测选题角度' },
-  { id: 'hook', label: '拆解标题与开头钩子', prompt: '分析这条作品的标题吸睛点、前 3 秒叙事钩子以及可复用的表达模板' },
+  { id: 'hook', label: '拆解标题钩子', prompt: '根据公开标题与摘要，找出有依据的吸睛点与可复用的表达模板，并给出下一步验证动作' },
   { id: 'checklist', label: '提炼图文清单结构', prompt: '提取这条作品的内容骨架，判断如何改编为小红书或 B 站清单型干货图文' },
   { id: 'audience', label: '受众匹配与差异化', prompt: '判断这条内容与自媒体工具测评受众的匹配度，找出可以做出差异化的切入点' },
 ];
@@ -366,12 +366,6 @@ export function TopicAiPanel({ activeGoal, history, historyError, response, pend
       title: ev.field === 'title' ? '原文依据 · 来自标题' : '原文依据 · 来自摘要',
       quote: ev.quote,
     })),
-    ...(result.analysis.nextCheck ? [{
-      id: 'check',
-      kind: 'check' as const,
-      title: '核查与下一步建议',
-      description: result.analysis.nextCheck,
-    }] : []),
   ] : [];
 
   async function handleCopyReport() {
@@ -380,7 +374,8 @@ export function TopicAiPanel({ activeGoal, history, historyError, response, pend
       `【分析目标】${result.goal}`,
       `【相关性结论】${relevance[result.analysis.relevance]}：${result.analysis.judgment}`,
       ...(result.analysis.angles.length ? ['【推荐切入角度】', ...result.analysis.angles.map((a, i) => `${i + 1}. ${a}`)] : []),
-      ...(result.analysis.nextCheck ? [`【核查建议】${result.analysis.nextCheck}`] : []),
+      ...result.analysis.evidence.map(({ field, quote }) => `【${field === 'title' ? '标题' : '摘要'}原文】${quote}`),
+      ...(result.analysis.nextCheck ? [`【下一步行动】${result.analysis.nextCheck}`] : []),
     ].join('\n');
     const ok = await copyText(text);
     if (ok) {
@@ -450,6 +445,10 @@ export function TopicAiPanel({ activeGoal, history, historyError, response, pend
             );
           })}
         </div>
+      </div>}
+      {result.analysis.nextCheck && <div className="ai-angles-group">
+        <h4 className="ai-angles-heading">下一步行动</h4>
+        <p>{result.analysis.nextCheck}</p>
       </div>}
     </AiBubble>}
   </section>;

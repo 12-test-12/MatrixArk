@@ -87,7 +87,7 @@ function TopicAnalysis({ items }: { items: TopicWork[] }) {
   const comparable = first && first.mediaType !== 'other'
     && items.every(({ platform, mediaType }) => platform === first.platform && mediaType === first.mediaType);
   const metric = first?.platform === 'youtube' ? 'views' : 'likes';
-  const metricLabel = metric === 'views' ? '播放' : '点赞';
+  const metricLabel = metric === 'views' ? (first?.mediaType === 'video' ? '播放' : '阅读') : '点赞';
   const ranked = comparable ? items.flatMap((item) => {
     const value = item[metric];
     return value != null && item.publishedOn && item.publishedOn.slice(0, 10) >= previousWeek ? [{ item, value }] : [];
@@ -152,6 +152,11 @@ function TopicDetail({ item, path, refresh, openManuscript, analysis, activeGoal
       openManuscript(id);
     });
   };
+  const metrics = [
+    item.views != null && `${item.mediaType === 'video' ? '播放' : '阅读'} ${item.views.toLocaleString('zh-CN')}`,
+    item.likes != null && `点赞 ${item.likes.toLocaleString('zh-CN')}`,
+    item.comments != null && `评论 ${item.comments.toLocaleString('zh-CN')}`,
+  ].filter(Boolean).join(' · ');
   return <section className="card detail-pane">
     <div className="detail-heading topic-detail-heading"><div><h2>{titleOf(item)}</h2>
       <p>{topicPlatforms[item.platform]} · {item.creator ?? '作者未记录'} · {topicMediaTypes[item.mediaType]}</p></div>
@@ -166,7 +171,7 @@ function TopicDetail({ item, path, refresh, openManuscript, analysis, activeGoal
         <a className="button compact" href={item.sourceUrl} target="_blank" rel="noreferrer">查看原作品</a>
       </div> : <p className="muted small">来源未提供原作品链接。</p>}
       <p className="muted small">发布 {item.publishedOn?.slice(0, 10) ?? '日期未记录'} · 数据更新 {formatTime(item.importedAt)}</p>
-      <p>播放 {item.views?.toLocaleString('zh-CN') ?? '未提供'} · 点赞 {item.likes ?? '未提供'} · 评论 {item.comments ?? '未提供'}</p>
+      {metrics && <p>{metrics}</p>}
       <TopicInsights path={path} />
       <TopicAiPanel {...analysis} activeGoal={activeGoal} note={note} addAngle={addAngle} />
       <TopicChanges path={path} eager />
@@ -407,7 +412,7 @@ export function Topics({ scope, openManuscript, canConfigureAi, view, selected, 
             <TopicCover key={coverOf(item)} url={coverOf(item)} platform={item.platform} />
             <span className="list-copy"><strong>{titleOf(item)}</strong>
               <small>{topicPlatforms[item.platform]} · {item.creator ?? '作者未记录'}{item.savedAt ? ' · 已收藏' : ''}</small>
-              <small>{[item.publishedOn?.slice(0, 10), item.views != null ? `${item.views.toLocaleString('zh-CN')} 次播放`
+              <small>{[item.publishedOn?.slice(0, 10), item.views != null ? `${item.views.toLocaleString('zh-CN')} ${item.mediaType === 'video' ? '次播放' : '次阅读'}`
                 : item.likes != null ? `${item.likes.toLocaleString('zh-CN')} 次点赞` : null,
               item.matches?.some(({ field }) => field !== 'source') ? '关键词命中' : null,
               ].filter(Boolean).join(' · ')}</small>
