@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { flushSync } from 'react-dom';
-import { BarChart3, Bell, CalendarDays, ChevronRight, CircleUserRound, FileText, Telescope, UserRoundCog, UsersRound } from 'lucide-react';
+import { Activity, BarChart3, Bell, CalendarDays, ChevronRight, CircleUserRound, FileText, Telescope, UserRoundCog, UsersRound } from 'lucide-react';
 import type { Role, TaskStatus } from './api';
 import { ThemePicker } from './theme-picker';
 import { Brand } from './ui';
@@ -13,6 +13,7 @@ const navigation = {
   notifications: { label: '飞书提醒', icon: Bell },
   members: { label: '团队成员', icon: UserRoundCog },
   topics: { label: '选题台', icon: Telescope },
+  monitor: { label: '运行监控', icon: Activity },
   profile: { label: '个人资料', icon: CircleUserRound },
 };
 export type Section = keyof typeof navigation;
@@ -20,14 +21,14 @@ export type Section = keyof typeof navigation;
 const navGroups = [
   { label: '内容创作', items: ['topics', 'manuscripts'] },
   { label: '发布与成效', items: ['tasks', 'accounts', 'performance'] },
-  { label: '工作室管理', items: ['notifications', 'members', 'profile'] },
+  { label: '工作室管理', items: ['notifications', 'members', 'monitor', 'profile'] },
 ] as const;
 
 export const roleView: Record<Role, { sections: readonly [Section, ...Section[]]; taskStatus?: TaskStatus; description: string }> = {
-  owner: { sections: ['tasks', 'manuscripts', 'accounts', 'performance', 'notifications', 'members', 'topics'], description: '查看发布进度和待核实的任务，管理工作室成员。' },
+  owner: { sections: ['tasks', 'manuscripts', 'accounts', 'performance', 'notifications', 'members', 'topics', 'monitor'], description: '查看发布进度和待核实的任务，管理工作室成员。' },
   editor: { sections: ['manuscripts', 'tasks', 'accounts', 'performance', 'topics'], description: '整理原稿与配图，生成各平台版本，为已审稿件排期。' },
   reviewer: { sections: ['manuscripts', 'tasks', 'performance'], description: '检查待审核版本的文案、配图和封面。' },
-  operator: { sections: ['tasks', 'manuscripts', 'performance'], taskStatus: 'handed_off', description: '取用已审交接包，发布后补填作品链接或截图。' },
+  operator: { sections: ['tasks', 'manuscripts', 'performance', 'monitor'], taskStatus: 'handed_off', description: '取用已审交接包，发布后补填作品链接或截图。' },
   viewer: { sections: ['tasks', 'manuscripts', 'performance'], taskStatus: 'published', description: '查阅原稿、发布进度和回执。' },
 };
 

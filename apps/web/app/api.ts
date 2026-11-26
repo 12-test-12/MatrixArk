@@ -116,9 +116,50 @@ export const taskLabel: Record<TaskStatus, string> = {
   scheduled: '待执行', dispatching: '处理中', paused: '已暂停', handed_off: '待回填', submitted: '已受理',
   under_review: '平台审核中', published: '已发布', failed: '失败', unknown: '待核实', verified: '已核实', canceled: '已取消',
 };
+export type WorkerMonitorLoopState = {
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastDurationMs: number | null;
+  consecutiveFailures: number;
+  lastError: string | null;
+};
+
+export type WorkerMonitorSnapshot = {
+  checkedAt: string;
+  status: 'healthy' | 'warning' | 'degraded';
+  warnings: string[];
+  workers: {
+    activeCount: number;
+    staleCount: number;
+    items: {
+      workerId: string;
+      hostname: string;
+      pid: number;
+      status: 'running' | 'draining' | 'stopped';
+      stale: boolean;
+      maxConcurrency: number;
+      activeTasks: number;
+      lastHeartbeatAt: string;
+      expiresAt: string;
+      lastError: string | null;
+      loopStates: Record<string, WorkerMonitorLoopState>;
+    }[];
+  };
+  backlog: {
+    dueScheduledTasks: number;
+    dispatchingTasks: number;
+    expiredLeaseTasks: number;
+    overdueHandoffTasks: number;
+    dueNotifications: number;
+    dueTopicSources: number;
+    oldestDueScheduledAgeSeconds: number | null;
+  };
+};
+
 export const canEdit = (role: Role) => role === 'owner' || role === 'editor';
 export const canReview = (role: Role) => canEdit(role) || role === 'reviewer';
 export const canRecord = (role: Role) => canEdit(role) || role === 'operator';
+export const canMonitorWorker = (role: Role) => role === 'owner' || role === 'operator';
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) { super(message); }

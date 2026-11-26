@@ -397,7 +397,7 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
           {selected.length > 1 && <label className="checkbox-line">
             <input type="checkbox" checked={jitterEnabled} disabled={action.busy}
               onChange={(event) => setJitterEnabled(event.currentTarget.checked)} />
-            <span>启用风控错峰节流（多账号随机错开 30~180 秒依次执行；遇平台验证自动熔断转人工交接）</span>
+            <span>启用风控错峰节流（每个账号在计划时间上依次再延后 30~180 秒；遇平台验证自动熔断转人工交接）</span>
           </label>}
         </div>
         <Feedback error={action.error} />

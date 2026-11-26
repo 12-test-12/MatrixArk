@@ -7,11 +7,10 @@ import { ContentModule } from './content/content.module';
 import { HealthController } from './health.controller';
 import { PrismaModule } from './prisma/prisma.module';
 import { TasksModule } from './tasks/tasks.module';
-import { WorkerMonitorModule } from './worker/worker-monitor.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 
 @Module({
-  imports: [PrismaModule, WorkerMonitorModule, WorkspacesModule, AuthModule, AccountsModule, ContentModule, TasksModule],
+  imports: [PrismaModule, WorkspacesModule, AuthModule, AccountsModule, ContentModule, TasksModule],
   controllers: [HealthController],
   providers: [{ provide: APP_GUARD, useClass: AuthGuard }],
 })

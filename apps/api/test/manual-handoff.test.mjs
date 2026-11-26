@@ -2085,6 +2085,36 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.ok(alerts.some((msg) => msg.includes('B站验证码测试号') && msg.includes('验证码')));
   });
 
+  await t.test('账号巡检按环境体检时间轮转，只配环境标签的账号不会被永久跳过', async (scanTest) => {
+    const { AccountRiskService } = await import('../dist/accounts/account-risk.service.js');
+    const risks = worker.get(AccountRiskService);
+    // 把既有账号的体检时间推到当前，让本轮只看新造的「仅出口 IP」账号。
+    await prisma.channelAccount.updateMany({ where: { archivedAt: null }, data: { envCheckedAt: new Date() } });
+    const rotationIds = [];
+    for (let i = 1; i <= 17; i++) {
+      const account = await prisma.channelAccount.create({
+        data: {
+          workspaceId, platform: 'xiaohongshu', channelKind: 'manual', accessMethod: 'manual_uid',
+          displayName: `环境轮转号 ${i}`, externalId: `env-rotation-${i}`, authStatus: 'active',
+          authCheckedAt: new Date(), egressIp: `198.51.100.${i}`,
+        },
+      });
+      rotationIds.push(account.id);
+    }
+    scanTest.after(() => prisma.channelAccount.updateMany({ where: { id: { in: rotationIds } }, data: { envCheckedAt: new Date() } }));
+    // 每轮最多 15 个：第一轮取最旧的 15 个，第二轮必须轮到剩下 2 个。
+    await risks.scanDueAccountHealth();
+    const afterFirst = await prisma.channelAccount.findMany({
+      where: { id: { in: rotationIds } }, select: { envCheckedAt: true },
+    });
+    assert.ok(afterFirst.filter(({ envCheckedAt }) => envCheckedAt).length >= 15);
+    await risks.scanDueAccountHealth();
+    const afterSecond = await prisma.channelAccount.findMany({
+      where: { id: { in: rotationIds } }, select: { envCheckedAt: true },
+    });
+    assert.equal(afterSecond.filter(({ envCheckedAt }) => !envCheckedAt).length, 0);
+  });
+
   await t.test('任务迁移在事件写入失败时回滚，并原子保存领取租约', async () => {
     const { transitionTask } = await import('../dist/tasks/domain/task-transition.js');
     const { lockRow } = await import('../dist/tasks/infrastructure/task-locks.js');
@@ -2237,6 +2267,49 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       assert.equal((await call(`${own}/tasks/${tid}`, { cookie })).data.status, 'submitted');
     }
 
+    // 自动任务只在有空闲执行位时领取：并发 1 时同一轮只领 1 个，另一个保持待发，
+    // 避免领取后排队等执行导致租约在提交前过期、任务被记成需人工核实。
+    const pacingAccountIds = [];
+    for (let i = 4; i <= 5; i++) {
+      const accId = randomUUID();
+      const ext = `bili-worker-pacing-${i}`;
+      const creds = encryptBilibiliCredentials({ id: accId, workspaceId, externalId: ext }, `worker-token-${i}`);
+      await prisma.channelAccount.create({
+        data: {
+          id: accId, workspaceId, platform: 'bilibili', channelKind: 'official', accessMethod: 'oauth',
+          displayName: `Worker并发测试号-${i}`, externalId: ext, authStatus: 'active', authCheckedAt: new Date(),
+          authExpiresAt: new Date(Date.now() + 3_600_000), authScope: ['USER_INFO', 'ATC_BASE', 'ATC_DATA'],
+          credentialsUpdatedAt: new Date(), ...creds,
+        },
+      });
+      pacingAccountIds.push(accId);
+    }
+    const { data: pacingBatch } = await post(own + '/tasks', {
+      variantIds: [approvedBili.id], accountIds: pacingAccountIds, scheduledAt: pastDue,
+    });
+    const pacingTaskIds = pacingBatch.items.map((item) => item.id);
+    const pacingOrder = [...pacingTaskIds].sort();
+    await prisma.publishTask.updateMany({
+      where: { status: 'scheduled', scheduledAt: { lte: new Date() }, id: { notIn: pacingTaskIds } },
+      data: { scheduledAt: new Date(Date.now() + 3_600_000) },
+    });
+    let dispatchingDuringFirstPublish;
+    workerTest.mock.method(BilibiliAdapter.prototype, 'publish', async (input) => {
+      if (dispatchingDuringFirstPublish === undefined) {
+        dispatchingDuringFirstPublish = await prisma.publishTask.findMany({
+          where: { id: { in: pacingTaskIds }, status: 'dispatching' }, select: { id: true },
+        });
+      }
+      return { status: 'submitted', remoteId: String(9500 + pacingTaskIds.length), message: '执行位限流' };
+    });
+    const pacingOptions = { concurrency: 1, leaseRenewIntervalMs: 50, onActiveChange: heartbeats.trackActive };
+    await dispatch.dispatchDue(pacingOptions);
+    // 并发 1 时第二个任务要在第一个提交完成后才领取；先领取再排队会让租约提前开始计时。
+    assert.deepEqual(dispatchingDuringFirstPublish.map(({ id }) => id), [pacingOrder[0]]);
+    assert.deepEqual((await prisma.publishTask.findMany({
+      where: { id: { in: pacingTaskIds } }, select: { status: true },
+    })).map(({ status }) => status), ['submitted', 'submitted']);
+
     // 积压监控与 /api/health/worker 检查
     const backlogAccount = await prisma.channelAccount.create({
       data: {
@@ -2269,7 +2342,23 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await heartbeats.beat('running');
     const healthRoot = await call('/health');
     assert.deepEqual(healthRoot.data, { ok: true });
-    const { data: workerHealth } = await call('/health/worker');
+    await call('/health/worker', { status: 404 });
+    await call(own + '/worker-health', { status: 401 });
+    await call(foreign + '/worker-health', { cookie, status: 403 });
+
+    // 校验角色访问控制：仅负责人(owner)与运营(operator)可查看，编辑/审核/只读均 403
+    const { data: monitorViewer, cookie: monViewerCookie } = await register('monitor-viewer');
+    const monMembership = await prisma.membership.create({
+      data: { workspaceId, userId: monitorViewer.user.id, role: 'operator' },
+    });
+    workerTest.after(() => prisma.membership.delete({ where: { id: monMembership.id } }));
+    await call(own + '/worker-health', { cookie: monViewerCookie, status: 200 });
+    for (const deniedRole of ['editor', 'reviewer', 'viewer']) {
+      await prisma.membership.update({ where: { id: monMembership.id }, data: { role: deniedRole } });
+      await call(own + '/worker-health', { cookie: monViewerCookie, status: 403 });
+    }
+
+    const { data: workerHealth } = await call(own + '/worker-health', { cookie });
     assert.equal(workerHealth.workers.activeCount >= 1, true);
     const selfWorker = workerHealth.workers.items.find((w) => w.workerId === heartbeats.workerId);
     assert.ok(selfWorker);
@@ -2278,11 +2367,15 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.ok(selfWorker.loopStates.dispatch);
     assert.ok(workerHealth.backlog.dueScheduledTasks >= 1);
     assert.ok(workerHealth.backlog.oldestDueScheduledAgeSeconds >= 390);
+    // 积压数据按工作室严格隔离：外部工作室只能看到自己的 0 积压
+    const { data: foreignHealth } = await call(foreign + '/worker-health', { cookie: otherCookie });
+    assert.equal(foreignHealth.backlog.dueScheduledTasks, 0);
+
     const runnerSnapshot = await runner.checkBacklog();
     assert.ok(runnerSnapshot.warnings.some((w) => w.includes('尚未领取的任务')));
 
     await heartbeats.beat('stopped', 0);
-    const { data: afterStop } = await call('/health/worker');
+    const { data: afterStop } = await call(own + '/worker-health', { cookie });
     assert.equal(afterStop.workers.items.find((w) => w.workerId === heartbeats.workerId).status, 'stopped');
   });
 });

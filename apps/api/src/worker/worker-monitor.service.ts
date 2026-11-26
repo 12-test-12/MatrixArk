@@ -39,10 +39,11 @@ export type WorkerMonitorSnapshot = {
 export class WorkerMonitorService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async getSnapshot(): Promise<WorkerMonitorSnapshot> {
+  async getSnapshot(workspaceId?: string): Promise<WorkerMonitorSnapshot> {
     const now = await databaseTime(this.prisma);
     const fourHoursAgo = new Date(now.getTime() - 4 * 3_600_000);
     const recentWindow = new Date(now.getTime() - 24 * 3_600_000);
+    const scope = workspaceId ? { workspaceId } : {};
 
     const [
       workers,
@@ -60,28 +61,30 @@ export class WorkerMonitorService {
         take: 20,
       }),
       this.prisma.publishTask.count({
-        where: { status: 'scheduled', scheduledAt: { lte: now } },
+        where: { ...scope, status: 'scheduled', scheduledAt: { lte: now } },
       }),
       this.prisma.publishTask.findFirst({
-        where: { status: 'scheduled', scheduledAt: { lte: now } },
+        where: { ...scope, status: 'scheduled', scheduledAt: { lte: now } },
         orderBy: [{ scheduledAt: 'asc' }],
         select: { scheduledAt: true },
       }),
       this.prisma.publishTask.count({
-        where: { status: 'dispatching' },
+        where: { ...scope, status: 'dispatching' },
       }),
       this.prisma.publishTask.count({
         where: {
+          ...scope,
           status: 'dispatching',
           executionChannel: { in: ['official', 'sandbox'] },
           leaseExpiresAt: { lte: now },
         },
       }),
       this.prisma.publishTask.count({
-        where: { status: 'handed_off', handedOffAt: { lte: fourHoursAgo } },
+        where: { ...scope, status: 'handed_off', handedOffAt: { lte: fourHoursAgo } },
       }),
       this.prisma.notificationDelivery.count({
         where: {
+          ...scope,
           OR: [
             { status: 'pending', nextAttemptAt: { lte: now } },
             { status: 'sending', leaseExpiresAt: { lte: now } },
@@ -89,7 +92,7 @@ export class WorkerMonitorService {
         },
       }),
       this.prisma.topicSource.count({
-        where: { enabled: true, deletedAt: null, nextRunAt: { lte: now } },
+        where: { ...scope, enabled: true, deletedAt: null, nextRunAt: { lte: now } },
       }),
     ]);
 

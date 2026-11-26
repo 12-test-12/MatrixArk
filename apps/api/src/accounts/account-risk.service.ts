@@ -481,13 +481,15 @@ export class AccountRiskService {
     };
     const candidates = await this.prisma.channelAccount.findMany({
       where,
-      orderBy: [{ authCheckedAt: { sort: 'asc', nulls: 'first' } }, { id: 'asc' }],
-      select: { id: true, workspaceId: true, authCheckedAt: true, riskStatus: true },
+      // 按「最近环境体检时间」轮转：任何账号只要体检过就会推进 envCheckedAt，
+      // 只配了出口 IP / 只读 Cookie 的账号也能轮到，队列不会永远停在同 15 个账号上。
+      orderBy: [{ envCheckedAt: { sort: 'asc', nulls: 'first' } }, { id: 'asc' }],
+      select: { id: true, workspaceId: true, envCheckedAt: true, riskStatus: true },
       take: 15,
     });
     const tenMinutesAgo = new Date(now.getTime() - 10 * 60_000);
     for (const candidate of candidates) {
-      if (candidate.authCheckedAt && candidate.authCheckedAt > tenMinutesAgo && candidate.riskStatus === 'normal') {
+      if (candidate.envCheckedAt && candidate.envCheckedAt > tenMinutesAgo && candidate.riskStatus === 'normal') {
         continue;
       }
       try {

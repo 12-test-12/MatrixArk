@@ -4514,3 +4514,110 @@ textarea {
   width: 15px;
   height: 15px;
 }
+
+/* Worker & Backlog Monitor */
+.monitor-banner.status-warning {
+  border-color: color-mix(in oklab, #f59e0b 45%, var(--line));
+  background: color-mix(in oklab, #f59e0b 6%, var(--surface));
+}
+.monitor-banner.status-degraded {
+  border-color: color-mix(in oklab, #ef4444 45%, var(--line));
+  background: color-mix(in oklab, #ef4444 6%, var(--surface));
+}
+.monitor-banner-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.monitor-banner-title h2 {
+  margin: 0;
+}
+.monitor-warning-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.monitor-warning-list li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: light-dark(#92400e, #fcd34d);
+}
+.monitor-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.monitor-kpi-card {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--surface-inset);
+  border: 1px solid var(--line-soft);
+  display: grid;
+  gap: 4px;
+}
+.monitor-kpi-card small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.monitor-kpi-card strong {
+  font-size: 22px;
+  line-height: 1.2;
+}
+.monitor-kpi-card span {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.monitor-kpi-card.highlight-amber {
+  border-color: color-mix(in oklab, #f59e0b 40%, var(--line));
+}
+.monitor-kpi-card.highlight-red {
+  border-color: color-mix(in oklab, #ef4444 45%, var(--line));
+}
+.worker-nodes-list {
+  display: grid;
+  gap: 12px;
+}
+.worker-node-card {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--surface-inset);
+  border: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+}
+.worker-node-card.is-stale {
+  border-color: color-mix(in oklab, #ef4444 45%, var(--line));
+}
+.worker-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.worker-loops-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+.worker-loop-chip {
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  display: grid;
+  gap: 2px;
+}
+.worker-loop-chip.has-error {
+  border-color: color-mix(in oklab, #ef4444 45%, var(--line));
+}
+.worker-loop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { ArrowRight, Check, CircleUserRound, LogOut, Radio, X } from 'lucide-react';
 import { Accounts } from './accounts';
 import {
-  api, ApiError, canEdit, canRecord, messageOf, post, roleLabel, scopeFor, useAction, useResource,
+  api, ApiError, canEdit, canMonitorWorker, canRecord, messageOf, post, roleLabel, scopeFor, useAction, useResource,
   type Account, type Session, type Workspace, type WorkbenchSummary,
 } from './api';
 import { Manuscripts, type ManuscriptDrafts } from './manuscripts';
@@ -16,6 +16,7 @@ import { Preview } from './preview';
 import { Profile } from './profile';
 import { Tasks } from './tasks';
 import { Brand, Empty, Feedback, Loading, PageHeader } from './ui';
+import { WorkerMonitor } from './worker-monitor';
 import { roleView, Workbench, type Section } from './workbench';
 
 type WorkspaceLocation = { section?: Section; itemId?: string; topicView?: TopicView; topicWorkId?: string };
@@ -138,6 +139,9 @@ function WorkspaceBody({ workspace, section, itemId, topicView, topicWorkId, onT
     openManuscripts={openManuscripts} counts={summary.data?.taskCounts} refreshSummary={summary.refresh} />;
   if (section === 'performance') return <Performance scope={scope} role={workspace.role} initialAccount={itemId} openTask={openTasks} />;
   if (section === 'members') return <Members scope={scope} />;
+  if (section === 'monitor') return canMonitorWorker(workspace.role)
+    ? <WorkerMonitor scope={scope} />
+    : <section className="card"><Empty icon={Check} title="仅负责人与运营可查看运行监控" /></section>;
   if (section === 'notifications') return workspace.trial ? <>
     <PageHeader title="飞书提醒演练" description="交接提醒和 2 分钟未回填提醒会在任务详情里生成模拟投递记录。" />
     <p className="muted">要在飞书群里收到消息，请切回正式工作室，保存群机器人地址后点击「发一条测试消息」。</p>

@@ -24,6 +24,7 @@
 - 新增 [concurrency.ts](file:///D:/MatrixArk/apps/api/src/worker/concurrency.ts)（`runBounded`），按有界工作池并发上限执行异步任务。
 - [config.ts](file:///D:/MatrixArk/apps/api/src/config.ts) 新增 `config.worker` 可调参数：`dispatchConcurrency`（默认 4，范围 1–16）、`receiptConcurrency`（默认 4）、`metricsConcurrency`（默认 2）、租约与续期周期、心跳与积压预警阈值。
 - [task-dispatch.service.ts](file:///D:/MatrixArk/apps/api/src/tasks/dispatch/task-dispatch.service.ts) 在保持数据库逐个事务领取与单账号互斥索引的基础上，将跨账号的自动投稿并发限制在有界工作池内执行；[task-receipt.service.ts](file:///D:/MatrixArk/apps/api/src/tasks/dispatch/task-receipt.service.ts) 与 [task-metrics.service.ts](file:///D:/MatrixArk/apps/api/src/tasks/application/task-metrics.service.ts) 同步接入 `runBounded`。
+- 自动通道改为「先占执行位再领取」：每轮只领取不超过 `dispatchConcurrency` 个自动任务并立即提交，避免任务领取后排队等待导致租约在提交前过期、被提交前检查记成「需核实」；人工交接仍在同一次事务里完成。
 
 ### 3. 租约心跳续期（Lease Heartbeat Renewal）
 - [task-lease.service.ts](file:///D:/MatrixArk/apps/api/src/tasks/dispatch/task-lease.service.ts) 新增 `renewLease(workspaceId, taskId, leaseId, extendMs)`，仅在 `status = 'dispatching'`、`leaseId` 匹配且尚未过期时原子顺延 `leaseExpiresAt`，不改变任务状态或恢复已超时的租约。
@@ -32,7 +33,7 @@
 ### 4. Worker 心跳落库与队列积压监控
 - Schema 迁移 [202611260003_worker_heartbeats/migration.sql](file:///D:/MatrixArk/apps/api/prisma/migrations/202611260003_worker_heartbeats/migration.sql) 新增 `WorkerStatus`（`running` / `draining` / `stopped`）与 `WorkerHeartbeat` 表（全部时间字段使用 `timestamptz(3)`），并在 [app-privileges.sql](file:///D:/MatrixArk/apps/api/prisma/app-privileges.sql) 为 `matrixark_app` 授予 `SELECT, INSERT, UPDATE`。
 - 新增 [worker-heartbeat.service.ts](file:///D:/MatrixArk/apps/api/src/worker/worker-heartbeat.service.ts) 与 [worker-monitor.service.ts](file:///D:/MatrixArk/apps/api/src/worker/worker-monitor.service.ts)（通过 [worker-monitor.module.ts](file:///D:/MatrixArk/apps/api/src/worker/worker-monitor.module.ts) 供 Worker 与 API 共用）。
-- [health.controller.ts](file:///D:/MatrixArk/apps/api/src/health.controller.ts) 保持 `GET /api/health` 返回 `{ ok: true }`，并新增 `GET /api/health/worker` 输出在线/失联 Worker 心跳状态、各轮询环节耗时与异常统计，以及队列积压指标（待派发到期任务、处理中任务、过期未恢复租约、超时人工交接、待投递飞书通知与待采集选题源）。
+- [health.controller.ts](file:///D:/MatrixArk/apps/api/src/health.controller.ts) 保持 `GET /api/health` 返回 `{ ok: true }`；监控接口收口至工作室隔离的 `GET /api/workspaces/:workspaceId/worker-health`（[workspaces.controller.ts](file:///D:/MatrixArk/apps/api/src/workspaces/workspaces.controller.ts)），通过权限动作 `worker:monitor` 限制仅负责人（`owner`）与运营（`operator`）可查看，输出在线/失联 Worker 心跳状态、各轮询环节耗时与异常统计，以及当前工作室队列积压指标；并在工作台前端新增受角色控制的 [worker-monitor.tsx](file:///D:/MatrixArk/apps/web/app/worker-monitor.tsx)「运行监控」页面。
 - [infra/ci/select-targets.mjs](file:///D:/MatrixArk/infra/ci/select-targets.mjs)、[infra/ci/check-database.sh](file:///D:/MatrixArk/infra/ci/check-database.sh) 与 [.github/workflows/matrixark.yml](file:///D:/MatrixArk/.github/workflows/matrixark.yml) 同步纳管 `apps/api/src/worker/`、`WorkerHeartbeat` 权限校验和 `worker-concurrency.test.mjs`。
 
 ## 验证结果

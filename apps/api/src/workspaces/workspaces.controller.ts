@@ -19,6 +19,7 @@ import { CurrentMembership, CurrentUser } from '../auth/decorators';
 import type { SessionUser } from '../auth/session.service';
 import { parse } from '../common/zod';
 import { PrismaService } from '../prisma/prisma.service';
+import { WorkerMonitorService } from '../worker/worker-monitor.service';
 import { WorkspaceGuard } from './workspace.guard';
 import { WorkspacesService } from './workspaces.service';
 import { TrialWorkspaceService } from './trial-workspace.service';
@@ -29,6 +30,7 @@ export class WorkspacesController {
     private readonly prisma: PrismaService,
     private readonly service: WorkspacesService,
     private readonly trial: TrialWorkspaceService,
+    private readonly workerMonitor: WorkerMonitorService,
   ) {}
 
   @Get()
@@ -105,6 +107,13 @@ export class WorkspacesController {
       }),
     ]);
     return { taskCounts: Object.fromEntries(tasks.map((task) => [task.status, task._count._all])), pendingReview, riskAccounts };
+  }
+
+  @Get(':workspaceId/worker-health')
+  @UseGuards(WorkspaceGuard)
+  async workerHealth(@Param('workspaceId') workspaceId: string, @CurrentMembership() membership: { role: Role }) {
+    assertCan(membership.role, 'worker:monitor');
+    return this.workerMonitor.getSnapshot(workspaceId);
   }
 
   @Post(':workspaceId/members')

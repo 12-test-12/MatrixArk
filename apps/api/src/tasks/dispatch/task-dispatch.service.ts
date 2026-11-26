@@ -28,6 +28,7 @@ export class TaskDispatchService {
 
   async dispatchDue(options: DispatchDueOptions = {}) {
     await this.leases.recoverExpiredClaims();
+    const concurrency = options.concurrency ?? config.worker.dispatchConcurrency;
     const candidates = await this.prisma.publishTask.findMany({
       where: {
         status: 'scheduled', scheduledAt: { lte: await databaseTime(this.prisma) },
@@ -39,37 +40,39 @@ export class TaskDispatchService {
     });
 
     let dispatched = 0;
-    const automaticClaims: AutomaticClaim[] = [];
     const busyAccounts = new Set<string>();
-
-    for (const candidate of candidates) {
-      if (busyAccounts.has(candidate.accountId)) continue;
-      const outcome = await this.claims.claim(candidate);
-      if (!outcome) continue;
-      if (outcome !== true) {
+    let cursor = 0;
+    // 每轮只领取一个并发量的自动任务并立刻提交。领取后排队等执行会让租约在提交前过期，
+    // 提交前检查会把任务判成「领取已失效」，任务被记成需人工核实。
+    while (cursor < candidates.length) {
+      const automaticClaims: AutomaticClaim[] = [];
+      while (cursor < candidates.length && automaticClaims.length < concurrency) {
+        const candidate = candidates[cursor++]!;
+        if (busyAccounts.has(candidate.accountId)) continue;
+        const outcome = await this.claims.claim(candidate);
+        if (!outcome) continue;
+        dispatched++;
+        if (outcome === true) continue;
         busyAccounts.add(candidate.accountId);
         automaticClaims.push(outcome);
       }
-      dispatched++;
+      await runBounded(automaticClaims, concurrency, async (claim) => {
+        options.onActiveChange?.(1);
+        try {
+          await this.executor.submitClaim(claim, {
+            leaseRenewIntervalMs: options.leaseRenewIntervalMs,
+            leaseExtendMs: options.leaseExtendMs,
+          });
+        } catch (error) {
+          this.logger.error(
+            `执行自动发布任务失败 · ${claim.task.id}`,
+            error instanceof Error ? error.stack : String(error),
+          );
+        } finally {
+          options.onActiveChange?.(-1);
+        }
+      });
     }
-
-    const concurrency = options.concurrency ?? config.worker.dispatchConcurrency;
-    await runBounded(automaticClaims, concurrency, async (claim) => {
-      options.onActiveChange?.(1);
-      try {
-        await this.executor.submitClaim(claim, {
-          leaseRenewIntervalMs: options.leaseRenewIntervalMs,
-          leaseExtendMs: options.leaseExtendMs,
-        });
-      } catch (error) {
-        this.logger.error(
-          `执行自动发布任务失败 · ${claim.task.id}`,
-          error instanceof Error ? error.stack : String(error),
-        );
-      } finally {
-        options.onActiveChange?.(-1);
-      }
-    });
 
     return dispatched;
   }

@@ -12,7 +12,8 @@ export type Action =
   | 'task:result'
   | 'account:manage'
   | 'member:manage'
-  | 'workspace:settings';
+  | 'workspace:settings'
+  | 'worker:monitor';
 
 const ALLOWED: Record<Action, readonly Role[]> = {
   'content:write': ['owner', 'editor'],
@@ -23,6 +24,7 @@ const ALLOWED: Record<Action, readonly Role[]> = {
   'account:manage': ['owner', 'editor'],
   'member:manage': ['owner'],
   'workspace:settings': ['owner'],
+  'worker:monitor': ['owner', 'operator'],
 };
 
 export const ROLE_LABELS: Record<Role, string> = {
