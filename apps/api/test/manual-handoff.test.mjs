@@ -2360,11 +2360,18 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
 
     const { data: workerHealth } = await call(own + '/worker-health', { cookie });
     assert.equal(workerHealth.workers.activeCount >= 1, true);
-    const selfWorker = workerHealth.workers.items.find((w) => w.workerId === heartbeats.workerId);
+    const [selfWorker] = workerHealth.workers.items;
     assert.ok(selfWorker);
     assert.equal(selfWorker.status, 'running');
     assert.equal(selfWorker.stale, false);
     assert.ok(selfWorker.loopStates.dispatch);
+    // 工作室视图不返回主机名 / PID / 错误原文，节点标识是脱敏哈希
+    assert.match(selfWorker.workerId, /^worker-[0-9a-f]{8}$/u);
+    assert.equal(selfWorker.hostname, undefined);
+    assert.equal(selfWorker.pid, undefined);
+    assert.equal(selfWorker.lastError, null);
+    assert.ok(Object.values(selfWorker.loopStates).every((loop) => !('lastError' in loop)));
+    assert.ok(!JSON.stringify(workerHealth).includes(heartbeats.workerId));
     assert.ok(workerHealth.backlog.dueScheduledTasks >= 1);
     assert.ok(workerHealth.backlog.oldestDueScheduledAgeSeconds >= 390);
     // 积压数据按工作室严格隔离：外部工作室只能看到自己的 0 积压
@@ -2376,6 +2383,6 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
 
     await heartbeats.beat('stopped', 0);
     const { data: afterStop } = await call(own + '/worker-health', { cookie });
-    assert.equal(afterStop.workers.items.find((w) => w.workerId === heartbeats.workerId).status, 'stopped');
+    assert.equal(afterStop.workers.items[0].status, 'stopped');
   });
 });

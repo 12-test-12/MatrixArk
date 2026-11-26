@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { config } from '../config';
 import { PrismaService } from '../prisma/prisma.service';
@@ -12,8 +13,9 @@ export type WorkerMonitorSnapshot = {
     staleCount: number;
     items: {
       workerId: string;
-      hostname: string;
-      pid: number;
+      /** 只有 Worker 自身的服务端日志视图带主机名；工作室接口按进程哈希脱敏 */
+      hostname?: string;
+      pid?: number;
       status: string;
       stale: boolean;
       maxConcurrency: number;
@@ -34,6 +36,25 @@ export type WorkerMonitorSnapshot = {
     oldestDueScheduledAgeSeconds: number | null;
   };
 };
+
+/** 把 `主机名:pid:随机串` 换成稳定但不可反推的节点标识。 */
+function publicWorkerId(workerId: string) {
+  return `worker-${createHash('sha256').update(workerId).digest('hex').slice(0, 8)}`;
+}
+
+/** 保留耗时与失败次数，去掉每条轮询记录里的错误原文。 */
+function publicLoopStates(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, raw]) => {
+    const state = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+    return [name, {
+      lastStartedAt: typeof state.lastStartedAt === 'string' ? state.lastStartedAt : null,
+      lastCompletedAt: typeof state.lastCompletedAt === 'string' ? state.lastCompletedAt : null,
+      lastDurationMs: typeof state.lastDurationMs === 'number' ? state.lastDurationMs : null,
+      consecutiveFailures: typeof state.consecutiveFailures === 'number' ? state.consecutiveFailures : 0,
+    }];
+  }));
+}
 
 @Injectable()
 export class WorkerMonitorService {
@@ -96,20 +117,22 @@ export class WorkerMonitorService {
       }),
     ]);
 
+    // 工作室视图只给节点状态、并发和轮询耗时：主机名、PID 和错误原文留在服务端日志里，
+    // 不传给任何工作室成员。未传 workspaceId 的调用方是 Worker 自身的积压日志。
+    const tenantView = Boolean(workspaceId);
     const workerItems = workers.map((item) => {
       const stale = item.status !== 'stopped' && item.expiresAt <= now;
       return {
-        workerId: item.workerId,
-        hostname: item.hostname,
-        pid: item.pid,
+        workerId: tenantView ? publicWorkerId(item.workerId) : item.workerId,
+        ...(tenantView ? {} : { hostname: item.hostname, pid: item.pid }),
         status: item.status,
         stale,
         maxConcurrency: item.maxConcurrency,
         activeTasks: item.activeTasks,
         lastHeartbeatAt: item.lastHeartbeatAt.toISOString(),
         expiresAt: item.expiresAt.toISOString(),
-        lastError: item.lastError,
-        loopStates: item.loopStates,
+        lastError: tenantView ? null : item.lastError,
+        loopStates: tenantView ? publicLoopStates(item.loopStates) : item.loopStates,
       };
     });
 

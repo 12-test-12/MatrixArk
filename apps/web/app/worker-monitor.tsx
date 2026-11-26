@@ -144,7 +144,7 @@ export function WorkerMonitor({ scope }: { scope: string }) {
                 <article className={`worker-node-card${node.stale ? ' is-stale' : ''}`} key={node.workerId}>
                   <div className="card-heading">
                     <div>
-                      <strong>{node.hostname} · PID {node.pid}</strong>
+                      <strong>Worker 节点</strong>
                       <p className="muted small"><code>{node.workerId}</code></p>
                     </div>
                     <div className="actions">
@@ -156,9 +156,6 @@ export function WorkerMonitor({ scope }: { scope: string }) {
                     <span>最近心跳：{formatTime(node.lastHeartbeatAt)}</span>
                     <span>租约到期：{formatTime(node.expiresAt)}</span>
                   </div>
-                  {node.lastError && (
-                    <p className="risk-reason-line"><AlertTriangle size={13} aria-hidden="true" />最近异常：{node.lastError}</p>
-                  )}
                   {entries.length > 0 && (
                     <div className="worker-loops-grid">
                       {entries.map(([key, loop]) => (

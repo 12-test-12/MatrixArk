@@ -133,8 +133,9 @@ export type WorkerMonitorSnapshot = {
     staleCount: number;
     items: {
       workerId: string;
-      hostname: string;
-      pid: number;
+      /** 工作室接口已脱敏，不返回主机名与 PID */
+      hostname?: string;
+      pid?: number;
       status: 'running' | 'draining' | 'stopped';
       stale: boolean;
       maxConcurrency: number;
