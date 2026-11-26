@@ -13,6 +13,7 @@ import {
 import { addMemberSchema } from '@matrixark/shared';
 import type { Role } from '@prisma/client';
 import { z } from 'zod';
+import { config } from '../config';
 import { assertCan, ASSIGNABLE_ROLES, can } from '../common/permissions';
 import { CurrentMembership, CurrentUser } from '../auth/decorators';
 import type { SessionUser } from '../auth/session.service';
@@ -20,12 +21,14 @@ import { parse } from '../common/zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { WorkspaceGuard } from './workspace.guard';
 import { WorkspacesService } from './workspaces.service';
+import { TrialWorkspaceService } from './trial-workspace.service';
 
 @Controller('workspaces')
 export class WorkspacesController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly service: WorkspacesService,
+    private readonly trial: TrialWorkspaceService,
   ) {}
 
   @Get()
@@ -35,10 +38,11 @@ export class WorkspacesController {
       include: { workspace: { include: { _count: { select: { manuscripts: true, accounts: true } } } } },
       orderBy: { createdAt: 'asc' },
     });
-    return memberships.map((m) => ({
+    return memberships.filter(({ workspace }) => config.trialAvailable || !workspace.trialOwnerId).map((m) => ({
       id: m.workspace.id,
       name: m.workspace.name,
       role: m.role,
+      ...(m.workspace.trialOwnerId && { trial: true }),
       manuscriptCount: m.workspace._count.manuscripts,
       accountCount: m.workspace._count.accounts,
     }));
@@ -49,6 +53,11 @@ export class WorkspacesController {
     const input = parse(z.object({ name: z.string().trim().min(1, '工作室名称不能为空').max(60) }), body);
     const workspace = await this.service.createForUser(user.id, input.name);
     return { id: workspace.id, name: workspace.name, role: 'owner' as const };
+  }
+
+  @Post('trial')
+  enterTrial(@CurrentUser() user: SessionUser) {
+    return this.trial.enter(user.id);
   }
 
   @Get(':workspaceId')
@@ -86,13 +95,16 @@ export class WorkspacesController {
   @Get(':workspaceId/workbench-summary')
   @UseGuards(WorkspaceGuard)
   async workbenchSummary(@Param('workspaceId') workspaceId: string, @CurrentMembership() membership: { role: Role }) {
-    const [tasks, pendingReview] = await Promise.all([
+    const [tasks, pendingReview, riskAccounts] = await Promise.all([
       this.prisma.publishTask.groupBy({ by: ['status'], where: { workspaceId }, _count: { _all: true } }),
       can(membership.role, 'content:approve') ? this.prisma.manuscript.count({
         where: { workspaceId, archivedAt: null, variants: { some: { status: 'draft', rejections: { none: {} } } } },
       }) : Promise.resolve(null),
+      this.prisma.channelAccount.count({
+        where: { workspaceId, archivedAt: null, riskStatus: { in: ['warning', 'risk'] } },
+      }),
     ]);
-    return { taskCounts: Object.fromEntries(tasks.map((task) => [task.status, task._count._all])), pendingReview };
+    return { taskCounts: Object.fromEntries(tasks.map((task) => [task.status, task._count._all])), pendingReview, riskAccounts };
   }
 
   @Post(':workspaceId/members')

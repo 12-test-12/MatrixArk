@@ -21,6 +21,7 @@ function int(value: string | undefined, fallback: number): number {
 const storageDir = process.env.STORAGE_LOCAL_DIR ?? './storage';
 const storageDriver = process.env.STORAGE_DRIVER ?? 'local';
 const sandboxChannel = boolean(process.env.SANDBOX_CHANNEL, 'SANDBOX_CHANNEL');
+const apiHost = process.env.API_HOST ?? '127.0.0.1';
 const bilibili = {
   enabled: boolean(process.env.BILIBILI_OFFICIAL_ENABLED, 'BILIBILI_OFFICIAL_ENABLED'),
   clientId: process.env.BILIBILI_CLIENT_ID?.trim(),
@@ -51,7 +52,8 @@ if (process.env.NODE_ENV === 'production') {
 
 export const config = {
   databaseUrl,
-  host: process.env.API_HOST ?? '127.0.0.1',
+  host: apiHost,
+  trialAvailable: process.env.NODE_ENV !== 'production' && ['127.0.0.1', 'localhost', '::1'].includes(apiHost),
   port: int(process.env.API_PORT, 4000),
   apiOrigin: process.env.API_ORIGIN ?? 'http://localhost:3000',
   sessionTtlDays: int(process.env.SESSION_TTL_DAYS, 30),

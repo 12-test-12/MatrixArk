@@ -25,12 +25,21 @@ const listSchema = z.object({
 
 const performanceSchema = listSchema.pick({ accountId: true, cursor: true, limit: true }).extend({
   platform: z.enum(['bilibili', 'xiaohongshu']).optional(),
+  groupId: z.string().min(1).max(128).optional(),
   content: z.enum(['article', 'video']).optional(),
+  days: z.coerce.number().int().min(1).max(365).optional(),
 });
 const metricCount = z.number().int().min(0).max(2_147_483_647).nullable().default(null);
 const metricsSchema = z.object({
   views: metricCount, likes: metricCount, comments: metricCount, favorites: metricCount, shares: metricCount,
-}).strict().refine((value) => Object.values(value).some((count) => count !== null), '请填写至少一项成效数据');
+  recordedAt: z.string().datetime({ offset: true }).transform((value) => new Date(value)).optional(),
+}).strict().refine((value) => (
+  value.views !== null || value.likes !== null || value.comments !== null
+  || value.favorites !== null || value.shares !== null
+), '请填写至少一项成效数据');
+const historyQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(365).optional(),
+});
 
 @Controller('workspaces/:workspaceId/tasks')
 @UseGuards(WorkspaceGuard)
@@ -163,8 +172,9 @@ export class TasksController {
   }
 
   @Get(':id/metrics/history')
-  metricHistory(@Param('workspaceId') workspaceId: string, @Param('id') id: string) {
-    return this.tasks.metricHistory(workspaceId, id);
+  metricHistory(@Param('workspaceId') workspaceId: string, @Param('id') id: string, @Query() query: unknown) {
+    const { days } = parse(historyQuerySchema, query);
+    return this.tasks.metricHistory(workspaceId, id, days);
   }
 
   @Post(':id/metrics/sync')

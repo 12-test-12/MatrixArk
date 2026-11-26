@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { api, post, useAction, useResource } from './api';
 import { Feedback, Loading, PageHeader } from './ui';
 
-type FeishuSetting = { enabled: boolean; webhookConfigured: boolean; signatureConfigured: boolean };
+type FeishuSetting = { enabled: boolean; riskAlertEnabled?: boolean; webhookConfigured: boolean; signatureConfigured: boolean };
 
 export function FeishuSettings({ scope }: { scope: string }) {
   const path = scope + '/notifications/feishu';
@@ -20,7 +20,9 @@ export function FeishuSettings({ scope }: { scope: string }) {
     const signSecret = String(fields.get('signSecret') ?? '').trim();
     void action.run(async () => {
       await api(path, { method: 'PATCH', body: {
-        enabled: fields.has('enabled'), webhook: webhook || undefined,
+        enabled: fields.has('enabled'),
+        riskAlertEnabled: fields.has('riskAlertEnabled'),
+        webhook: webhook || undefined,
         signSecret: signSecret || (fields.has('clearSignature') ? null : undefined),
       } });
       form.reset();
@@ -65,6 +67,8 @@ export function FeishuSettings({ scope }: { scope: string }) {
             </label>}
             <label className="checkbox-field"><input name="enabled" type="checkbox" defaultChecked={setting.enabled}
               disabled={busy} />给本工作室发送任务提醒</label>
+            <label className="checkbox-field"><input name="riskAlertEnabled" type="checkbox" defaultChecked={setting.riskAlertEnabled ?? true}
+              disabled={busy} />账号异常、Cookie 失效或触发风控时自动推送飞书告警</label>
             <div className="actions">
               <button className="button primary" disabled={busy || !dirty}>保存设置</button>
               <button type="button" className="button" disabled={busy || !setting.webhookConfigured || dirty}

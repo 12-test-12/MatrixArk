@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { AccountRiskService } from './accounts/account-risk.service';
 import { TopicCollector } from './content/topic-collector.service';
 import { NotificationsService } from './notifications/notifications.service';
 import { TasksModule } from './tasks/tasks.module';
@@ -30,13 +31,16 @@ async function main() {
   const tasks = app.get(TasksService);
   const notifications = app.get(NotificationsService);
   const topics = app.get(TopicCollector);
+  const accountRisks = app.get(AccountRiskService);
   logger.log('发布任务 Worker 已启动');
   try {
     await Promise.all([
       poll(stopped.signal, () => tasks.dispatchDue(), '任务派发轮询失败，下轮重试'),
       poll(stopped.signal, () => tasks.pollAutomaticResults(), '平台回执轮询失败，下轮重试'),
+      poll(stopped.signal, () => tasks.syncDueArticleMetrics(), '作品成效同步轮询失败，下轮重试', 60_000),
       poll(stopped.signal, () => notifications.deliverDue(stopped.signal), '飞书投递轮询失败，下轮重试'),
       poll(stopped.signal, () => topics.runDue(stopped.signal), '选题采集轮询失败，下轮重试', 15_000),
+      poll(stopped.signal, () => accountRisks.scanDueAccountHealth(), '账号健康体检轮询失败，下轮重试', 600_000),
     ]);
   } finally {
     await app.close();

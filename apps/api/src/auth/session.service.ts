@@ -45,12 +45,13 @@ export class SessionService {
     await this.prisma.session.delete({ where: { id: sha256(token) } }).catch(() => undefined);
   }
 
-  async workspacesOf(userId: string): Promise<Array<{ id: string; name: string; role: Role }>> {
+  async workspacesOf(userId: string): Promise<Array<{ id: string; name: string; role: Role; trial?: true }>> {
     const memberships = await this.prisma.membership.findMany({
       where: { userId },
       include: { workspace: true },
       orderBy: { createdAt: 'asc' },
     });
-    return memberships.map((m) => ({ id: m.workspace.id, name: m.workspace.name, role: m.role }));
+    return memberships.filter(({ workspace }) => config.trialAvailable || !workspace.trialOwnerId)
+      .map((m) => ({ id: m.workspace.id, name: m.workspace.name, role: m.role, ...(m.workspace.trialOwnerId && { trial: true }) }));
   }
 }

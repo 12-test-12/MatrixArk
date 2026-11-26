@@ -4,9 +4,10 @@ import {
   ShieldCheck, Sparkles,
 } from 'lucide-react';
 import {
-  api, canEdit, canReview, fileBody, formatTime, imageUrl, platforms, post, publishPlatformLabel, useAction, useResource,
-  type Account, type Manuscript, type ManuscriptSummary, type ManuscriptVariant, type Platform, type Role, type Variant,
+  api, canEdit, canReview, cleanAccountName, fileBody, formatTime, imageUrl, platforms, post, publishPlatformLabel, useAction, useResource,
+  type Account, type Manuscript, type ManuscriptSummary, type ManuscriptVariant, type MatrixGroup, type Platform, type Role, type Variant,
 } from './api';
+import { pushToast } from './toast';
 import { Empty, Feedback, Loading, PageHeader, PlatformIcon, ReviewPicture } from './ui';
 
 type ReviewFilter = 'all' | 'pending' | 'returned';
@@ -225,74 +226,188 @@ function EditVersion({ scope, variant, assets, drafts, draftKey, onSave, onCance
   </div></div>;
 }
 
-function localDateTime() {
-  const now = new Date(Date.now() + 5 * 60_000);
-  return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+function localDateTime(date: Date) {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
-function Schedule({ scope, variants, accounts, onSchedule, openAccounts }: {
-  scope: string; variants: Variant[]; accounts: Account[]; onSchedule: (id: string) => void; openAccounts: () => void;
+function Schedule({ scope, variants, currentVariants, accounts, onSchedule, openAccounts, showPlatform, previewPlatform }: {
+  scope: string; variants: Variant[]; currentVariants: ManuscriptVariant[]; accounts: Account[];
+  onSchedule: (id: string) => void; openAccounts: () => void; showPlatform: (platform: Platform) => void;
+  previewPlatform: (platform: Platform) => void;
 }) {
   const action = useAction();
+  const groups = useResource<MatrixGroup[]>(scope + '/accounts/groups');
   const targets = accounts.filter((account) => (account.availableForHandoff || account.availableForOfficial)
     && variants.some(({ platform, videoAsset }) => platform === account.platform && (!videoAsset || account.channelKind !== 'official')));
+  const [selectedPlatform, setPlatform] = useState<Platform | ''>('');
+  const platform = selectedPlatform || (variants.length === 1 ? variants[0]!.platform : '');
+  const [search, setSearch] = useState('');
   const [selection, setSelection] = useState<string[]>([]);
-  const selected = targets.length === 1 ? targets : targets.filter(({ id }) => selection.includes(id));
-  function selectAccounts(ids: string[], checked: boolean) {
-    setSelection((current) => checked ? [...new Set([...current, ...ids])] : current.filter((id) => !ids.includes(id)));
+  const [groupNotice, setGroupNotice] = useState('');
+  const [scheduledAt, setScheduledAt] = useState(() => localDateTime(new Date(Date.now() + 5 * 60_000)));
+  const now = new Date();
+  const tonight = new Date(now);
+  tonight.setHours(20, 0, 0, 0);
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 9);
+  const localZone = new Intl.DateTimeFormat('zh-CN', { timeZoneName: 'longGeneric' })
+    .formatToParts(now).find(({ type }) => type === 'timeZoneName')?.value ?? '设备时区';
+  const selected = targets.filter(({ id }) => selection.includes(id));
+  const current = currentVariants.find((variant) => variant.platform === platform);
+  const eligible = variants.find((variant) => variant.platform === platform);
+  const group = targets.filter((account) => account.platform === platform);
+  const query = search.trim().toLowerCase();
+  const matching = group.filter((account) => account.displayName.toLowerCase().includes(query)
+    || account.alias?.toLowerCase().includes(query)
+    || account.operator?.toLowerCase().includes(query));
+  const matchingIds = matching.map(({ id }) => id);
+  const allMatchingSelected = matchingIds.every((id) => selection.includes(id));
+  const activeGroups = (groups.data ?? []).filter((item) => accounts.some((acc) => acc.groupId === item.id));
+  function selectByMatrixGroup(matrixGroup: MatrixGroup) {
+    const inGroup = accounts.filter((acc) => acc.groupId === matrixGroup.id);
+    const compatibleIds = targets.filter((acc) => acc.groupId === matrixGroup.id).map(({ id }) => id);
+    if (!compatibleIds.length) {
+      setGroupNotice(`矩阵组「${matrixGroup.name}」当前没有可匹配本稿件已审版本的账号。`);
+      return;
+    }
+    const allIn = compatibleIds.every((id) => selection.includes(id));
+    setSelection((prev) => (allIn ? prev.filter((id) => !compatibleIds.includes(id)) : [...new Set([...prev, ...compatibleIds])]));
+    const skipped = inGroup.length - compatibleIds.length;
+    setGroupNotice(allIn
+      ? `已取消选择矩阵组「${matrixGroup.name}」的账号。`
+      : `已选中矩阵组「${matrixGroup.name}」中 ${compatibleIds.length} 个账号${skipped > 0 ? `（另有 ${skipped} 个账号因版本未审或通道不匹配未选入）` : ''}。`);
   }
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const fields = new FormData(event.currentTarget);
+  function selectAccounts(ids: string[], checked: boolean) {
+    const current = selected.map(({ id }) => id);
+    setSelection(checked ? [...new Set([...current, ...ids])] : current.filter((id) => !ids.includes(id)));
+    if (checked && platform) previewPlatform(platform);
+  }
+  function schedule(date: Date, immediately = false) {
+    if (selected.length === 0) return;
     void action.run(async () => {
-      const date = new Date(String(fields.get('scheduledAt')));
       if (!Number.isFinite(date.getTime())) throw new Error('请选择有效的排期时间。');
-      const response = await post<{ items: { id: string }[] }>(scope + '/tasks', {
+      if (!immediately && date.getTime() <= Date.now()) throw new Error('请选择未来的排期时间。');
+      const response = await post<{ items: { id: string; disposition?: 'created' | 'existing' }[] }>(scope + '/tasks', {
         variantIds: variants.filter(({ platform }) => selected.some((account) => account.platform === platform)).map(({ id }) => id),
         accountIds: selected.map(({ id }) => id),
         scheduledAt: date.toISOString(),
       });
       if (!response.items[0]) throw new Error('未收到任务编号。');
+      const createdCount = response.items.filter(({ disposition }) => disposition !== 'existing').length;
+      const existingCount = response.items.length - createdCount;
+      if (createdCount === 0) {
+        pushToast('该版本与所选账号已有排期任务，本次未新建，已为你打开原有任务。', 'info', 4200);
+      } else if (existingCount > 0) {
+        pushToast(`已新建 ${createdCount} 条发布任务，另有 ${existingCount} 个账号沿用已有任务。`, 'success', 3800);
+      } else {
+        pushToast(`已创建 ${createdCount} 条发布任务。`, 'success');
+      }
       onSchedule(response.items[0].id);
-    }, '发布排期已创建。');
+    });
   }
-  return <div className="schedule">
+  const immediate = selected.length > 0 && selected.every((account) => account.availableForHandoff) ? '立即生成交接待办'
+    : selected.length > 0 && selected.every((account) => account.channelKind === 'sandbox') ? '立即模拟投稿'
+      : selected.length > 0 && selected.every((account) => account.channelKind === 'official') ? '立即投稿' : '立即执行';
+  return <div id="publish-schedule" className="schedule" tabIndex={-1}>
     <h3><CalendarPlus size={17} aria-hidden="true" />安排发布</h3>
-    {targets.length ? <form className="form-stack" onSubmit={submit}>
-      {variants.map((variant) => {
-        const group = targets.filter(({ platform }) => platform === variant.platform);
-        if (!group.length) return null;
-        const groupIds = group.map(({ id }) => id);
-        const allSelected = group.every(({ id }) => selection.includes(id));
-        return <fieldset className="schedule-accounts" key={variant.id} disabled={action.busy}>
-          <legend>{publishPlatformLabel(variant.platform, Boolean(variant.videoAsset))} · V{variant.version}</legend>
-          {group.length > 1 && <button type="button" className="text-button"
-            onClick={() => selectAccounts(groupIds, !allSelected)}>
-            {allSelected ? '取消全选' : '全选'}{publishPlatformLabel(variant.platform, Boolean(variant.videoAsset))}账号
-          </button>}
-          {group.map((account) => <label key={account.id}>
-            <input type="checkbox" checked={selected.some(({ id }) => id === account.id)} disabled={targets.length === 1}
-              onChange={(event) => selectAccounts([account.id], event.currentTarget.checked)} />
-            <span>{account.displayName} · {account.channelKind === 'sandbox' ? '沙箱模拟' : account.availableForOfficial ? '自动投稿' : '人工交接'}</span>
-          </label>)}
-        </fieldset>;
-      })}
-      <label>排期时间 <small>{Intl.DateTimeFormat().resolvedOptions().timeZone}</small>
-        <input name="scheduledAt" type="datetime-local" required disabled={action.busy} defaultValue={localDateTime()} />
+    <form className="form-stack" aria-busy={action.busy} onSubmit={(event) => {
+      event.preventDefault();
+      schedule(new Date(scheduledAt));
+    }}>
+      {activeGroups.length > 0 && <div className="field-group">
+        <div className="section-line">
+          <span>按矩阵组跨平台快选</span>
+          <small className="muted">每个账号只属于单一矩阵组</small>
+        </div>
+        <div className="filters">
+          {activeGroups.map((item) => {
+            const groupCompatible = targets.filter((acc) => acc.groupId === item.id);
+            const allIn = groupCompatible.length > 0 && groupCompatible.every((acc) => selection.includes(acc.id));
+            return <button key={item.id} type="button" className={allIn ? 'active' : undefined}
+              disabled={action.busy} onClick={() => selectByMatrixGroup(item)}>
+              <span className={`group-dot color-${item.color}`} aria-hidden="true" />
+              {item.name} ({groupCompatible.length})
+            </button>;
+          })}
+        </div>
+        {groupNotice && <p className="muted small" role="status">{groupNotice}</p>}
+      </div>}
+      <label className="schedule-platform">发布平台
+        <select value={platform} disabled={action.busy} onChange={(event) => {
+          const next = event.currentTarget.value as Platform;
+          setPlatform(next);
+          setSearch('');
+          previewPlatform(next);
+        }}>
+          <option value="" disabled>请选择平台</option>
+          {platforms.map((item) => <option key={item} value={item}>{publishPlatformLabel(item,
+            Boolean(currentVariants.find((variant) => variant.platform === item)?.videoAsset))}</option>)}
+        </select>
       </label>
-      <Feedback error={action.error} />
-      <button className="button primary" disabled={action.busy || selected.length === 0}>
-        {selected.length ? `为 ${selected.length} 个账号排期` : '选择账号后排期'}<ChevronRight size={15} aria-hidden="true" />
-      </button>
-    </form> : <p className="muted">已审版本暂无可用账号。<button type="button" className="text-button" onClick={openAccounts}>
-      查看账号与授权状态</button>。</p>}
+      {platform && !eligible && <p className="muted small">
+        {current?.status === 'approved' ? '该版本需要重新审核' : `该平台版本${variantLabel(current)}`}。
+        <button type="button" className="text-button" onClick={() => showPlatform(platform)}>查看版本</button>
+      </p>}
+      {eligible && group.length === 0 && <p className="muted small">
+        {eligible.videoAsset && accounts.some((account) => account.platform === platform && account.channelKind === 'official')
+          ? '当前视频需选择人工交接或沙箱账号。' : '该平台暂无可用账号，请检查账号连接或授权。'}
+        <button type="button" className="text-button" onClick={openAccounts}>查看发布账号</button>
+      </p>}
+      {eligible && group.length > 0 && <fieldset className="schedule-accounts" disabled={action.busy}>
+        <legend>发布账号 · V{eligible.version}</legend>
+        {group.length > 1 && <label>搜索当前平台账号
+          <input type="search" value={search} placeholder="账号名称或负责人"
+            onChange={(event) => setSearch(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.preventDefault();
+            }} />
+        </label>}
+        {matching.length > 1 && <button type="button" className="text-button"
+          onClick={() => selectAccounts(matchingIds, !allMatchingSelected)}>
+          {allMatchingSelected ? '取消全选' : '全选'}{query ? '搜索结果' : '当前平台账号'}
+        </button>}
+        {matching.length === 0 ? <p className="muted small" role="status">没有匹配的账号，请试试其他关键词。</p>
+          : <ul className="schedule-account-list">
+            {matching.map((account) => <li key={account.id}><label>
+              <input type="checkbox" checked={selection.includes(account.id)}
+                onChange={(event) => selectAccounts([account.id], event.currentTarget.checked)} />
+              <span>{cleanAccountName(account.displayName)} · {account.channelKind === 'sandbox' ? '沙箱模拟' : account.availableForOfficial ? '自动投稿' : '人工交接'}</span>
+            </label></li>)}
+          </ul>}
+      </fieldset>}
+      {targets.length > 0 && <>
+        <p className="muted small schedule-selection" role="status">
+          {selected.length ? `已选 ${selected.length} 个账号 · ${platforms.map((item) => {
+            const count = selected.filter((account) => account.platform === item).length;
+            return count ? `${publishPlatformLabel(item, Boolean(variants.find((variant) => variant.platform === item)?.videoAsset))} ${count} 个` : '';
+          }).filter(Boolean).join('、')}` : '请选择平台，再勾选要发布的账号。'}
+        </p>
+        <div className="schedule-timing">
+          <label>排期时间 <small>{localZone}</small>
+            <input name="scheduledAt" type="datetime-local" required disabled={action.busy} value={scheduledAt}
+              onChange={(event) => setScheduledAt(event.currentTarget.value)} />
+          </label>
+          <div className="filters schedule-shortcuts" role="group" aria-label="快捷排期">
+            <button type="button" disabled={action.busy} onClick={() => setScheduledAt(localDateTime(new Date(Date.now() + 600_000)))}>10 分钟后</button>
+            <button type="button" disabled={action.busy || tonight <= now} onClick={() => setScheduledAt(localDateTime(tonight))}>今晚 20:00</button>
+            <button type="button" disabled={action.busy} onClick={() => setScheduledAt(localDateTime(tomorrow))}>明早 09:00</button>
+          </div>
+        </div>
+        <Feedback error={action.error} />
+        <div className="actions">
+          <button className="button primary" disabled={action.busy || selected.length === 0}>
+            {selected.length ? `为 ${selected.length} 个账号排期` : '选择账号后排期'}<ChevronRight size={15} aria-hidden="true" />
+          </button>
+          <button type="button" className="button" disabled={action.busy || selected.length === 0} onClick={() => schedule(new Date(), true)}>{immediate}</button>
+        </div>
+      </>}
+    </form>
   </div>;
 }
 
 function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, changed, onReview, onSchedule, openAccounts }: {
   scope: string; role: Role; id: string; accounts: ReturnType<typeof useResource<Account[]>>;
   drafts: ManuscriptDrafts; reviewFilter: ReviewFilter;
-  changed: () => void; onReview?: (message: string) => void; onSchedule: (id: string) => void; openAccounts: () => void;
+  changed: (restoredId?: string) => void; onReview?: (message: string) => void; onSchedule: (id: string) => void; openAccounts: () => void;
 }) {
   const detail = useResource<Manuscript>(scope + '/manuscripts/' + id);
   const action = useAction();
@@ -309,6 +424,7 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
   const [selectedPlatform, setPlatform] = useState<Platform>();
   const [rejecting, setRejecting] = useState(false);
   const rejectButton = useRef<HTMLButtonElement>(null);
+  const platformOptions = useRef<HTMLDivElement>(null);
   const rejectFormId = useId();
   const manuscript = detail.data;
   const currentVariants = manuscript?.variants.filter(({ status }) => status !== 'superseded') ?? [];
@@ -328,7 +444,11 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
   const reviewable = snapshot?.status === 'draft' && !snapshot.returned && !manuscript?.archivedAt && canReview(role);
   const pastRejections = manuscript?.variants.filter(({ status, rejections }) => status === 'superseded' && rejections?.length) ?? [];
   const editingVersion = snapshot && editable && (editing ?? drafts.has(draftKey));
-  function refresh() { detail.refresh(); changed(); }
+  function refresh(restoredId?: string) { detail.refresh(); changed(restoredId); }
+  function showPlatform(next: Platform, focus = true) {
+    action.reset(); setPlatform(next); setEditing(focus ? null : false); setRejecting(false);
+    if (focus) platformOptions.current?.querySelector<HTMLButtonElement>(`[data-platform="${next}"]`)?.focus();
+  }
   function archive() {
     if (!manuscript) return;
     const restoring = Boolean(manuscript.archivedAt);
@@ -336,8 +456,8 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
     void action.run(async () => {
       const path = scope + '/manuscripts/' + id;
       await api(restoring ? path + '/restore' : path, { method: restoring ? 'PATCH' : 'DELETE' });
-      refresh();
-    }, restoring ? '稿件已恢复。' : '稿件已归档。');
+      refresh(restoring ? id : undefined);
+    }, restoring ? undefined : '稿件已归档。');
   }
   function generate(targets: readonly Platform[]) {
     const targetPlatform = targets.length === 1 ? targets[0]! : platform;
@@ -372,11 +492,26 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
   }
   function upload(files: File[]) {
     if (!files.length) return;
+    const missingPicture = snapshot?.platform === 'xiaohongshu' && snapshot.status === 'draft' && !snapshot.returned
+      && !snapshot.assets.length && !editingVersion ? snapshot.id : null;
     void action.run(async () => {
       try {
-        for (const file of files) await post(scope + '/manuscripts/' + id + '/assets', fileBody(file));
+        const assetIds: string[] = [];
+        for (const file of files) {
+          const asset = await post<{ id: string }>(scope + '/manuscripts/' + id + '/assets', fileBody(file));
+          assetIds.push(asset.id);
+        }
+        if (missingPicture) await api(scope + '/variants/' + missingPicture, { method: 'PATCH', body: { assetIds: assetIds.slice(0, 9) } });
       } finally { refresh(); }
-    }, '原稿配图已上传。');
+    }, missingPicture ? '图片已加入小红书的待审核版本。' : '原稿配图已上传。');
+  }
+  function attachOriginalPictures() {
+    if (!snapshot || !manuscript?.assets.length) return;
+    void action.run(async () => {
+      await api(scope + '/variants/' + snapshot.id, { method: 'PATCH',
+        body: { assetIds: manuscript.assets.slice(0, 9).map(({ id }) => id) } });
+      refresh();
+    }, '原稿配图已加入待审核版本。');
   }
   function uploadVideo(file?: File) {
     if (!file) return;
@@ -394,6 +529,8 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
       <div className="detail-icon"><FileText size={22} aria-hidden="true" /></div>
       <div><h2>{manuscript.title}</h2><p>{manuscript.assets.length} 张原稿图片
         {manuscript.archivedAt && ` · 归档于 ${formatTime(manuscript.archivedAt)}`}</p></div>
+      {editable && !editingVersion && approvedVersions.length > 0 && !accounts.loading && !accounts.error &&
+        <a className="button primary compact" href="#publish-schedule"><CalendarPlus size={16} aria-hidden="true" />安排发布</a>}
       {canEdit(role) && <button type="button" className="button compact" disabled={action.busy} onClick={archive}>
         {manuscript.archivedAt ? '恢复稿件' : '归档稿件'}
       </button>}
@@ -447,17 +584,18 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
         </div>)}
       </div> : <p className="muted small">暂无配图。小红书图文至少需要 1 张。</p>}
       <div className="section-line variant-heading">
-        <h3><PlatformIcon platform={platform} />{publishPlatformLabel(platform, Boolean(manuscript.videoAsset))}版本</h3>
-        {variant && <span className={`badge ${approved ? 'green' : 'amber'}`}>{variantLabel(variant)}</span>}
+        <h3>平台适配版本</h3>
       </div>
-      <div className="filters platform-options" role="group" aria-label="按平台查看版本">
+      <div ref={platformOptions} className="filters platform-options" role="group" aria-label="按平台查看版本">
         {platforms.map((candidate) => {
           const current = currentVariants.find((version) => version.platform === candidate);
-          return <button type="button" key={candidate} className={platform === candidate ? 'active' : ''}
+          return <button type="button" key={candidate} data-platform={candidate} className={platform === candidate ? 'active' : ''}
             aria-pressed={platform === candidate} disabled={action.busy} onClick={() => {
               if (platform === candidate) return;
-              action.reset(); setPlatform(candidate); setEditing(null); setRejecting(false);
-            }}>{publishPlatformLabel(candidate, Boolean(manuscript.videoAsset))} <small>{variantLabel(current)}</small></button>;
+              showPlatform(candidate);
+            }}><PlatformIcon platform={candidate} />{publishPlatformLabel(candidate, Boolean(manuscript.videoAsset))}
+            <small>· {current?.status === 'approved' && !approvedVersions.some((item) => item.id === current.id)
+              ? '待重新审核' : variantLabel(current)}</small></button>;
         })}
       </div>
       {!variant ? <div className="sub-empty">
@@ -477,7 +615,15 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
         }} onCancel={() => setEditing(false)} />
         : <>
           <div className="variant-preview">
-            <div className="section-line"><h3>{variant.title}</h3><span className="version">V{variant.version}</span></div>
+            <div className="section-line variant-preview-heading">
+              <h3>{variant.title}</h3>
+              <div className="actions">
+                <span className="version">V{variant.version}</span>
+                {snapshot && editable && !rejecting && <button type="button" className="button compact" disabled={action.busy} onClick={() => setEditing(true)}>
+                  <PencilLine size={16} aria-hidden="true" />编辑版本
+                </button>}
+              </div>
+            </div>
             <p className="content-text">{variant.body}</p>
             {variant.videoAsset && <div className="video-asset">
               <video controls preload="none" aria-label="待审核版本视频" src={imageUrl(scope, variant.videoAsset.id) + '/video'} />
@@ -507,13 +653,11 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
           <Feedback error={snapshot ? check.error : 'API 未返回版本图片快照。当前可查看文案，使用与工作台同版本的 API 后可继续编辑、审核和排期。'} />
           {issues?.length ? <div className="check-list" role="status">
             <strong>发布前检查</strong><ul>{issues.map((issue) => <li key={issue.code}>{issue.message}</li>)}</ul>
-            {editable && issues.some(({ code }) => code === 'images_missing') &&
-              <p>上传原稿配图后，在「编辑版本」中将图片加入当前平台版本。</p>}
+            {editable && issues.some(({ code }) => code === 'images_missing') && (manuscript.assets.length && snapshot?.status === 'draft' ?
+              <button type="button" className="button compact" disabled={action.busy} onClick={attachOriginalPictures}>使用原稿配图</button>
+              : <p>上传原稿配图后，检查当前小红书版本的封面。</p>)}
           </div> : null}
           <div className="actions">
-            {snapshot && editable && !rejecting && <button type="button" className="button" disabled={action.busy} onClick={() => setEditing(true)}>
-              <PencilLine size={16} aria-hidden="true" />编辑版本
-            </button>}
             {reviewable && !rejecting && <button type="button" className="button primary"
               disabled={action.busy || !issues || issues.length !== 0} onClick={approve}>
               <ShieldCheck size={17} aria-hidden="true" />确认审核
@@ -548,9 +692,12 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
           </div>)}
         </div>)}
       </details>}
-      {editable && !editingVersion && approvedVersions.length > 0 && (accounts.loading ? <Loading />
+      {editable && !editingVersion && (accounts.loading ? <Loading />
         : accounts.error ? <Feedback error={accounts.error} /> : <Schedule scope={scope} variants={approvedVersions}
-          accounts={accounts.data ?? []} onSchedule={onSchedule} openAccounts={openAccounts} />)}
+          currentVariants={currentVariants} accounts={accounts.data ?? []} onSchedule={onSchedule} openAccounts={openAccounts}
+          showPlatform={showPlatform} previewPlatform={(next) => {
+            if (!rejecting && !action.busy && next !== platform) showPlatform(next, false);
+          }} />)}
     </div>
   </section>;
 }
@@ -633,7 +780,17 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
       {creating ? <NewManuscript scope={scope} drafts={drafts} draftKey={draftKey} onCancel={() => setCreating(false)} onSave={(id) => {
         changePage([]); setReviewFilter('all'); setSelection(id); list.refresh();
       }} /> : active ? <ManuscriptDetail key={active} scope={scope} role={role} id={active} accounts={accounts} drafts={drafts}
-        reviewFilter={reviewFilter} changed={() => { list.refresh(); refreshSummary(); }} onReview={setReviewNotice}
+        reviewFilter={reviewFilter} changed={(restoredId) => {
+          if (restoredId) {
+            setShowArchived(false);
+            setReviewFilter('all');
+            setPages([]);
+            setSelection(restoredId);
+            pushToast('稿件已恢复至「在用稿件」。', 'success');
+          }
+          list.refresh();
+          refreshSummary();
+        }} onReview={setReviewNotice}
         onSchedule={openTasks} openAccounts={openAccounts} />
         : <section className="card detail-pane empty-detail">
           {list.loading ? <Loading /> : <Empty icon={FileText} title={listError ? '暂时无法查看稿件' : emptyTitle}

@@ -4,7 +4,7 @@ import {
   Images, List, RefreshCw, Search, Send, Table2, X,
 } from 'lucide-react';
 import {
-  api, canEdit, canRecord, fileBody, formatTime, platformLabel, platforms, publishPlatformLabel, post, taskLabel, useAction, useResource,
+  api, canEdit, canRecord, cleanAccountName, fileBody, formatPlatformAccount, formatTime, platformLabel, platforms, publishPlatformLabel, post, taskLabel, useAction, useResource,
   type Handoff, type Platform, type Role, type Task, type TaskDetail, type TaskStatus, type WorkbenchSummary,
 } from './api';
 import { copyText } from './clipboard';
@@ -99,7 +99,7 @@ function useTaskEvidence(path: string) {
 
 function EvidenceFields({ choose }: { choose: (file?: File) => void }) {
   return <>
-    <label>作品链接<input name="remoteUrl" type="url" placeholder="https://…" maxLength={2048} /></label>
+    <label>作品链接或分享文案<input name="remoteUrl" placeholder="粘贴作品链接或含链接的分享文案" maxLength={4096} /></label>
     <label>截图证据 <small>JPG、PNG 或 WebP，最大 20 MB</small>
       <input className="file-field" type="file" accept="image/jpeg,image/png,image/webp"
         onChange={(event) => choose(event.currentTarget.files?.[0])} />
@@ -108,13 +108,15 @@ function EvidenceFields({ choose }: { choose: (file?: File) => void }) {
 }
 
 function readWorkUrl(fields: FormData) {
-  const remoteUrl = String(fields.get('remoteUrl') ?? '').trim();
-  if (remoteUrl && !externalUrl(remoteUrl)) throw new Error('请输入有效的 HTTP 或 HTTPS 作品链接。');
-  return remoteUrl || undefined;
+  const text = String(fields.get('remoteUrl') ?? '').trim();
+  if (!text) return undefined;
+  const link = text.match(/https?:\/\/[^\s<>{}「」【】，。！；、（）]+/i)?.[0]?.replace(/[.,;!?)\]]+$/, '');
+  if (!link || link.length > 2048 || !externalUrl(link)) throw new Error('没有从粘贴内容识别到有效的作品链接。');
+  return link;
 }
 
-function RecordResult({ path, saved, action, correction = false }: {
-  path: string; saved: () => void; action: ReturnType<typeof useAction>; correction?: boolean;
+function RecordResult({ path, saved, action, correction = false, trial = false }: {
+  path: string; saved: () => void; action: ReturnType<typeof useAction>; correction?: boolean; trial?: boolean;
 }) {
   const [state, setState] = useState<'published' | 'failed' | 'unknown'>('published');
   const evidence = useTaskEvidence(path);
@@ -124,7 +126,8 @@ function RecordResult({ path, saved, action, correction = false }: {
     const note = String(fields.get('note') ?? '').trim();
     const reason = String(fields.get('reason') ?? '').trim();
     void action.run(async () => {
-      const remoteUrl = readWorkUrl(fields);
+      const demoUrl = trial && state === 'published' && !evidence.hasFile ? 'https://example.invalid/trial-work' : undefined;
+      const remoteUrl = readWorkUrl(fields) ?? demoUrl;
       if (state === 'published' && !remoteUrl && !evidence.hasFile) throw new Error('请填写作品链接或上传发布截图。');
       if (correction && !reason) throw new Error('请填写更正原因。');
       const evidenceAssetId = await evidence.upload();
@@ -139,6 +142,7 @@ function RecordResult({ path, saved, action, correction = false }: {
         <option value="published">已发布</option><option value="failed">失败</option><option value="unknown">待核实</option>
       </select></label>}
       <EvidenceFields choose={evidence.choose} />
+      {trial && state === 'published' && <p className="muted small">演练可直接保存，留空时会使用示例作品链接。</p>}
       {correction ? <label>更正原因<textarea name="reason" required rows={3} maxLength={1000} /></label>
         : <label>备注 <small>选填</small><textarea name="note" rows={3} maxLength={1000} placeholder="例如 发布后需要继续观察审核结果" /></label>}
     </fieldset>
@@ -263,15 +267,17 @@ function TaskActions({ task, path, role, changed }: { task: TaskDetail; path: st
   </div>;
 }
 
-function TaskDetails({ id, scope, role, onRecorded, people }: {
-  id: string; scope: string; role: Role; onRecorded: (title: string) => void; people: Map<string, string>;
+function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
+  id: string; scope: string; role: Role; onRecorded: (title: string) => void; people: Map<string, string>; trial?: boolean;
 }) {
   const path = scope + '/tasks/' + id;
   const detail = useResource<TaskDetail>(path, 5_000);
   const recordAction = useAction();
   const task = detail.data;
   const recordable = canRecord(role);
-  const handoff = useResource<Handoff>(recordable && task?.handedOffAt && task.executionChannel === 'manual' ? path + '/handoff' : null);
+  const blockedHandoff = task?.status === 'handed_off' && task.account.platform === 'bilibili' && task.account.channelKind === 'manual';
+  const handoff = useResource<Handoff>(recordable && !blockedHandoff && task?.handedOffAt && task.executionChannel === 'manual'
+    ? path + '/handoff' : null);
   if (!task) return <section className="card detail-pane">
     {detail.loading ? <Loading /> : <Feedback error={detail.error} />}
   </section>;
@@ -294,7 +300,7 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
       <div className="detail-icon"><CalendarDays size={22} aria-hidden="true" /></div>
       <div>
         <h2>{task.variant.title?.trim() || '未命名任务'}</h2>
-        <p>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))} · {task.account.displayName?.trim() || '未指定账号'} · V{task.variant.version}</p>
+        <p>{formatPlatformAccount(publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId)), task.account.displayName)} · V{task.variant.version}</p>
       </div>
       <TaskBadge status={task.status} />
     </div>
@@ -305,8 +311,8 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
         <div><dt>计划时间</dt><dd>{formatTime(task.scheduledAt)}</dd></div>
         {automated
           ? <div><dt>开始处理</dt><dd>{task.claimedAt ? formatTime(task.claimedAt) : '待执行'}</dd></div>
-          : <div><dt>实际交接</dt><dd>{task.handedOffAt ? formatTime(task.handedOffAt) : '待交接'}</dd></div>}
-        <div><dt>发布账号</dt><dd title={task.account.displayName}>{task.account.displayName?.trim() || '未指定账号'}</dd></div>
+          : <div><dt>实际交接</dt><dd>{task.handedOffAt ? formatTime(task.handedOffAt) : task.status === 'published' ? '已直接补录回执' : '待交接'}</dd></div>}
+        <div><dt>发布账号</dt><dd title={task.account.displayName}>{cleanAccountName(task.account.displayName)}</dd></div>
         <div><dt>版本规格</dt><dd>V{task.variant.version} · {publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))}</dd></div>
       </dl>
       {(task.status === 'scheduled' || task.status === 'dispatching') && <div className="sub-empty">
@@ -315,8 +321,16 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
           : '到计划时间后，系统将生成已审交接包。'}</p>
       </div>}
       <Feedback error={handoff.error} />
+      {blockedHandoff && <Feedback error="该 B 站账号尚未通过官方授权。请连接已授权账号后重新安排发布。" />}
+      {handoff.data && task.status === 'handed_off' && !trial && <div className="actions">
+        {handoff.data.profileUrl && <a className="button compact" href={handoff.data.profileUrl} target="_blank" rel="noreferrer">
+          <ExternalLink size={15} aria-hidden="true" />核对 B 站账号主页
+        </a>}
+        <a className="button compact" href={task.variant.platform === 'xiaohongshu' ? 'https://creator.xiaohongshu.com/' : 'https://member.bilibili.com/'}
+          target="_blank" rel="noreferrer"><ExternalLink size={15} aria-hidden="true" />打开平台创作中心</a>
+      </div>}
       {handoff.loading ? <Loading /> : handoff.data && <Package data={handoff.data} />}
-      {recordable && task.status === 'handed_off' && task.executionChannel === 'manual' && <RecordResult path={path} action={recordAction} saved={() => {
+      {recordable && !blockedHandoff && task.status === 'handed_off' && task.executionChannel === 'manual' && <RecordResult path={path} action={recordAction} trial={trial} saved={() => {
         detail.refresh();
         onRecorded(`「${task.variant.title}」的发布结果已保存。`);
       }} />}
@@ -331,18 +345,18 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
         {result.remoteId && automated && <p className="muted small">文章 ID {result.remoteId}</p>}
         {result.platformPublishedAt && <p className="muted small">发表时间 {formatTime(result.platformPublishedAt)}</p>}
         <div className="actions">
-          {resultUrl && !task.isSandbox && <a href={resultUrl} target="_blank" rel="noreferrer" className="button compact"><ExternalLink size={15} aria-hidden="true" />打开作品</a>}
+          {resultUrl && !task.isSandbox && !trial && <a href={resultUrl} target="_blank" rel="noreferrer" className="button compact"><ExternalLink size={15} aria-hidden="true" />打开作品</a>}
           {result.evidenceAssetId && <a href={'/api' + path + '/evidence'} target="_blank" rel="noreferrer" className="button compact">
             <Images size={15} aria-hidden="true" />查看截图
           </a>}
         </div>
       </div>}
       {!!task.notificationDeliveries?.length && <div className="task-section">
-        <h3><Send size={17} aria-hidden="true" />飞书提醒</h3>
+        <h3><Send size={17} aria-hidden="true" />{trial ? '飞书提醒演练' : '飞书提醒'}</h3>
         <dl className="task-meta">
           {task.notificationDeliveries.map((delivery) => <div key={delivery.id}>
-            <dt>{delivery.kind === 'handoff_ready' ? '交接提醒' : '4 小时未回填提醒'}</dt>
-            <dd>{deliveryLabels[delivery.status]} · {delivery.status === 'sent'
+            <dt>{delivery.kind === 'handoff_ready' ? '交接提醒' : trial ? '2 分钟未回填提醒' : '4 小时未回填提醒'}</dt>
+            <dd>{trial && delivery.status === 'sent' ? '已模拟投递' : deliveryLabels[delivery.status]} · {delivery.status === 'sent'
               ? formatTime(delivery.sentAt ?? delivery.scheduledAt)
               : delivery.status === 'pending'
                 ? `预计 ${formatTime(delivery.scheduledAt)}`
@@ -382,8 +396,8 @@ function TaskDetails({ id, scope, role, onRecorded, people }: {
   </section>;
 }
 
-export function Tasks({ scope, role, initialId, counts, refreshSummary, openManuscripts }: {
-  scope: string; role: Role; initialId: string; counts?: WorkbenchSummary['taskCounts'];
+export function Tasks({ scope, role, initialId, counts, refreshSummary, openManuscripts, trial }: {
+  scope: string; role: Role; initialId: string; counts?: WorkbenchSummary['taskCounts']; trial?: boolean;
   refreshSummary: () => void; openManuscripts: () => void;
 }) {
   const [status, setStatus] = useState<'' | TaskStatus>(initialId ? '' : roleView[role].taskStatus ?? '');
@@ -549,7 +563,7 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
               <th scope="row"><button type="button" className="task-table-title" aria-pressed={active === task.id}
                 onClick={() => chooseTask(task.id)}>{task.variant.title?.trim() || '未命名任务'}</button></th>
               <td>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))}</td>
-              <td>{task.account.displayName?.trim() || '未指定账号'}</td>
+              <td>{cleanAccountName(task.account.displayName)}</td>
               <td>{formatTime(task.scheduledAt)}</td>
               <td><TaskBadge status={task.status} /></td>
               <td className="task-table-error">{task.lastError || '—'}</td>
@@ -558,7 +572,7 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
         </div></div> : <div className="list-well scroll-shadow-y">{filteredItems.map((task) => <button key={task.id} type="button" className={`list-item ${active === task.id ? 'selected' : ''}`}
           aria-pressed={active === task.id} onClick={() => chooseTask(task.id)}>
           <span className="list-icon"><CalendarDays size={17} aria-hidden="true" /></span>
-          <span className="list-copy"><strong>{task.variant.title?.trim() || '未命名任务'}</strong><small>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))} · {task.account.displayName?.trim() || '未指定账号'} · {formatTime(task.scheduledAt)}</small></span>
+          <span className="list-copy"><strong>{task.variant.title?.trim() || '未命名任务'}</strong><small>{formatPlatformAccount(publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId)), task.account.displayName)} · {formatTime(task.scheduledAt)}</small></span>
           <TaskBadge status={task.status} /><ChevronRight className="row-chevron" size={14} aria-hidden="true" />
         </button>)}</div>}
         {(cursor || list.data?.nextCursor) && <div className="pagination">
@@ -568,7 +582,7 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
             onClick={() => { if (list.data?.nextCursor) changePage([...pages, list.data.nextCursor]); }}><ArrowRight size={17} aria-hidden="true" /></button>
         </div>}
       </section>
-      {active ? <TaskDetails key={active} id={active} scope={scope} role={role} people={people} onRecorded={(title) => {
+      {active ? <TaskDetails key={active} id={active} scope={scope} role={role} people={people} trial={trial} onRecorded={(title) => {
         if (status === 'handed_off') setSelected((current) => current === active ? '' : current);
         setRecordedTitle(title);
         pushToast(title, 'success');

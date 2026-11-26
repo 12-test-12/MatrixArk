@@ -162,7 +162,7 @@ export class XiaohongshuIdentityService {
       if ((current?.appId ?? config.xiaohongshu.appId) !== appId) return false;
       const scope = { workspaceId, platform: 'xiaohongshu' as const, archivedAt: null };
       const existing = await tx.channelAccount.findFirst({ where: { ...scope, externalId: identity.open_id } });
-      const verified = { authCheckedAt: new Date(), authAuthorizedBy: userId, authScope: ['basic_info'] };
+      const verified = { authCheckedAt: new Date(), authAuthorizedBy: userId, authScope: ['basic_info'], accessMethod: 'qr_login' as const };
       if (existing) {
         const identityOnly = existing.channelKind === 'official' && existing.authStatus === 'pending'
           && existing.authScope.length === 1 && existing.authScope[0] === 'basic_info'

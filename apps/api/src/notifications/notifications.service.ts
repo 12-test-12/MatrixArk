@@ -8,6 +8,7 @@ import { decryptFeishu, encryptFeishu, sendFeishu, type DeliveryResult } from '.
 
 const minute = 60_000;
 const overdueAfter = 4 * 60 * minute;
+const trialOverdueAfter = 2 * minute;
 const deliveryWindow = 30 * minute;
 const retries = [1, 5, 15];
 
@@ -31,6 +32,7 @@ async function databaseTime(tx: Prisma.TransactionClient) {
 function presentSetting(setting: NotificationSetting | null) {
   return {
     enabled: setting?.enabled ?? false,
+    riskAlertEnabled: setting?.riskAlertEnabled ?? true,
     webhookConfigured: Boolean(setting?.webhookCiphertext),
     signatureConfigured: Boolean(setting?.signSecretCiphertext),
   };
@@ -44,9 +46,15 @@ export class NotificationsService {
     return presentSetting(await this.prisma.notificationSetting.findUnique({ where: { workspaceId } }));
   }
 
-  async updateSetting(workspaceId: string, userId: string, input: { enabled: boolean; webhook?: string; signSecret?: string | null }) {
+  async updateSetting(
+    workspaceId: string,
+    userId: string,
+    input: { enabled: boolean; riskAlertEnabled?: boolean; webhook?: string; signSecret?: string | null },
+  ) {
     return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+      const [workspace] = await tx.$queryRaw<{ trialOwnerId: string | null }[]>`
+        SELECT "trialOwnerId" FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+      if (workspace?.trialOwnerId) throw new BadRequestException('试用工作室使用模拟提醒，请在正式工作室配置群机器人');
       const where = { workspaceId };
       const previous = await tx.notificationSetting.findUnique({ where });
       const webhook = input.webhook ? this.encryptSetting(workspaceId, 'webhook', input.webhook) : undefined;
@@ -58,7 +66,12 @@ export class NotificationsService {
           signSecretCiphertext: signSecret?.ciphertext ?? null, signSecretKeyId: signSecret?.keyId ?? null,
         }),
       };
-      const data = { enabled: input.enabled, updatedById: userId, ...credentials };
+      const data = {
+        enabled: input.enabled,
+        ...(input.riskAlertEnabled !== undefined && { riskAlertEnabled: input.riskAlertEnabled }),
+        updatedById: userId,
+        ...credentials,
+      };
       const saved = previous ? await tx.notificationSetting.update({ where, data })
         : await tx.notificationSetting.create({ data: { workspaceId, ...data } });
       return presentSetting(saved);
@@ -75,8 +88,9 @@ export class NotificationsService {
 
   async testDelivery(workspaceId: string) {
     const workspace = await this.prisma.workspace.findUnique({
-      where: { id: workspaceId }, select: { name: true, notificationSetting: true },
+      where: { id: workspaceId }, select: { name: true, notificationSetting: true, trialOwnerId: true },
     });
+    if (workspace?.trialOwnerId) throw new BadRequestException('试用提醒请在发布任务详情中查看');
     if (!workspace?.notificationSetting?.webhookCiphertext) throw new BadRequestException('请先保存群机器人地址');
     const name = workspace.name.replaceAll('<', '＜').replaceAll('>', '＞');
     const result = await this.send(workspace.notificationSetting, `MatrixArk 测试提醒\n「${name}」的飞书群机器人可以接收消息。`);
@@ -84,11 +98,53 @@ export class NotificationsService {
     return { sent: true };
   }
 
-  async enqueueHandoff(tx: Prisma.TransactionClient, workspaceId: string, taskId: string, at: Date) {
+  async sendAccountRiskAlert(
+    workspaceId: string,
+    payload: {
+      level: 'warning' | 'risk' | 'normal';
+      accountName: string;
+      platform: 'bilibili' | 'xiaohongshu';
+      groupName?: string | null;
+      operator?: string | null;
+      message: string;
+    },
+  ): Promise<{ status: 'sent' | 'failed' | 'skipped'; error?: string }> {
+    const workspace = await this.prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { name: true, trialOwnerId: true, notificationSetting: true },
+    });
+    if (!workspace) return { status: 'skipped', error: '工作室不存在' };
+    if (workspace.trialOwnerId) {
+      return config.trialAvailable
+        ? { status: 'sent' }
+        : { status: 'skipped', error: '当前环境未开放试用工作室' };
+    }
+    const setting = workspace.notificationSetting;
+    if (!setting?.enabled || !setting.riskAlertEnabled || !setting.webhookCiphertext) {
+      return { status: 'skipped', error: setting?.enabled && !setting.riskAlertEnabled ? '账号风险飞书告警已关闭' : '工作室飞书提醒未开启' };
+    }
+    const levelLabel = payload.level === 'risk' ? '风险告警' : payload.level === 'warning' ? '预警提醒' : '风险已解除';
+    const platformText = payload.platform === 'xiaohongshu' ? '小红书' : 'B 站';
+    const lines = [
+      `MatrixArk · 账号${levelLabel}`,
+      `工作室：${workspace.name}`,
+      `账号：${platformText} · ${payload.accountName}${payload.groupName ? `（矩阵组：${payload.groupName}）` : ''}`,
+      ...(payload.operator ? [`负责人：${payload.operator}`] : []),
+      `说明：${payload.message}`,
+      '请在工作台打开「发布账号」核对并处理。',
+      ...(config.publicBaseUrl ? [config.publicBaseUrl] : []),
+    ];
+    const text = lines.join('\n').replaceAll('<', '＜').replaceAll('>', '＞');
+    const outcome = await this.send(setting, text);
+    if (outcome.status === 'sent') return { status: 'sent' };
+    return { status: 'failed', error: outcome.reason };
+  }
+
+  async enqueueHandoff(tx: Prisma.TransactionClient, workspaceId: string, taskId: string, at: Date, trial = false) {
     const kinds = ['handoff_ready', 'overdue_reminder'] as const;
     await tx.notificationDelivery.createMany({
       data: kinds.map((kind) => {
-        const scheduledAt = kind === 'handoff_ready' ? at : new Date(at.getTime() + overdueAfter);
+        const scheduledAt = kind === 'handoff_ready' ? at : new Date(at.getTime() + (trial ? trialOverdueAfter : overdueAfter));
         return { workspaceId, taskId, kind, dedupeKey: dedupeKey(kind, at), scheduledAt, nextAttemptAt: scheduledAt };
       }),
       skipDuplicates: true,
@@ -113,7 +169,8 @@ export class NotificationsService {
       const { delivery, setting, text } = claimed;
       const current = await this.prisma.notificationDelivery.findUnique({
         where: { id: delivery.id },
-        include: { task: { select: { status: true, handedOffAt: true, executionChannel: true } },
+        include: { task: { select: { status: true, handedOffAt: true, executionChannel: true,
+          account: { select: { platform: true } } } },
           workspace: { select: { notificationSetting: true } } },
       });
       const clock = await databaseTime(this.prisma);
@@ -136,8 +193,8 @@ export class NotificationsService {
   }
 
   private isStillWaiting(delivery: NotificationDelivery,
-    task: { status: string; handedOffAt: Date | null; executionChannel: string | null }) {
-    return task.status === 'handed_off' && task.executionChannel === 'manual'
+    task: { status: string; handedOffAt: Date | null; executionChannel: string | null; account: { platform: string } }) {
+    return task.account.platform === 'xiaohongshu' && task.status === 'handed_off' && task.executionChannel === 'manual'
       && task.handedOffAt && delivery.dedupeKey === dedupeKey(delivery.kind, task.handedOffAt);
   }
 
@@ -147,8 +204,8 @@ export class NotificationsService {
       const delivery = await tx.notificationDelivery.findUnique({
         where: { id: candidate.id },
         include: { task: { include: {
-          variant: { select: { title: true, platform: true, videoAssetId: true } }, account: { select: { displayName: true } },
-        } }, workspace: { select: { notificationSetting: true, name: true } } },
+          variant: { select: { title: true } }, account: { select: { displayName: true, platform: true } },
+        } }, workspace: { select: { notificationSetting: true, name: true, trialOwnerId: true } } },
       });
       if (!delivery) return;
       const now = await databaseTime(tx);
@@ -158,10 +215,18 @@ export class NotificationsService {
       }
       if (delivery.status !== 'pending' || !delivery.nextAttemptAt || delivery.nextAttemptAt > now) return;
       const setting = delivery.workspace.notificationSetting;
-      if (!withinWindow(delivery, now) || !this.isStillWaiting(delivery, delivery.task) || !setting?.enabled) {
-        const reason = !withinWindow(delivery, now) ? '提醒已过期'
-          : !this.isStillWaiting(delivery, delivery.task) ? '任务已处理或交接轮次已变更' : '工作室飞书提醒已关闭';
+      if (!withinWindow(delivery, now) || !this.isStillWaiting(delivery, delivery.task)) {
+        const reason = !withinWindow(delivery, now) ? '提醒已过期' : '任务已处理或交接轮次已变更';
         await this.record(tx, delivery, { status: 'skipped', reason }, now);
+        return;
+      }
+      if (delivery.workspace.trialOwnerId) {
+        if (config.trialAvailable) await this.record(tx, delivery, { status: 'sent' }, now, true);
+        else await this.record(tx, delivery, { status: 'skipped', reason: '当前环境未开放试用工作室' }, now);
+        return;
+      }
+      if (!setting?.enabled) {
+        await this.record(tx, delivery, { status: 'skipped', reason: '工作室飞书提醒已关闭' }, now);
         return;
       }
       const claimed = await tx.notificationDelivery.update({
@@ -171,8 +236,7 @@ export class NotificationsService {
       });
       const { variant, account } = delivery.task;
       const headline = delivery.kind === 'handoff_ready' ? '发布任务待交接处理' : '发布任务交接后 4 小时仍未回填';
-      const platform = variant.platform === 'xiaohongshu' ? '小红书' : variant.videoAssetId ? 'B 站视频' : 'B 站专栏';
-      const text = [`MatrixArk · ${headline}`, `${delivery.workspace.name} · ${platform} · ${account.displayName}`,
+      const text = [`MatrixArk · ${headline}`, `${delivery.workspace.name} · 小红书 · ${account.displayName}`,
         variant.title, '请在工作台打开「发布任务 → 待回填」查看并处理。',
         ...(config.publicBaseUrl ? [config.publicBaseUrl] : [])].join('\n').replaceAll('<', '＜').replaceAll('>', '＞');
       return { delivery: claimed, setting, text };
@@ -202,7 +266,7 @@ export class NotificationsService {
     });
   }
 
-  private async record(tx: Prisma.TransactionClient, delivery: NotificationDelivery, outcome: DeliveryResult, now: Date) {
+  private async record(tx: Prisma.TransactionClient, delivery: NotificationDelivery, outcome: DeliveryResult, now: Date, simulated = false) {
     const wait = retries[delivery.attempts - 1];
     const retryAt = outcome.status === 'retry' && wait !== undefined ? new Date(now.getTime() + wait * minute) : null;
     const nextAttemptAt = retryAt && withinWindow(delivery, retryAt) ? retryAt : null;
@@ -214,12 +278,12 @@ export class NotificationsService {
       },
     });
     if (status !== 'pending') {
-      const eventReason = status === 'sent'
+      const eventReason = simulated ? (delivery.kind === 'handoff_ready' ? '已模拟交接提醒' : '已模拟 2 分钟未回填提醒') : status === 'sent'
         ? (delivery.kind === 'handoff_ready' ? '交接提醒已送达' : '4 小时未回填提醒已送达')
         : reason;
       await tx.taskEvent.create({
         data: { workspaceId: delivery.workspaceId, taskId: delivery.taskId, kind: 'reminder', reason: eventReason,
-          details: { deliveryId: delivery.id, kind: delivery.kind, status } },
+          details: { deliveryId: delivery.id, kind: delivery.kind, status, ...(simulated && { simulated: true }) } },
       });
     }
   }

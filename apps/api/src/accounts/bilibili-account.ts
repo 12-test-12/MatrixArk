@@ -37,6 +37,7 @@ export async function bindBilibiliAccount(prisma: PrismaService, workspaceId: st
     const authorization = {
       ...encryptBilibiliCredentials({ id, workspaceId, externalId: openid }, accessToken, Boolean(app)),
       credentials: Prisma.DbNull, credentialsUpdatedAt: now, authStatus: 'active' as const,
+      accessMethod: 'oauth' as const,
       authExpiresAt: expiresAt, authScope: scopes, authCheckedAt: now, authAuthorizedBy: operatorId,
     };
     if (existing) {

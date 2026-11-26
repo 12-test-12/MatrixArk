@@ -214,7 +214,7 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
         <div className="detail-content">
           {active.task && <dl className="task-meta">
             <div><dt>计划时间</dt><dd>{active.task.schedule}</dd></div>
-            <div><dt>实际交接</dt><dd>{active.task.status === 'published' ? '上周日 09:45' : '周五 18:00'}</dd></div>
+            <div><dt>实际交接</dt><dd>{active.task.status === 'published' ? '上周日 10:00' : '周五 18:30'}</dd></div>
             <div><dt>发布账号</dt><dd>{accountNames[active.manuscript.platform] ?? '未指定账号'}</dd></div>
             <div><dt>版本规格</dt><dd>V{active.manuscript.version} · {platformLabel[active.manuscript.platform]}</dd></div>
           </dl>}
@@ -254,7 +254,7 @@ function PreviewContent({ role, section }: { role: Role; section: Section }) {
                 <div className="timeline-content">
                   <div className="timeline-header">
                     <strong>{active.task.status === 'published' ? '发布回执已确认' : '已生成交接包'}</strong>
-                    <time className="muted small">{active.task.status === 'published' ? '上周日 10:15' : '周五 18:00'}</time>
+                    <time className="muted small">{active.task.status === 'published' ? '上周日 10:15' : '周五 18:30'}</time>
                   </div>
                   <div className="timeline-actor">周禾 · 运营人员</div>
                   {active.task.status === 'published' && <p className="timeline-reason">已在小红书完成图文发布，并回填核验原链接与手机端截图。</p>}
@@ -295,7 +295,7 @@ export function Preview({ onLogin }: { onLogin: () => void }) {
       <button type="button" className="button primary compact" aria-haspopup="dialog" onClick={onLogin}>登录工作台<ArrowRight size={15} aria-hidden="true" /></button>
     </div>}>
     {section === 'performance'
-      ? <section className="card"><Empty icon={BarChart3} title="登录后查看作品成效" description="按平台、账号和内容类型查看真实作品的数据。" /></section>
+      ? <section className="card"><Empty icon={BarChart3} title="登录后查看作品成效" description="按平台、账号和发布时间查看真实作品的数据。" /></section>
       : <PreviewContent key={`${role}:${section}`} role={role} section={section} />}
   </Workbench>;
 }

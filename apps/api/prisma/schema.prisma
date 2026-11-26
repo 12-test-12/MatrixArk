@@ -105,6 +105,21 @@ enum AuthStatus {
   revoked
 }
 
+enum AccountAccessMethod {
+  manual_uid
+  qr_login
+  password
+  cookie
+  oauth
+  sandbox
+}
+
+enum AccountRiskStatus {
+  normal
+  warning
+  risk
+}
+
 model User {
   id           String   @id @default(uuid())
   email        String   @unique
@@ -131,6 +146,8 @@ model User {
   platformAppSettings   PlatformAppSetting[]
   oauthStates          OAuthState[]
   topicAiAnalyses      TopicAiAnalysis[]
+  riskEvents           AccountRiskEvent[]    @relation("RiskEventActor")
+  resolvedRiskEvents   AccountRiskEvent[]    @relation("RiskEventResolver")
 }
 
 model Session {
@@ -148,6 +165,7 @@ model Workspace {
   id        String   @id @default(uuid())
   name      String
   createdAt DateTime @default(now()) @db.Timestamptz(3)
+  trialOwnerId String? @unique
 
   memberships            Membership[]
   manuscripts            Manuscript[]
@@ -166,6 +184,8 @@ model Workspace {
   topicChanges           TopicChange[]
   topicSources           TopicSource[]
   topicAiSetting         TopicAiSetting?
+  matrixGroups           MatrixGroup[]
+  accountRiskEvents      AccountRiskEvent[]
 }
 
 model Membership {
@@ -420,12 +440,73 @@ model ChannelAccount {
   archivedById          String?
   credentialsCiphertext String?
   credentialsKeyId      String?
-  credentialsUpdatedAt  DateTime?   @db.Timestamptz(3)
+  credentialsUpdatedAt  DateTime?           @db.Timestamptz(3)
+  accessMethod          AccountAccessMethod @default(manual_uid)
+  groupId               String?
+  alias                 String?
+  tags                  String[]            @default([])
+  pinned                Boolean             @default(false)
+  loginIdentifier       String?
+  passwordCiphertext    String?
+  passwordKeyId         String?
+  cookieCiphertext      String?
+  cookieKeyId           String?
+  cookieUpdatedAt       DateTime?           @db.Timestamptz(3)
+  riskStatus            AccountRiskStatus   @default(normal)
+  riskReason            String?
+  riskDetectedAt        DateTime?           @db.Timestamptz(3)
 
-  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
-  archivedBy  User?         @relation(fields: [archivedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  archivedBy  User?              @relation(fields: [archivedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  group       MatrixGroup?       @relation(fields: [workspaceId, groupId], references: [workspaceId, id], onDelete: Restrict, onUpdate: NoAction)
   tasks       PublishTask[]
   oauthStates OAuthState[]
+  riskEvents  AccountRiskEvent[]
+
+  @@unique([workspaceId, id])
+  @@index([workspaceId, groupId])
+  @@index([workspaceId, riskStatus])
+}
+
+model MatrixGroup {
+  id          String   @id @default(uuid())
+  workspaceId String
+  name        String
+  color       String   @default("blue")
+  description String   @default("")
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  accounts  ChannelAccount[]
+
+  @@unique([workspaceId, name])
+  @@unique([workspaceId, id])
+  @@index([workspaceId, sortOrder, createdAt])
+}
+
+model AccountRiskEvent {
+  id           String            @id @default(uuid())
+  workspaceId  String
+  accountId    String
+  level        AccountRiskStatus
+  kind         String
+  message      String
+  feishuStatus String            @default("skipped")
+  feishuError  String?
+  actorId      String?
+  resolvedAt   DateTime?         @db.Timestamptz(3)
+  resolvedById String?
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+
+  workspace  Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  account    ChannelAccount @relation(fields: [workspaceId, accountId], references: [workspaceId, id], onDelete: Restrict, onUpdate: NoAction)
+  actor      User?          @relation("RiskEventActor", fields: [actorId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  resolvedBy User?          @relation("RiskEventResolver", fields: [resolvedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@index([workspaceId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([workspaceId, accountId, createdAt(sort: Desc), id(sort: Desc)])
 }
 
 model PublishTask {
@@ -438,6 +519,7 @@ model PublishTask {
   attempts           Int          @default(0)
   idempotencyKey     String       @unique
   lastError          String?
+  metricsSyncAttemptedAt DateTime? @db.Timestamptz(3)
   note               String?
   handedOffAt        DateTime?    @db.Timestamptz(3)
   claimedAt          DateTime?    @db.Timestamptz(3)
@@ -507,10 +589,10 @@ model PublicationMetrics {
   shares       Int?
   source       MetricsSource
   recordedAt   DateTime      @default(now()) @db.Timestamptz(3)
-  recordedById String
+  recordedById String?
 
   result     PublishResult @relation(fields: [taskId], references: [taskId], onDelete: Restrict, onUpdate: NoAction, map: "PublicationMetrics_result_fkey")
-  recordedBy User          @relation(fields: [recordedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  recordedBy User?         @relation(fields: [recordedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
 }
 
 model PublicationMetricSnapshot {
@@ -523,10 +605,10 @@ model PublicationMetricSnapshot {
   shares       Int?
   source       MetricsSource
   recordedAt   DateTime      @db.Timestamptz(3)
-  recordedById String
+  recordedById String?
 
   result     PublishResult @relation(fields: [taskId], references: [taskId], onDelete: Restrict, onUpdate: NoAction, map: "PublicationMetricSnapshot_result_fkey")
-  recordedBy User          @relation(fields: [recordedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  recordedBy User?         @relation(fields: [recordedById], references: [id], onDelete: Restrict, onUpdate: NoAction)
 
   @@index([taskId, recordedAt(sort: Desc), id(sort: Desc)], map: "PublicationMetricSnapshot_task_time_idx")
 }
@@ -599,6 +681,7 @@ model NotificationSetting {
   workspaceId          String   @id
   provider             String   @default("feishu")
   enabled              Boolean  @default(false)
+  riskAlertEnabled     Boolean  @default(true)
   webhookCiphertext    String?
   webhookKeyId         String?
   signSecretCiphertext String?
@@ -637,15 +720,16 @@ model NotificationDelivery {
 model OAuthState {
   id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId String
-  accountId   String
+  accountId   String?
   userId      String
   platform    Platform
+  appId       String?
   stateHash   String    @unique @db.Char(64)
   expiresAt   DateTime  @db.Timestamptz(3)
   consumedAt  DateTime? @db.Timestamptz(3)
   createdAt   DateTime  @default(now()) @db.Timestamptz(3)
 
   workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  account   ChannelAccount @relation(fields: [accountId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  account   ChannelAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   user      User           @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 }

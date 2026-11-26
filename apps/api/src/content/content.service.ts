@@ -257,8 +257,8 @@ export class ContentService {
     manuscriptId: string;
     platforms: Platform[];
     userId: string;
-  }) {
-    return this.prisma.$transaction(async (tx) => {
+  }, transaction?: Prisma.TransactionClient) {
+    const generate = async (tx: Prisma.TransactionClient) => {
       const manuscript = await this.lockManuscript(tx, params.workspaceId, params.manuscriptId);
       const assetIds = (await this.manuscriptImages(tx, manuscript)).map(({ id }) => id);
       const platforms = [...new Set(params.platforms)];
@@ -275,7 +275,8 @@ export class ContentService {
       }
       await this.supersedeVersions(tx, manuscript, platforms, created.map(({ id }) => id), params.userId);
       return created;
-    }, { isolationLevel: 'ReadCommitted' });
+    };
+    return transaction ? generate(transaction) : this.prisma.$transaction(generate, { isolationLevel: 'ReadCommitted' });
   }
 
   async replaceVideo(workspaceId: string, manuscriptId: string, userId: string,
@@ -341,8 +342,8 @@ export class ContentService {
     }
   }
 
-  async confirm(params: { variantId: string; workspaceId: string; userId: string; note?: string }) {
-    return this.prisma.$transaction(async (tx) => {
+  async confirm(params: { variantId: string; workspaceId: string; userId: string; note?: string }, transaction?: Prisma.TransactionClient) {
+    const confirmIn = async (tx: Prisma.TransactionClient) => {
       const variant = await this.lockCurrentVariant(tx, params.workspaceId, params.variantId);
       await this.assertNotReturned(tx, variant.id);
       const { issues } = inspectSnapshot(variant);
@@ -379,6 +380,7 @@ export class ContentService {
         include: variantSnapshot,
       });
       return { variant: updated, approval };
-    }, { isolationLevel: 'ReadCommitted' });
+    };
+    return transaction ? confirmIn(transaction) : this.prisma.$transaction(confirmIn, { isolationLevel: 'ReadCommitted' });
   }
 }

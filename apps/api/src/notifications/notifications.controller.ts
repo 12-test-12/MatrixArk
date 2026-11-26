@@ -11,6 +11,7 @@ import { NotificationsService } from './notifications.service';
 
 const settingSchema = z.object({
   enabled: z.boolean(),
+  riskAlertEnabled: z.boolean().optional(),
   webhook: z.string().trim().regex(feishuWebhook, '请填写飞书自定义机器人的 HTTPS Webhook 地址').optional(),
   signSecret: z.string().trim().min(1).max(256).nullable().optional(),
 }).strict();

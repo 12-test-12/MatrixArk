@@ -1,6 +1,7 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { AuthedRequest } from '../auth/decorators';
+import { config } from '../config';
 
 /**
  * 工作室是权限和数据的边界：所有带 :workspaceId 的路由都必须过这道关。
@@ -20,8 +21,10 @@ export class WorkspaceGuard implements CanActivate {
 
     const membership = await this.prisma.membership.findUnique({
       where: { userId_workspaceId: { userId: user.id, workspaceId } },
+      include: { workspace: { select: { trialOwnerId: true } } },
     });
     if (!membership) throw new ForbiddenException('你不是该工作室的成员');
+    if (membership.workspace.trialOwnerId && !config.trialAvailable) throw new ForbiddenException('当前环境未开放试用工作室');
 
     request.membership = membership;
     return true;

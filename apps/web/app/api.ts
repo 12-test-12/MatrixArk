@@ -2,16 +2,47 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { pushToast } from './toast';
 
 export type Role = 'owner' | 'editor' | 'reviewer' | 'operator' | 'viewer';
-export type Workspace = { id: string; name: string; role: Role };
-export type Session = { user: { id: string; name: string; email: string }; workspaces: Workspace[] };
+export type Workspace = { id: string; name: string; role: Role; trial?: boolean };
+export type Session = { user: { id: string; name: string; email: string }; workspaces: Workspace[]; trialAvailable?: boolean };
 export const platforms = ['xiaohongshu', 'bilibili'] as const;
 export type Platform = (typeof platforms)[number];
 export const platformLabel: Record<Platform, string> = { xiaohongshu: '小红书', bilibili: 'B 站专栏' };
 export function publishPlatformLabel(platform: Platform, hasVideo: boolean) {
   return hasVideo && platform === 'bilibili' ? 'B 站视频' : platformLabel[platform];
 }
+const redundantPlatformPrefix = /^(?:小红书|B\s*站专栏|B\s*站视频|B\s*站)\s*[·•]\s*/u;
+export function cleanAccountName(displayName?: string | null) {
+  const raw = displayName?.trim();
+  if (!raw) return '未指定账号';
+  return raw.replace(redundantPlatformPrefix, '').trim() || raw;
+}
+export function formatPlatformAccount(platformText: string, displayName?: string | null) {
+  return `${platformText} · ${cleanAccountName(displayName)}`;
+}
+export type AccountAccessMethod = 'manual_uid' | 'qr_login' | 'password' | 'cookie' | 'oauth' | 'sandbox';
+export type AccountRiskStatus = 'normal' | 'warning' | 'risk';
+export type MatrixGroupColor = 'blue' | 'rose' | 'emerald' | 'amber' | 'violet' | 'cyan' | 'slate';
+export type MatrixGroup = {
+  id: string; name: string; color: MatrixGroupColor; description: string; sortOrder: number;
+  accountCount: number; availableCount: number; riskCount: number;
+};
+export type AccountRiskEvent = {
+  id: string; accountId: string; level: AccountRiskStatus; kind: string; message: string;
+  feishuStatus: 'sent' | 'failed' | 'skipped'; feishuError: string | null;
+  resolvedAt: string | null; createdAt: string;
+  account?: { id: string; displayName: string; alias: string | null; platform: Platform };
+  actor?: { id: string; name: string } | null;
+  resolvedBy?: { id: string; name: string } | null;
+};
 export type Account = {
-  id: string; platform: Platform; channelKind: 'manual' | 'official' | 'sandbox'; displayName: string; operator?: string | null;
+  id: string; platform: Platform; channelKind: 'manual' | 'official' | 'sandbox';
+  accessMethod?: AccountAccessMethod;
+  displayName: string; alias?: string | null; operator?: string | null;
+  tags?: string[]; pinned?: boolean;
+  groupId?: string | null; group?: { id: string; name: string; color: string } | null;
+  profileUrl?: string | null;
+  loginIdentifier?: string | null; hasPassword?: boolean; hasCookie?: boolean; cookieUpdatedAt?: string | null;
+  riskStatus?: AccountRiskStatus; riskReason?: string | null; riskDetectedAt?: string | null;
   identityVerified: boolean; identityCheckedAt: string | null; availableForHandoff: boolean; availableForOfficial: boolean;
 };
 export type Approval = { approvedAt: string; snapshotHash: string | null };
@@ -41,7 +72,7 @@ export type Manuscript = {
 };
 export type TaskStatus = 'scheduled' | 'dispatching' | 'paused' | 'handed_off' | 'submitted'
   | 'under_review' | 'published' | 'failed' | 'unknown' | 'verified' | 'canceled';
-export type WorkbenchSummary = { taskCounts: Partial<Record<TaskStatus, number>>; pendingReview: number | null };
+export type WorkbenchSummary = { taskCounts: Partial<Record<TaskStatus, number>>; pendingReview: number | null; riskAccounts?: number };
 export type Result = {
   state: TaskStatus; remoteUrl: string | null; remoteId: string | null; recordedById: string | null; recordedAt: string;
   platformPublishedAt: string | null;
@@ -69,6 +100,7 @@ export type TaskDetail = Task & {
 };
 export type Handoff = Pick<Variant, 'title' | 'body' | 'tags' | 'version'> & {
   assets: (Picture & { url: string })[];
+  profileUrl?: string | null;
   video?: (VideoAsset & { url: string }) | null;
 };
 

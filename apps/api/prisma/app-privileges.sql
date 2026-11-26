@@ -20,8 +20,9 @@ BEGIN
   GRANT SELECT, INSERT, UPDATE ON TABLE public."User", public."Workspace", public."Manuscript",
     public."Asset", public."Variant", public."Approval", public."ChannelAccount", public."PublishTask",
     public."PublishResult", public."NotificationSetting", public."NotificationDelivery", public."PlatformAppSetting",
-    public."PublicationMetrics" TO matrixark_app;
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."Session", public."Membership", public."OAuthState"
+    public."PublicationMetrics", public."AccountRiskEvent" TO matrixark_app;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."Session", public."Membership", public."OAuthState",
+    public."MatrixGroup"
     TO matrixark_app;
   GRANT SELECT, INSERT ON TABLE public."TaskEvent", public."VariantAsset", public."VariantRejection",
     public."PublicationMetricSnapshot"

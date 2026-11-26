@@ -11,7 +11,7 @@ export const Public = (): MethodDecorator & ClassDecorator => SetMetadata(IS_PUB
 export interface AuthedRequest extends Request {
   user?: SessionUser;
   sessionToken?: string;
-  membership?: Membership;
+  membership?: Membership & { workspace: { trialOwnerId: string | null } };
 }
 
 export const CurrentUser = createParamDecorator((_data: unknown, ctx: ExecutionContext): SessionUser => {
@@ -33,3 +33,6 @@ export const CurrentRole = createParamDecorator((_data: unknown, ctx: ExecutionC
   if (!request.membership) throw new Error('CurrentRole 只能在 WorkspaceGuard 之后使用');
   return request.membership.role;
 });
+
+export const CurrentTrial = createParamDecorator((_data: unknown, ctx: ExecutionContext): boolean =>
+  Boolean(ctx.switchToHttp().getRequest<AuthedRequest>().membership?.workspace.trialOwnerId));

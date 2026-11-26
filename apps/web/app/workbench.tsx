@@ -40,21 +40,36 @@ export function Workbench({ sections, section, onSection, workspacePicker, profi
     if (id === section) return;
     if (typeof window !== 'undefined') {
       const doc = document as unknown as {
-        startViewTransition?: (cb: () => void) => { finished?: Promise<void> };
+        startViewTransition?: (cb: () => void) => {
+          ready?: Promise<void>;
+          updateCallbackDone?: Promise<void>;
+          finished?: Promise<void>;
+        };
         getElementById: (id: string) => HTMLElement | null;
       };
-      if (typeof doc.startViewTransition === 'function') {
-        const transition = doc.startViewTransition(() => {
-          flushSync(() => {
-            onSection(id);
+      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      if (!reduceMotion && typeof doc.startViewTransition === 'function') {
+        try {
+          const transition = doc.startViewTransition(() => {
+            flushSync(() => {
+              onSection(id);
+            });
           });
-        });
-        transition?.finished?.finally?.(() => {
-          doc.getElementById('workspace-content')?.focus();
-        });
-        return;
+          transition?.ready?.catch(() => {});
+          transition?.updateCallbackDone?.catch(() => {});
+          transition?.finished?.catch(() => {}).finally(() => {
+            doc.getElementById('workspace-content')?.focus();
+          });
+          return;
+        } catch {
+          // Fall back cleanly if the browser aborts view transitions (e.g. viewport resize)
+        }
       }
-      document.getElementById('workspace-content')?.focus();
+      onSection(id);
+      requestAnimationFrame(() => {
+        doc.getElementById('workspace-content')?.focus();
+      });
+      return;
     }
     onSection(id);
   }

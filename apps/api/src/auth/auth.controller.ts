@@ -76,7 +76,7 @@ export class AuthController {
   @Get('me')
   async me(@CurrentUser() user: SessionUser) {
     const workspaces = await this.sessions.workspacesOf(user.id);
-    return { user, workspaces };
+    return { user, workspaces, trialAvailable: config.trialAvailable };
   }
 
   @Patch('me')
@@ -108,6 +108,6 @@ export class AuthController {
       expires: expiresAt,
     });
     const workspaces = await this.sessions.workspacesOf(user.id);
-    return { user, workspaces };
+    return { user, workspaces, trialAvailable: config.trialAvailable };
   }
 }

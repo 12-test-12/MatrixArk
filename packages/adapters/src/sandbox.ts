@@ -8,10 +8,12 @@ export class SandboxAdapter implements ChannelAdapter {
   readonly kind = 'sandbox' as const;
   readonly platforms = ['bilibili', 'xiaohongshu'] as const;
 
+  constructor(private readonly trial = false) {}
+
   async preflight(): Promise<void> {}
 
   async publish(input: PublishInput): Promise<PublishReceipt> {
-    const bucket = pickBucket(input.slot.idempotencyKey);
+    const bucket = this.trial ? 1 : pickBucket(input.slot.idempotencyKey);
     const remoteId = `sandbox-${input.slot.idempotencyKey.slice(0, 12)}`;
 
     switch (bucket) {
