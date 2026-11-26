@@ -765,6 +765,7 @@ export function Performance({ scope, role, initialAccount, openTask }: {
     </PageHeader>
     <p className="perf-scope-note muted small">
       统计范围：仅纳入真实通道（人工交接 / 官方直发）且状态为「已发布」的作品；沙箱模拟及未完成任务不会计入下方统计与数量对比。
+      官方直发按平台发表时间计入时间范围，人工交接作品没有平台发表时间，按回填时间计入。
     </p>
     <div className="performance-filters">
       <label>平台<select value={platform} onChange={(event) => {
@@ -785,7 +786,7 @@ export function Performance({ scope, role, initialAccount, openTask }: {
           {formatPlatformAccount(item.platform === 'bilibili' ? 'B 站' : '小红书', item.displayName)}
         </option>)}
       </select></label>
-      <label>发布时间<select value={days} onChange={(event) => { setDays(event.target.value); setPages([]); }}>
+      <label>时间范围<select value={days} onChange={(event) => { setDays(event.target.value); setPages([]); }}>
         <option value="">全部时间</option>
         <option value="7">近 7 天</option>
         <option value="30">近 30 天</option>

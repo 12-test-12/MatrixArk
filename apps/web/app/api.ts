@@ -81,7 +81,7 @@ export type Result = {
 export type Task = {
   id: string; status: TaskStatus; scheduledAt: string; handedOffAt: string | null; claimedAt: string | null; lastError: string | null;
   executionChannel: string | null; isSandbox: boolean | null;
-  account: Pick<Account, 'id' | 'platform' | 'displayName' | 'operator' | 'channelKind'>;
+  account: Pick<Account, 'id' | 'platform' | 'displayName' | 'operator' | 'channelKind' | 'accessMethod'>;
   variant: Pick<Variant, 'id' | 'title' | 'platform' | 'version'> & { videoAssetId?: string | null };
   result: Result | null;
 };

@@ -178,7 +178,7 @@ function OnboardingPanel({
   const cookieAction = useAction();
 
   useEffect(() => {
-    if (!biliQr) return;
+    if (!open || tab !== 'qr' || platform !== 'bilibili' || !biliQr) return;
     const timer = window.setInterval(async () => {
       try {
         const res = await post<{ status: 'pending' | 'scanned' | 'expired' | 'connected' }>(
@@ -195,10 +195,14 @@ function OnboardingPanel({
           pushToast('B 站账号扫码接入成功。', 'success');
           onDone();
         }
-      } catch {}
+      } catch {
+        // 票据被服务端回收后轮询会 404，必须停掉轮询并提示重新生成，否则会一直空转。
+        setBiliQr(undefined);
+        setBiliQrStatus('二维码已失效，请重新生成。');
+      }
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [biliQr, accountsPath, onDone]);
+  }, [biliQr, accountsPath, onDone, open, tab, platform]);
 
   function startBiliQr() {
     setBiliQrStatus('');
@@ -236,7 +240,8 @@ function OnboardingPanel({
     setXhsQrStatus('');
     void qrAction.run(async () => {
       const ticket = await post<{ id: string; verificationUrl: string; userCode: string }>(
-        `${accountsPath}/xiaohongshu/authorize`, {},
+        `${accountsPath}/xiaohongshu/authorize`,
+        { groupId: groupId || null },
       );
       setXhsQr({ id: ticket.id, userCode: ticket.userCode, image: makeQrDataUrl(ticket.verificationUrl) });
       setXhsQrStatus('请用小红书 App 扫码确认。');
@@ -456,10 +461,10 @@ function OnboardingPanel({
 }
 
 function AccountRow({
-  account, trial, showArchived, canManage, groups, accountsPath, selected, onToggleSelect,
+  account, trial, showArchived, canManage, canReportRisk, groups, accountsPath, selected, onToggleSelect,
   openPerformance, onChanged, onArchive, archiveBusy,
 }: {
-  account: Account; trial?: boolean; showArchived: boolean; canManage: boolean; groups: MatrixGroup[];
+  account: Account; trial?: boolean; showArchived: boolean; canManage: boolean; canReportRisk: boolean; groups: MatrixGroup[];
   accountsPath: string; selected: boolean; onToggleSelect: (id: string) => void;
   openPerformance: (id: string) => void; onChanged: () => void; onArchive: (account: Account) => void; archiveBusy: boolean;
 }) {
@@ -606,7 +611,7 @@ function AccountRow({
         {!showArchived && canManage && <button type="button" className="button compact" onClick={runHealthCheck} disabled={healthAction.busy}>
           <ShieldCheck size={13} aria-hidden="true" />{healthAction.busy ? '体检中…' : '体检'}
         </button>}
-        {!showArchived && <button type="button" className="button compact"
+        {!showArchived && canReportRisk && <button type="button" className="button compact"
           onClick={() => setPanel(panel === 'risk' ? null : 'risk')}>
           <ShieldAlert size={13} aria-hidden="true" />{account.riskStatus && account.riskStatus !== 'normal' ? '处理风险' : '上报风险'}
         </button>}
@@ -685,7 +690,7 @@ function AccountRow({
       </label>
       <div className="actions">
         <button type="submit" className="button primary compact" disabled={action.busy}>上报风险并通知飞书</button>
-        {account.riskStatus && account.riskStatus !== 'normal' && (
+        {canManage && account.riskStatus && account.riskStatus !== 'normal' && (
           <button type="button" className="button compact" onClick={resolveRisk} disabled={action.busy}>
             <Check size={13} aria-hidden="true" />确认已恢复正常（解除风险）
           </button>
@@ -696,8 +701,9 @@ function AccountRow({
   </li>;
 }
 
-export function Accounts({ scope, canManage, canConfigure, trial, resource, openPerformance }: {
-  scope: string; canManage: boolean; canConfigure: boolean; resource: ReturnType<typeof useResource<Account[]>>;
+export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial, resource, openPerformance }: {
+  scope: string; canManage: boolean; canConfigure: boolean; canReportRisk: boolean;
+  resource: ReturnType<typeof useResource<Account[]>>;
   trial?: boolean;
   openPerformance: (accountId: string) => void;
 }) {
@@ -975,9 +981,10 @@ export function Accounts({ scope, canManage, canConfigure, trial, resource, open
     </section>}
 
     {showArchived && <p className="muted small" role="status">正在查看已归档账号</p>}
-    <Feedback error={visible.error || archiveAction.error || groupAction.error} notice={archiveAction.notice || groupAction.notice} />
+    <Feedback error={visible.error || archiveAction.error || groupAction.error || groupsRes.error || settings.error}
+      notice={archiveAction.notice || groupAction.notice} />
 
-    {visible.loading ? <Loading /> : viewMode === 'group' && !showArchived ? (
+    {visible.loading ? <Loading /> : viewMode === 'group' && !showArchived && !groupsRes.error ? (
       <div className="account-groups">
         {groups.map((group) => {
           const items = filteredAccounts.filter((a) => a.groupId === group.id);
@@ -1001,7 +1008,7 @@ export function Accounts({ scope, canManage, canConfigure, trial, resource, open
             </div>
             {items.length > 0 ? <ul className="account-group-list">
               {items.map((account) => <AccountRow key={account.id} account={account} trial={trial} showArchived={false}
-                canManage={canManage} groups={groups} accountsPath={accountsPath}
+                canManage={canManage} canReportRisk={canReportRisk} groups={groups} accountsPath={accountsPath}
                 selected={selectedIds.includes(account.id)} onToggleSelect={toggleSelect}
                 openPerformance={openPerformance} onChanged={refreshAll} onArchive={archive} archiveBusy={archiveAction.busy} />)}
             </ul> : <p className="account-group-empty muted small">该矩阵组下暂无匹配账号，可在上方列表勾选账号移入。</p>}
@@ -1022,7 +1029,7 @@ export function Accounts({ scope, canManage, canConfigure, trial, resource, open
             </div>
             {ungrouped.length > 0 ? <ul className="account-group-list">
               {ungrouped.map((account) => <AccountRow key={account.id} account={account} trial={trial} showArchived={false}
-                canManage={canManage} groups={groups} accountsPath={accountsPath}
+                canManage={canManage} canReportRisk={canReportRisk} groups={groups} accountsPath={accountsPath}
                 selected={selectedIds.includes(account.id)} onToggleSelect={toggleSelect}
                 openPerformance={openPerformance} onChanged={refreshAll} onArchive={archive} archiveBusy={archiveAction.busy} />)}
             </ul> : <p className="account-group-empty muted small">暂无未分组账号。</p>}
@@ -1044,7 +1051,7 @@ export function Accounts({ scope, canManage, canConfigure, trial, resource, open
             </div>
             {matches.length > 0 ? <ul className="account-group-list">
               {matches.map((account) => <AccountRow key={account.id} account={account} trial={trial} showArchived={showArchived}
-                canManage={canManage} groups={groups} accountsPath={accountsPath}
+                canManage={canManage} canReportRisk={canReportRisk} groups={groups} accountsPath={accountsPath}
                 selected={selectedIds.includes(account.id)} onToggleSelect={toggleSelect}
                 openPerformance={openPerformance} onChanged={refreshAll} onArchive={archive} archiveBusy={archiveAction.busy} />)}
             </ul> : <p className="account-group-empty muted small">

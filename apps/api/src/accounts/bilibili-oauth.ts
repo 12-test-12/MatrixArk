@@ -85,7 +85,9 @@ export class BilibiliOAuthService {
       const grant = oauthToken.safeParse(await response.json());
       if (!grant.success) return { status: 'failed', workspaceId };
       await bindBilibiliAccount(this.prisma, workspaceId, userId, {
-        accessToken: grant.data.data.access_token, expiresAt: new Date(grant.data.data.expires_in * 1000),
+        // expires_in 是剩余秒数，必须换算成“现在 + 有效期”，不能当作 Unix 时间戳。
+        accessToken: grant.data.data.access_token,
+        expiresAt: new Date(Date.now() + grant.data.data.expires_in * 1000),
       }, app);
       return { status: 'connected', workspaceId };
     } catch {

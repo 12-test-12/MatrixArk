@@ -275,7 +275,9 @@ function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
   const recordAction = useAction();
   const task = detail.data;
   const recordable = canRecord(role);
-  const blockedHandoff = task?.status === 'handed_off' && task.account.platform === 'bilibili' && task.account.channelKind === 'manual';
+  // 只拦截后端认定为「仅 UID 历史账号」的 B 站人工任务；扫码 / Cookie 接入的 B 站账号可以正常交接与回填。
+  const blockedHandoff = task?.status === 'handed_off' && task.account.platform === 'bilibili'
+    && task.account.channelKind === 'manual' && task.account.accessMethod === 'manual_uid';
   const handoff = useResource<Handoff>(recordable && !blockedHandoff && task?.handedOffAt && task.executionChannel === 'manual'
     ? path + '/handoff' : null);
   if (!task) return <section className="card detail-pane">

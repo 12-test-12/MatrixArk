@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
-import { type NotificationDelivery, type NotificationKind, type NotificationSetting, type Prisma } from '@prisma/client';
+import { type AccountAccessMethod, type ChannelKind, type NotificationDelivery, type NotificationKind,
+  type NotificationSetting, type Platform, type Prisma } from '@prisma/client';
 import { config } from '../config';
 import { PrismaService } from '../prisma/prisma.service';
+import { isUnverifiedBilibiliAccount } from '../accounts/publish-account';
 import { decryptFeishu, encryptFeishu, sendFeishu, type DeliveryResult } from './feishu';
 
 const minute = 60_000;
@@ -170,7 +172,7 @@ export class NotificationsService {
       const current = await this.prisma.notificationDelivery.findUnique({
         where: { id: delivery.id },
         include: { task: { select: { status: true, handedOffAt: true, executionChannel: true,
-          account: { select: { platform: true } } } },
+          account: { select: { platform: true, channelKind: true, accessMethod: true, externalId: true } } } },
           workspace: { select: { notificationSetting: true } } },
       });
       const clock = await databaseTime(this.prisma);
@@ -192,10 +194,14 @@ export class NotificationsService {
     }
   }
 
-  private isStillWaiting(delivery: NotificationDelivery,
-    task: { status: string; handedOffAt: Date | null; executionChannel: string | null; account: { platform: string } }) {
-    return task.account.platform === 'xiaohongshu' && task.status === 'handed_off' && task.executionChannel === 'manual'
-      && task.handedOffAt && delivery.dedupeKey === dedupeKey(delivery.kind, task.handedOffAt);
+  private isStillWaiting(delivery: NotificationDelivery, task: {
+    status: string; handedOffAt: Date | null; executionChannel: string | null;
+    account: { platform: Platform; channelKind: ChannelKind; accessMethod: AccountAccessMethod; externalId: string | null };
+  }) {
+    // 人工交接提醒覆盖小红书和已核验的 B 站账号；历史仅 UID 的 B 站账号连交接包都被拦截，不再提醒。
+    return task.status === 'handed_off' && task.executionChannel === 'manual' && task.handedOffAt
+      && !isUnverifiedBilibiliAccount(task.account)
+      && delivery.dedupeKey === dedupeKey(delivery.kind, task.handedOffAt);
   }
 
   private async claim(candidate: Pick<NotificationDelivery, 'id' | 'workspaceId' | 'taskId'>) {
@@ -204,7 +210,8 @@ export class NotificationsService {
       const delivery = await tx.notificationDelivery.findUnique({
         where: { id: candidate.id },
         include: { task: { include: {
-          variant: { select: { title: true } }, account: { select: { displayName: true, platform: true } },
+          variant: { select: { title: true } },
+          account: { select: { displayName: true, platform: true, channelKind: true, accessMethod: true, externalId: true } },
         } }, workspace: { select: { notificationSetting: true, name: true, trialOwnerId: true } } },
       });
       if (!delivery) return;
@@ -236,7 +243,8 @@ export class NotificationsService {
       });
       const { variant, account } = delivery.task;
       const headline = delivery.kind === 'handoff_ready' ? '发布任务待交接处理' : '发布任务交接后 4 小时仍未回填';
-      const text = [`MatrixArk · ${headline}`, `${delivery.workspace.name} · 小红书 · ${account.displayName}`,
+      const platformText = account.platform === 'xiaohongshu' ? '小红书' : 'B 站';
+      const text = [`MatrixArk · ${headline}`, `${delivery.workspace.name} · ${platformText} · ${account.displayName}`,
         variant.title, '请在工作台打开「发布任务 → 待回填」查看并处理。',
         ...(config.publicBaseUrl ? [config.publicBaseUrl] : [])].join('\n').replaceAll('<', '＜').replaceAll('>', '＞');
       return { delivery: claimed, setting, text };

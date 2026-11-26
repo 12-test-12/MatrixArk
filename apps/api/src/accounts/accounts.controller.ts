@@ -63,6 +63,9 @@ const bilibiliGrantSchema = z.object({
 const biliQrStartSchema = z.object({
   groupId: z.string().min(1).nullable().optional(),
 }).strict().optional();
+const xhsQrStartSchema = z.object({
+  groupId: z.string().min(1).nullable().optional(),
+}).strict().optional();
 const reportRiskSchema = z.object({
   level: z.enum(['warning', 'risk']).default('risk'),
   kind: z.string().trim().min(1).max(60).default('manual_flagged'),
@@ -348,10 +351,11 @@ export class AccountsController {
     @CurrentUser() user: SessionUser,
     @CurrentTrial() trial: boolean,
     @Param('workspaceId') workspaceId: string,
+    @Body() body: unknown,
   ) {
     assertCan(membership.role, 'account:manage');
     if (trial) throw new ConflictException('试用工作室只使用演示账号');
-    return this.xiaohongshu.start(workspaceId, user.id);
+    return this.xiaohongshu.start(workspaceId, user.id, parse(xhsQrStartSchema, body)?.groupId);
   }
 
   @Post('xiaohongshu/authorize/:id/poll')

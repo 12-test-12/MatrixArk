@@ -43,8 +43,10 @@ export async function bindBilibiliAccount(prisma: PrismaService, workspaceId: st
     if (existing) {
       await tx.channelAccount.update({ where: { id }, data: authorization });
     } else {
-      const names = new Set((await tx.channelAccount.findMany({ where: scope, select: { displayName: true } }))
-        .map(({ displayName }) => displayName));
+      // 唯一索引包含已归档账号，取名时必须一并避开，否则同名昵称会撞唯一键报 500。
+      const names = new Set((await tx.channelAccount.findMany({
+        where: { workspaceId, platform: 'bilibili' }, select: { displayName: true },
+      })).map(({ displayName }) => displayName));
       const nickname = [...name].slice(0, 50).join('');
       let displayName = nickname;
       for (let suffix = 2; names.has(displayName); suffix++) displayName = `${nickname} (${suffix})`;

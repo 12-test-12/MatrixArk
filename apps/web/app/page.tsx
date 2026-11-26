@@ -143,8 +143,8 @@ function WorkspaceBody({ workspace, section, itemId, topicView, topicWorkId, onT
     <p className="muted">要在飞书群里收到消息，请切回正式工作室，保存群机器人地址后点击「发一条测试消息」。</p>
     <div className="actions"><button type="button" className="button" onClick={() => openTasks('')}>查看发布任务</button></div>
   </> : <FeishuSettings scope={scope} />;
-  return <Accounts scope={scope} canManage={canEdit(workspace.role)} canConfigure={workspace.role === 'owner'} trial={workspace.trial} resource={accounts}
-    openPerformance={openPerformance} />;
+  return <Accounts scope={scope} canManage={canEdit(workspace.role)} canConfigure={workspace.role === 'owner'}
+    canReportRisk={canRecord(workspace.role)} trial={workspace.trial} resource={accounts} openPerformance={openPerformance} />;
 }
 
 export default function Home() {

@@ -864,6 +864,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       cookie, method: 'PATCH', body: { ...application, appId: 'a-different-app' }, status: 409,
     });
     let xiaohongshuOpenId = 'verified-fixture';
+    let xhsNickname = '平台返回昵称';
     const localFetch = globalThis.fetch;
     test.mock.method(globalThis, 'fetch', (input, options) => {
       const url = new URL(input);
@@ -887,7 +888,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
             : Response.json({ code: 37002, success: false, data: null });
         case 'batch_get_min_user_info':
           assert.equal(options.headers.authorization, 'Bearer private-token-fixture');
-          return result({ open_id: xiaohongshuOpenId, nickname: '平台返回昵称' });
+          return result({ open_id: xiaohongshuOpenId, nickname: xhsNickname });
         default: assert.fail('Unexpected XiaoHongShu request');
       }
     });
@@ -898,7 +899,13 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     const otherPath = foreign + '/accounts/xiaohongshu/authorize';
     assert.match((await post(path, {}, 409)).data.message, /尚未开通 Web 扫码/u);
     webScanEnabled = true;
-    const { data: ticket } = await post(path, {});
+    // 扫码接入也必须遵守「单一矩阵组」：跨工作室的 groupId 在发起授权时就被拒绝。
+    const { data: qrGroup } = await post(own + '/accounts/groups', { name: '扫码归属组', color: 'cyan' });
+    const { data: foreignQrGroup } = await call(foreign + '/accounts/groups', {
+      method: 'POST', cookie: otherCookie, status: 201, body: { name: '外部扫码组' },
+    });
+    await post(path, { groupId: foreignQrGroup.id }, 404);
+    const { data: ticket } = await post(path, { groupId: qrGroup.id });
     assert.deepEqual(Object.keys(ticket).sort(), ['expiresAt', 'id', 'userCode', 'verificationUrl']);
     const poll = (id) => post(`${path}/${id}/poll`, {}, 200);
     await call(`${otherPath}/${ticket.id}/poll`, { method: 'POST', cookie: otherCookie, body: {}, status: 404 });
@@ -916,6 +923,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(verified.availableForOfficial, false);
     const stored = await prisma.channelAccount.findUniqueOrThrow({ where: { id: verified.id } });
     assert.equal(stored.externalId, 'verified-fixture');
+    assert.equal(stored.groupId, qrGroup.id);
     assert.deepEqual(stored.authScope, ['basic_info']);
     assert.equal(stored.credentials, null);
     assert.equal(stored.credentialsCiphertext, null);
@@ -935,6 +943,23 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     const { data: linked } = await call(own + '/accounts', { cookie });
     assert.deepEqual(linked.filter(({ displayName }) => displayName.startsWith('平台返回昵称'))
       .map(({ displayName }) => displayName).sort(), ['平台返回昵称', '平台返回昵称 (2)']);
+
+    // 归档后同名账号重新接入：显示名要避开已归档记录，不能撞唯一索引报 500。
+    xhsNickname = '归档重名号';
+    xiaohongshuOpenId = 'archive-fixture';
+    const { data: archivedTicket } = await post(path, {});
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.equal((await poll(archivedTicket.id)).data.status, 'connected');
+    const archivedAccount = await prisma.channelAccount.findFirstOrThrow({
+      where: { workspaceId, externalId: 'archive-fixture' },
+    });
+    await call(own + '/accounts/' + archivedAccount.id, { method: 'DELETE', cookie });
+    xiaohongshuOpenId = 'archive-fixture-2';
+    const { data: sameNameTicket } = await post(path, {});
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.equal((await poll(sameNameTicket.id)).data.status, 'connected');
+    const { data: afterArchive } = await call(own + '/accounts', { cookie });
+    assert.ok(afterArchive.some(({ displayName }) => displayName === '归档重名号 (2)'));
   });
 
   await t.test('B 站官方投稿使用已审快照，领取去重，回执回读及超时恢复', async (t) => {
@@ -1395,6 +1420,57 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     behavior = 'success';
     assert.deepEqual((await post(path + '/test', {}, 200)).data, { sent: true });
     assert.match(sends.at(-1), /MatrixArk 测试提醒/u);
+
+    // 已核验的 B 站人工账号也要收到交接提醒；历史仅 UID 账号没有交接包，不再提醒。
+    const biliManual = await prisma.channelAccount.create({ data: {
+      workspaceId, platform: 'bilibili', channelKind: 'manual', displayName: 'B 站人工提醒账号',
+      externalId: 'bili-web-uid:900001', accessMethod: 'qr_login', authStatus: 'active', authCheckedAt: new Date(),
+    } });
+    const { data: biliDraft } = await post(own + '/manuscripts', {
+      title: 'B 站提醒测试稿', body: '专栏正文'.repeat(80), tags: [],
+    });
+    await post(own + '/manuscripts/' + biliDraft.id + '/assets', file(sourcePng));
+    const { data: [biliVersion] } = await post(own + '/manuscripts/' + biliDraft.id + '/generate', { platforms: ['bilibili'] });
+    const { data: { variant: biliArticle } } = await call(own + '/variants/' + biliVersion.id, {
+      method: 'PATCH', cookie, body: { platformFields: { category: 100, summary: '专栏摘要'.repeat(60) } },
+    });
+    await post(own + '/variants/' + biliArticle.id + '/confirm', {});
+    const { data: { items: [biliTask] } } = await post(own + '/tasks', {
+      variantIds: [biliArticle.id], accountIds: [biliManual.id], scheduledAt,
+    });
+    assert.equal(await worker.get(TasksService).dispatchDue(), 1);
+    const { data: biliHandoff } = await call(own + '/tasks/' + biliTask.id + '/handoff', { cookie });
+    assert.equal(biliHandoff.variantId, biliArticle.id);
+    assert.equal(biliHandoff.account.displayName, 'B 站人工提醒账号');
+    assert.equal(biliHandoff.profileUrl, 'https://space.bilibili.com/900001');
+    const biliReady = await prisma.notificationDelivery.findFirstOrThrow({
+      where: { taskId: biliTask.id, kind: 'handoff_ready' },
+    });
+    await prisma.notificationDelivery.update({ where: { id: biliReady.id }, data: { nextAttemptAt: new Date(0) } });
+    const beforeBili = sends.length;
+    await services[0].deliverDue();
+    assert.equal(sends.length, beforeBili + 1);
+    assert.match(sends.at(-1), /· B 站 · B 站人工提醒账号/u);
+
+    const legacy = await prisma.channelAccount.create({ data: {
+      workspaceId, platform: 'bilibili', channelKind: 'manual', displayName: 'B 站旧 UID 账号',
+      externalId: 'manual-bili-uid:900002', accessMethod: 'manual_uid', authStatus: 'active', authCheckedAt: new Date(),
+    } });
+    const legacyHandedOffAt = new Date();
+    const legacyTask = await prisma.publishTask.create({ data: {
+      workspaceId, accountId: legacy.id, variantId: biliArticle.id, scheduledAt: new Date(0),
+      idempotencyKey: 'legacy-reminder-fixture', createdById: owner.user.id, status: 'handed_off',
+      executionChannel: 'manual', handedOffAt: legacyHandedOffAt, variantContentHash: biliArticle.contentHash,
+    } });
+    const legacyDelivery = await prisma.notificationDelivery.create({ data: {
+      workspaceId, taskId: legacyTask.id, kind: 'handoff_ready',
+      dedupeKey: 'handoff:' + legacyHandedOffAt.toISOString(),
+      scheduledAt: legacyHandedOffAt, nextAttemptAt: new Date(0),
+    } });
+    await services[0].deliverDue();
+    assert.equal(sends.length, beforeBili + 1);
+    assert.equal((await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: legacyDelivery.id } })).status,
+      'skipped');
   });
 
   await t.test('登录用户可更正姓名和邮箱，换邮箱校验当前密码', async () => {

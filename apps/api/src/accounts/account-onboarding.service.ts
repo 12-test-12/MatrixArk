@@ -155,10 +155,11 @@ export class AccountOnboardingService {
     workspaceId: string,
     platform: 'bilibili' | 'xiaohongshu',
     preferred: string,
-    excludeId?: string,
   ) {
+    // 数据库的「工作室 + 平台 + 显示名」唯一索引包含已归档账号，这里也必须一起避开，
+    // 否则同名账号重新接入时会撞唯一键，接口直接 500。
     const existing = await tx.channelAccount.findMany({
-      where: { workspaceId, platform, archivedAt: null, ...(excludeId ? { id: { not: excludeId } } : {}) },
+      where: { workspaceId, platform },
       select: { displayName: true },
     });
     const used = new Set(existing.map(({ displayName }) => displayName));

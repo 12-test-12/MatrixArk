@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { config } from '../config';
 import { PrismaService } from '../prisma/prisma.service';
 import { readPlatformApp, workspacePlatformApp } from './platform-app';
+import { MatrixGroupsService } from './matrix-groups.service';
 
 const origin = 'https://openaccount.xiaohongshu.com';
 const envelope = z.object({ code: z.number().int(), success: z.boolean(), data: z.unknown() });
@@ -55,6 +56,7 @@ type Authorization = {
   appId: string;
   id: string; code: string; verificationUrl: string; userCode: string; expiresAt: number; interval: number;
   nextPollAt: number; busy: boolean; status: 'pending' | 'scanned' | 'expired' | 'denied' | 'connected';
+  groupId?: string | null;
   grant?: z.infer<typeof token>;
 };
 
@@ -64,13 +66,15 @@ export class XiaohongshuIdentityService {
   private readonly pending = new Map<string, Authorization>();
   private readonly starting = new Set<string>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly groups: MatrixGroupsService) {}
 
-  async start(workspaceId: string, userId: string) {
+  async start(workspaceId: string, userId: string, groupId?: string | null) {
     const key = JSON.stringify([workspaceId, userId]);
     if (this.starting.has(key) || this.pending.get(key)?.busy) throw new ConflictException('正在处理授权，请稍后重试。');
     this.starting.add(key);
     try {
+      const validGroupId = groupId === undefined
+        ? undefined : await this.groups.assertWorkspaceGroup(this.prisma, workspaceId, groupId);
       const { appId, appSecret } = await readPlatformApp(this.prisma, workspaceId, 'xiaohongshu') ?? config.xiaohongshu;
       if (!appId || !appSecret) throw new ConflictException('请先在发布账号页保存小红书开放平台应用 ID 和密钥。');
       const app = { app_id: appId, app_secret: appSecret };
@@ -91,6 +95,7 @@ export class XiaohongshuIdentityService {
         nextPollAt: now + result.interval * 1000,
         busy: false,
         status: 'pending',
+        groupId: validGroupId,
       };
       this.pending.set(key, entry);
       setTimeout(() => {
@@ -144,7 +149,7 @@ export class XiaohongshuIdentityService {
         this.pending.delete(key);
         throw new BadGatewayException('小红书返回的账号身份不一致，请重新授权。');
       }
-      const saved = await this.saveIdentity(workspaceId, userId, entry.appId, identity);
+      const saved = await this.saveIdentity(workspaceId, userId, entry.appId, identity, entry.groupId);
       entry.grant = undefined;
       entry.code = '';
       entry.status = saved ? 'connected' : 'expired';
@@ -155,14 +160,18 @@ export class XiaohongshuIdentityService {
     }
   }
 
-  private async saveIdentity(workspaceId: string, userId: string, appId: string, identity: z.infer<typeof profile>) {
+  private async saveIdentity(workspaceId: string, userId: string, appId: string, identity: z.infer<typeof profile>,
+    groupId?: string | null) {
     return this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
       const current = await workspacePlatformApp(tx, workspaceId, 'xiaohongshu');
       if ((current?.appId ?? config.xiaohongshu.appId) !== appId) return false;
+      const validGroupId = groupId === undefined
+        ? undefined : await this.groups.assertWorkspaceGroup(tx, workspaceId, groupId);
       const scope = { workspaceId, platform: 'xiaohongshu' as const, archivedAt: null };
       const existing = await tx.channelAccount.findFirst({ where: { ...scope, externalId: identity.open_id } });
-      const verified = { authCheckedAt: new Date(), authAuthorizedBy: userId, authScope: ['basic_info'], accessMethod: 'qr_login' as const };
+      const verified = { authCheckedAt: new Date(), authAuthorizedBy: userId, authScope: ['basic_info'], accessMethod: 'qr_login' as const,
+        ...(validGroupId !== undefined && { groupId: validGroupId }) };
       if (existing) {
         const identityOnly = existing.channelKind === 'official' && existing.authStatus === 'pending'
           && existing.authScope.length === 1 && existing.authScope[0] === 'basic_info'
@@ -172,8 +181,10 @@ export class XiaohongshuIdentityService {
         } });
         return true;
       }
-      const names = new Set((await tx.channelAccount.findMany({ where: scope, select: { displayName: true } }))
-        .map(({ displayName }) => displayName));
+      // 唯一索引包含已归档账号，取名时必须一并避开，否则同名昵称会撞唯一键报 500。
+      const names = new Set((await tx.channelAccount.findMany({
+        where: { workspaceId, platform: 'xiaohongshu' }, select: { displayName: true },
+      })).map(({ displayName }) => displayName));
       const nickname = Array.from(identity.nickname).slice(0, 50).join('');
       let displayName = nickname;
       for (let suffix = 2; names.has(displayName); suffix++) displayName = `${nickname} (${suffix})`;

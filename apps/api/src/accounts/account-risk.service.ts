@@ -231,6 +231,8 @@ export class AccountRiskService {
         });
         return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus };
       }
+      // 授权仍在有效期内：记录本次体检时间，否则巡检队列会一直卡在这批账号上。
+      await this.prisma.channelAccount.update({ where: { id: accountId }, data: { authCheckedAt: now } });
     }
 
     if (account.cookieCiphertext) {
@@ -279,17 +281,21 @@ export class AccountRiskService {
           where: { id: accountId },
           data: { authStatus: 'active', authCheckedAt: now },
         });
-      } else if (account.platform === 'xiaohongshu' && !hasXhsSessionKeys(cookie)) {
-        const event = await this.recordRisk({
-          workspaceId,
-          accountId,
-          level: 'risk',
-          kind: 'cookie_expired',
-          message: '小红书 Cookie 缺少核心会话字段，请重新导入有效 Cookie。',
-          actorId,
-          forceNotify,
-        });
-        return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus };
+      } else if (account.platform === 'xiaohongshu') {
+        if (!hasXhsSessionKeys(cookie)) {
+          const event = await this.recordRisk({
+            workspaceId,
+            accountId,
+            level: 'risk',
+            kind: 'cookie_expired',
+            message: '小红书 Cookie 缺少核心会话字段，请重新导入有效 Cookie。',
+            actorId,
+            forceNotify,
+          });
+          return { status: 'risk' as const, reason: event.message, feishuStatus: event.feishuStatus };
+        }
+        // 小红书没有可调用的登录态接口，只能确认会话字段齐全；同样推进体检时间，保证巡检轮得到其他账号。
+        await this.prisma.channelAccount.update({ where: { id: accountId }, data: { authCheckedAt: now } });
       }
     }
 

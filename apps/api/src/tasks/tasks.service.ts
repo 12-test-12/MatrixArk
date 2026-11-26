@@ -34,7 +34,7 @@ function lockRow(tx: Prisma.TransactionClient, table: keyof typeof lockTables, w
 }
 
 const taskRelations = {
-  account: { select: { id: true, platform: true, displayName: true, operator: true, channelKind: true } },
+  account: { select: { id: true, platform: true, displayName: true, operator: true, channelKind: true, accessMethod: true } },
   variant: { select: { id: true, manuscriptId: true, platform: true, version: true, title: true, videoAssetId: true } },
   result: true,
 } as const satisfies Prisma.PublishTaskInclude;
