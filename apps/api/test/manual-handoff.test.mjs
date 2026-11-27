@@ -1776,6 +1776,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       displayName: '矩阵口令测试号',
       loginIdentifier: '13800138000',
       password: 'SecretPassword!23',
+      profile: '5f8a1234000000000100abcd',
       groupId: groupA.id,
       alias: 'A组主力口令号',
       tags: ['数码', '主号'],
@@ -1787,7 +1788,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       body: {
         platform: 'xiaohongshu',
         displayName: '矩阵Cookie测试号',
-        cookie: 'a1=xhs_a1_val; web_session=xhs_sess_val',
+        cookie: 'a1=xhs_a1_val; web_session=xhs_sess_val; x-user-id-creator.xiaohongshu.com=609b1234000000000100cafe',
         groupId: groupA.id,
       },
     });
@@ -1800,18 +1801,14 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       groupId: foreignGroup.id,
     }, 404);
 
-    // 校验加密凭据脱敏、可控解密与权限控制
+    // 校验加密凭据脱敏且不再提供明文导出接口
     const pwdStored = await prisma.channelAccount.findUniqueOrThrow({ where: { id: pwdAccount.id } });
     assert.equal(pwdStored.loginIdentifier, '138****8000');
     assert.ok(!JSON.stringify(pwdStored).includes('SecretPassword!23'));
     assert.equal(pwdStored.passwordKeyId, 'platform-local-v1');
-    await call(`${own}/accounts/${pwdAccount.id}/credentials`, { status: 401 });
-    await call(`${own}/accounts/${pwdAccount.id}/credentials`, { cookie: viewerCookie, status: 403 });
-    const { data: creds } = await call(`${own}/accounts/${pwdAccount.id}/credentials`, { cookie });
-    assert.equal(creds.loginIdentifier, '13800138000');
-    assert.equal(creds.password, 'SecretPassword!23');
-    const { data: qrCreds } = await call(`${own}/accounts/${qrDone.accountId}/credentials`, { cookie });
-    assert.match(qrCreds.cookie, /SESSDATA=qr_sess_888/);
+    const qrStored = await prisma.channelAccount.findUniqueOrThrow({ where: { id: qrDone.accountId } });
+    assert.ok(qrStored.cookieCiphertext && !JSON.stringify(qrStored).includes('qr_sess_888'));
+    await call(`${own}/accounts/${pwdAccount.id}/credentials`, { cookie, status: 404 });
 
     // 2) 单一矩阵组互斥约束与批量移动、解散分组不影响账号与任务
     const { data: listAfterCreate } = await call(own + '/accounts', { cookie });
@@ -1820,7 +1817,21 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       assert.equal(row.groupId, groupA.id);
       assert.equal(row.availableForHandoff, true);
     }
-    await call(`${own}/accounts/${pwdAccount.id}`, { method: 'PATCH', cookie, body: { groupId: groupB.id } });
+    assert.equal(
+      listAfterCreate.find((item) => item.id === pwdAccount.id).profileUrl,
+      'https://www.xiaohongshu.com/user/profile/5f8a1234000000000100abcd',
+    );
+    assert.equal(
+      listAfterCreate.find((item) => item.id === cookieXhs.id).profileUrl,
+      'https://www.xiaohongshu.com/user/profile/609b1234000000000100cafe',
+    );
+    await call(`${own}/accounts/${pwdAccount.id}`, {
+      method: 'PATCH', cookie, body: { profileUrl: 'https://evil.example/user/profile/123' }, status: 400,
+    });
+    const xhsShareProfile = 'https://www.xiaohongshu.com/user/profile/5f8a1234000000000100abcd?xsec_token=demo';
+    await call(`${own}/accounts/${pwdAccount.id}`, {
+      method: 'PATCH', cookie, body: { groupId: groupB.id, profileUrl: xhsShareProfile },
+    });
     await post(own + '/accounts/batch', { accountIds: [cookieXhs.id], action: 'set_group', groupId: groupB.id }, 200);
     await post(own + '/accounts/batch', { accountIds: [cookieXhs.id], action: 'set_pinned', pinned: true }, 200);
     const { data: groupsAfterMove } = await call(own + '/accounts/groups', { cookie });
@@ -1840,6 +1851,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     });
     const pwdTaskId = perfSchedule.items[0].id;
     await worker.get(TasksService).dispatchDue();
+    const { data: xhsHandoff } = await call(`${own}/tasks/${pwdTaskId}/handoff`, { cookie });
+    assert.equal(xhsHandoff.profileUrl, xhsShareProfile);
     await post(`${own}/tasks/${pwdTaskId}/result`, {
       state: 'published',
       remoteUrl: 'https://www.xiaohongshu.com/explore/matrix-group-fixture',
@@ -1950,8 +1963,9 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       readCookieLabel: '红薯只读小号',
     }, 200);
     assert.equal(readCfg.readAccountId, xhsPeer.id);
-    const { data: credsWithRead } = await call(`${own}/accounts/${xhsMain.id}/credentials`, { cookie });
-    assert.match(credsWithRead.readCookie, /web_session=read_only_sess/);
+    const storedMain = await prisma.channelAccount.findUniqueOrThrow({ where: { id: xhsMain.id } });
+    assert.ok(storedMain.readCookieCiphertext && !JSON.stringify(storedMain).includes('read_only_sess'));
+    assert.equal(storedMain.readCookieLabel, '红薯只读小号');
 
     // 主号体检先触发 Cookie 临期预警
     const { data: expiringDiag } = await post(`${own}/accounts/${xhsMain.id}/health-check`, {}, 200);

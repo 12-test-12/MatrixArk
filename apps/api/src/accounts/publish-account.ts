@@ -1,11 +1,51 @@
 import { resolveAccountCapabilities } from './account-capabilities';
-import { biliKeyId } from './platforms/bilibili-account-policy';
+import { biliKeyId, bilibiliManualProfile } from './platforms/bilibili-account-policy';
 export { bilibiliManualUidPrefix, bilibiliWebUidPrefix, extractBilibiliUid, isUnverifiedBilibiliAccount, bilibiliManualProfile } from './platforms/bilibili-account-policy';
 
+import { BadRequestException } from '@nestjs/common';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import type { ChannelAccount, Prisma } from '@prisma/client';
+import type { ChannelAccount, Platform, Prisma } from '@prisma/client';
 import { config } from '../config';
 import { decryptPlatformSecret, encryptPlatformSecret, platformKeyId, readPlatformApp } from './platform-app';
+
+const xhsHexIdPattern = /^[0-9a-f]{24}$/i;
+const xhsProfilePathPattern = /^\/user\/profile\/([a-zA-Z0-9_-]{8,64})\/?$/;
+
+/** Validate optional Bilibili UID/space URL or Xiaohongshu profile URL/ID consistently across onboarding and editing. */
+export function parseProfileInput(platform: Platform, raw?: string | null): {
+  uid: string | null;
+  profileUrl: string | null | undefined;
+} {
+  if (raw === undefined) return { uid: null, profileUrl: undefined };
+  const trimmed = raw?.trim() ?? '';
+  if (!trimmed) return { uid: null, profileUrl: null };
+  if (platform === 'bilibili') {
+    const uid = /^[1-9][0-9]{0,19}$/.test(trimmed)
+      ? trimmed
+      : /^https:\/\/space\.bilibili\.com\/([1-9][0-9]{0,19})\/?(?:[?#]\S*)?$/i.exec(trimmed)?.[1];
+    if (!uid) {
+      throw new BadRequestException('B 站主页或 UID 格式不正确，请填写数字 UID 或 space.bilibili.com 链接');
+    }
+    return { uid, profileUrl: `https://space.bilibili.com/${uid}` };
+  }
+  if (xhsHexIdPattern.test(trimmed)) {
+    return { uid: null, profileUrl: `https://www.xiaohongshu.com/user/profile/${trimmed}` };
+  }
+  if (URL.canParse(trimmed)) {
+    const url = new URL(trimmed);
+    const match = xhsProfilePathPattern.exec(url.pathname);
+    if (url.origin === 'https://www.xiaohongshu.com' && !url.username && !url.password && match) {
+      return { uid: null, profileUrl: `${url.origin}/user/profile/${match[1]}${url.search}` };
+    }
+  }
+  throw new BadRequestException('小红书主页链接格式不正确，请填写 https://www.xiaohongshu.com/user/profile/... 链接或 24 位用户 ID');
+}
+
+export function resolveAccountProfileUrl(
+  account: Pick<ChannelAccount, 'platform' | 'channelKind' | 'externalId' | 'profileUrl'>,
+) {
+  return account.profileUrl ?? bilibiliManualProfile(account);
+}
 
 type AccountIdentity = Pick<ChannelAccount, 'workspaceId' | 'id' | 'externalId'>;
 

@@ -10,7 +10,7 @@ process.env.BILIBILI_CREDENTIALS_KEY = 'a'.repeat(64);
 process.env.SANDBOX_CHANNEL = 'false';
 
 const { config } = await import('../dist/config.js');
-const { resolveAccountCapabilities } = await import('../dist/accounts/account-capabilities.js');
+const { derivePlatformUid, resolveAccountCapabilities } = await import('../dist/accounts/account-capabilities.js');
 const { publishChannel } = await import('../dist/accounts/publish-account.js');
 const { AdapterRegistry, createDefaultAdapterRegistry } = await import('@matrixark/adapters');
 const { TaskPlatformService } = await import('../dist/tasks/infrastructure/task-platform.service.js');
@@ -50,7 +50,22 @@ test('账号能力沿用 UID、扫码、Cookie、密码、OAuth 与试用账号�
     assert.equal(resolveAccountCapabilities({ ...account, channelKind: 'sandbox', platform: 'xiaohongshu' }, now, true).channel, undefined);
     config.trialAvailable = false;
     assert.equal(resolveAccountCapabilities(account, now, true).channel, undefined);
+    assert.equal(resolveAccountCapabilities(account, now, true).capabilityReason, 'trial_restricted');
   } finally { config.trialAvailable = previous; }
+  assert.equal(resolveAccountCapabilities(account, now).capabilityReason, null);
+  assert.equal(resolveAccountCapabilities({ ...account, externalId: null }, now).capabilityReason, 'missing_external_id');
+  assert.equal(resolveAccountCapabilities({ ...account, accessMethod: 'manual_uid' }, now).capabilityReason, 'auth_unverified');
+  assert.equal(resolveAccountCapabilities({ ...account, rateLimitedUntil: new Date(now.getTime() + 1000) }, now).capabilityReason, 'rate_limited');
+  assert.equal(resolveAccountCapabilities({ ...official, platform: 'xiaohongshu' }, now).capabilityReason, 'platform_policy');
+  assert.equal(resolveAccountCapabilities(official, now, true).capabilityReason, 'trial_restricted');
+  assert.equal(derivePlatformUid({ platform: 'bilibili', externalId: 'bili-web-uid:45678', profileUrl: null }), '45678');
+  assert.equal(derivePlatformUid({ platform: 'bilibili', externalId: 'manual-bili-uid:123', profileUrl: null }), '123');
+  assert.equal(derivePlatformUid({ platform: 'bilibili', externalId: 'pwd-123', profileUrl: null }), null);
+  assert.equal(derivePlatformUid({
+    platform: 'xiaohongshu',
+    externalId: 'xhs-cookie:abcdef',
+    profileUrl: 'https://www.xiaohongshu.com/user/profile/609b1234000000000100cafe?xsec_token=demo',
+  }), '609b1234000000000100cafe');
 });
 
 test('任务编排通过注入的注册工厂执行，平台凭据与成效接口保留注册上下文', async () => {

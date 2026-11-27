@@ -5,6 +5,7 @@ import {
   ConflictException,
   Delete,
   Get,
+  Header,
   Headers,
   HttpCode,
   NotFoundException,
@@ -40,8 +41,8 @@ import {
   updateMatrixGroupSchema,
 } from './matrix-groups.service';
 import { encryptPlatformSecret, readPlatformApp, workspacePlatformApp } from './platform-app';
-import { bilibiliManualProfile } from './publish-account';
-import { resolveAccountCapabilities } from './account-capabilities';
+import { parseProfileInput, resolveAccountProfileUrl } from './publish-account';
+import { derivePlatformUid, resolveAccountCapabilities } from './account-capabilities';
 import { XiaohongshuIdentityService } from './xiaohongshu-identity.service';
 
 const updateAccountSchema = z.object({
@@ -53,6 +54,7 @@ const updateAccountSchema = z.object({
   pinned: z.boolean().optional(),
   egressIp: z.string().trim().max(64).nullable().optional(),
   profileLabel: z.string().trim().max(64).nullable().optional(),
+  profileUrl: z.string().trim().max(1000).nullable().optional(),
   cookieExpiresAt: z.string().datetime({ offset: true }).transform((v) => new Date(v)).nullable().optional(),
 }).strict();
 const platformSchema = z.enum(['xiaohongshu', 'bilibili']);
@@ -95,6 +97,7 @@ export class AccountsController {
   ) {}
 
   @Get()
+  @Header('Cache-Control', 'no-store')
   async list(@Param('workspaceId') workspaceId: string, @CurrentTrial() trial: boolean, @Query('archived') archived?: string) {
     const accounts = await this.prisma.channelAccount.findMany({
       where: { workspaceId, archivedAt: archived === 'true' ? { not: null } : null },
@@ -140,7 +143,8 @@ export class AccountsController {
         profileLabel: account.profileLabel,
         cookieExpiresAt: account.cookieExpiresAt,
         envCheckedAt: account.envCheckedAt,
-        profileUrl: bilibiliManualProfile(account),
+        profileUrl: resolveAccountProfileUrl(account),
+        platformUid: derivePlatformUid(account),
         loginIdentifier: account.loginIdentifier,
         hasPassword: Boolean(account.passwordCiphertext),
         hasCookie: Boolean(account.cookieCiphertext),
@@ -148,10 +152,15 @@ export class AccountsController {
         riskStatus: account.riskStatus,
         riskReason: account.riskReason,
         riskDetectedAt: account.riskDetectedAt,
+        authStatus: account.authStatus,
+        authExpiresAt: account.authExpiresAt,
+        authCheckedAt: account.authCheckedAt,
         identityVerified: capabilities.identityVerified,
         identityCheckedAt: capabilities.identityCheckedAt,
         availableForHandoff: capabilities.availableForHandoff,
         availableForOfficial: capabilities.availableForOfficial,
+        availableForMetrics: capabilities.availableForMetrics,
+        capabilityReason: capabilities.capabilityReason,
         hasCredentials: Boolean(account.credentialsCiphertext || account.credentials),
         taskCount: account._count.tasks,
         createdAt: account.createdAt,
@@ -214,8 +223,50 @@ export class AccountsController {
   }
 
   @Get('risks')
+  @Header('Cache-Control', 'no-store')
   listRisks(@Param('workspaceId') workspaceId: string, @Query('accountId') accountId?: string) {
     return this.risks.listEvents(workspaceId, accountId);
+  }
+
+  @Get(':id/operations-summary')
+  @Header('Cache-Control', 'no-store')
+  async operationsSummary(@Param('workspaceId') workspaceId: string, @Param('id') id: string) {
+    const account = await this.prisma.channelAccount.findFirst({
+      where: { id, workspaceId },
+      select: { id: true },
+    });
+    if (!account) throw new NotFoundException('账号不存在');
+    const [totalTasks, pendingTasks, unknownTasks, latest] = await Promise.all([
+      this.prisma.publishTask.count({ where: { workspaceId, accountId: id } }),
+      this.prisma.publishTask.count({
+        where: { workspaceId, accountId: id, status: { in: ['scheduled', 'dispatching', 'paused', 'handed_off'] } },
+      }),
+      this.prisma.publishTask.count({ where: { workspaceId, accountId: id, status: 'unknown' } }),
+      this.prisma.publishResult.findFirst({
+        where: { workspaceId, task: { accountId: id } },
+        orderBy: [{ recordedAt: 'desc' }, { id: 'desc' }],
+        select: {
+          taskId: true,
+          state: true,
+          recordedAt: true,
+          remoteUrl: true,
+          task: { select: { variant: { select: { title: true } } } },
+        },
+      }),
+    ]);
+    return {
+      accountId: id,
+      totalTasks,
+      pendingTasks,
+      unknownTasks,
+      latestResult: latest ? {
+        taskId: latest.taskId,
+        state: latest.state,
+        recordedAt: latest.recordedAt,
+        remoteUrl: latest.remoteUrl,
+        title: latest.task.variant.title ?? null,
+      } : null,
+    };
   }
 
   @Post('password')
@@ -393,18 +444,6 @@ export class AccountsController {
     return this.xiaohongshu.poll(workspaceId, user.id, id);
   }
 
-  @Get(':id/credentials')
-  credentials(
-    @CurrentMembership() membership: { role: Role },
-    @CurrentTrial() trial: boolean,
-    @Param('workspaceId') workspaceId: string,
-    @Param('id') id: string,
-  ) {
-    assertCan(membership.role, 'account:manage');
-    if (trial) throw new ConflictException('试用账号没有托管凭据');
-    return this.onboarding.getManagedCredentials(workspaceId, id);
-  }
-
   @Post(':id/health-check')
   @HttpCode(200)
   healthCheck(
@@ -481,13 +520,16 @@ export class AccountsController {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.channelAccount.findFirst({ where: { id, workspaceId } });
       if (!existing) throw new NotFoundException('账号不存在');
+      const nextProfileUrl = input.profileUrl !== undefined
+        ? parseProfileInput(existing.platform, input.profileUrl).profileUrl
+        : undefined;
       if (existing.externalId && existing.authCheckedAt && existing.accessMethod !== 'password' && input.displayName !== undefined) {
         throw new ConflictException('已核验账号使用平台昵称。');
       }
       const groupId = input.groupId !== undefined
         ? await this.groups.assertWorkspaceGroup(tx, workspaceId, input.groupId)
         : undefined;
-      return tx.channelAccount.update({
+      const updated = await tx.channelAccount.update({
         where: { id },
         data: {
           ...(input.displayName !== undefined && { displayName: input.displayName }),
@@ -498,12 +540,14 @@ export class AccountsController {
           ...(input.pinned !== undefined && { pinned: input.pinned }),
           ...(nextEgressIp !== undefined && { egressIp: nextEgressIp }),
           ...(nextProfileLabel !== undefined && { profileLabel: nextProfileLabel }),
+          ...(nextProfileUrl !== undefined && { profileUrl: nextProfileUrl }),
           ...(input.cookieExpiresAt !== undefined && { cookieExpiresAt: input.cookieExpiresAt }),
         },
         select: {
           id: true,
           platform: true,
           channelKind: true,
+          externalId: true,
           accessMethod: true,
           displayName: true,
           alias: true,
@@ -514,9 +558,12 @@ export class AccountsController {
           group: { select: { id: true, name: true, color: true } },
           egressIp: true,
           profileLabel: true,
+          profileUrl: true,
           cookieExpiresAt: true,
         },
       });
+      const { externalId: _ext, ...rest } = updated;
+      return { ...rest, profileUrl: resolveAccountProfileUrl(updated) };
     });
   }
 

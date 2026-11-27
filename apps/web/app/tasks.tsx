@@ -326,7 +326,7 @@ function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
       {blockedHandoff && <Feedback error="该 B 站账号尚未通过官方授权。请连接已授权账号后重新安排发布。" />}
       {handoff.data && task.status === 'handed_off' && !trial && <div className="actions">
         {handoff.data.profileUrl && <a className="button compact" href={handoff.data.profileUrl} target="_blank" rel="noreferrer">
-          <ExternalLink size={15} aria-hidden="true" />核对 B 站账号主页
+          <ExternalLink size={15} aria-hidden="true" />核对{platformLabel[task.variant.platform]}账号主页
         </a>}
         <a className="button compact" href={task.variant.platform === 'xiaohongshu' ? 'https://creator.xiaohongshu.com/' : 'https://member.bilibili.com/'}
           target="_blank" rel="noreferrer"><ExternalLink size={15} aria-hidden="true" />打开平台创作中心</a>

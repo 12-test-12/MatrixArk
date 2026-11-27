@@ -11,7 +11,6 @@ import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   cleanTags,
-  decryptAccountSecret,
   encryptAccountSecret,
   maskLoginIdentifier,
   normalizeEgressIp,
@@ -19,7 +18,7 @@ import {
   validatePlatformCookie,
 } from './account-secrets';
 import { MatrixGroupsService } from './matrix-groups.service';
-import { bilibiliManualUidPrefix, bilibiliWebUidPrefix } from './publish-account';
+import { bilibiliManualUidPrefix, bilibiliWebUidPrefix, parseProfileInput } from './publish-account';
 
 const qrGenerateResponseSchema = z.object({
   code: z.literal(0),
@@ -52,7 +51,8 @@ export const passwordAccountSchema = z.object({
   displayName: z.string().trim().min(1, '请填写账号显示名称').max(60),
   loginIdentifier: z.string().trim().min(1, '请填写登录账号（手机号 / 邮箱 / 用户名）').max(120),
   password: z.string().min(1, '请填写登录密码').max(256),
-  profile: z.string().trim().max(500).optional(),
+  profile: z.string().trim().max(1000).optional(),
+  profileUrl: z.string().trim().max(1000).nullable().optional(),
   operator: z.string().trim().max(40).optional(),
   groupId: z.string().min(1).nullable().optional(),
   alias: z.string().trim().max(60).optional(),
@@ -66,6 +66,7 @@ export const cookieImportSchema = z.object({
   cookie: z.string().trim().min(1, '请粘贴 Cookie 内容').max(32_768),
   accountId: z.string().min(1).optional(),
   displayName: z.string().trim().max(60).optional(),
+  profileUrl: z.string().trim().max(1000).nullable().optional(),
   operator: z.string().trim().max(40).optional(),
   groupId: z.string().min(1).nullable().optional(),
   alias: z.string().trim().max(60).optional(),
@@ -92,17 +93,6 @@ type BiliQrTicket = {
   groupId: string | null;
   accountId?: string;
 };
-
-function parseBiliUid(profile?: string) {
-  if (!profile) return null;
-  const trimmed = profile.trim();
-  if (!trimmed) return null;
-  const uid = /^[1-9][0-9]{0,19}$/.test(trimmed)
-    ? trimmed
-    : /^https:\/\/space\.bilibili\.com\/([1-9][0-9]{0,19})\/?(?:[?#]\S*)?$/i.exec(trimmed)?.[1];
-  if (!uid) throw new BadRequestException('B 站主页或 UID 格式不正确，请填写数字 UID 或 space.bilibili.com 链接');
-  return uid;
-}
 
 function extractCookiesFromResponse(response: Response, callbackUrl?: string) {
   const entries: Record<string, string> = {};
@@ -389,7 +379,8 @@ export class AccountOnboardingService {
   }
 
   async addPasswordAccount(workspaceId: string, userId: string, input: z.infer<typeof passwordAccountSchema>) {
-    const uid = input.platform === 'bilibili' ? parseBiliUid(input.profile) : null;
+    const parsedProfile = parseProfileInput(input.platform, input.profileUrl ?? input.profile);
+    const uid = input.platform === 'bilibili' ? parsedProfile.uid : null;
     const now = new Date();
     const masked = maskLoginIdentifier(input.loginIdentifier);
     const egressIp = input.egressIp !== undefined ? normalizeEgressIp(input.egressIp) : undefined;
@@ -434,6 +425,7 @@ export class AccountOnboardingService {
             tags: cleanTags(input.tags),
             ...(egressIp !== undefined && { egressIp }),
             ...(profileLabel !== undefined && { profileLabel }),
+            ...(parsedProfile.profileUrl !== undefined && { profileUrl: parsedProfile.profileUrl }),
             loginIdentifier: masked,
             passwordCiphertext: ciphertext,
             passwordKeyId: keyId,
@@ -480,6 +472,12 @@ export class AccountOnboardingService {
       return { id, platform: 'bilibili' as const };
     }
 
+    const explicitProfileUrl = parseProfileInput('xiaohongshu', input.profileUrl).profileUrl;
+    const creatorUserId = entries['x-user-id-creator.xiaohongshu.com']?.trim();
+    const detectedProfileUrl = explicitProfileUrl === undefined && creatorUserId && /^[0-9a-f]{24}$/i.test(creatorUserId)
+      ? `https://www.xiaohongshu.com/user/profile/${creatorUserId}`
+      : undefined;
+
     const identitySeed = entries['x-user-id-creator.xiaohongshu.com']
       || entries['customer-sso-sid']
       || entries.a1
@@ -507,6 +505,11 @@ export class AccountOnboardingService {
 
       const id = existing?.id ?? randomUUID();
       const { ciphertext, keyId } = encryptAccountSecret('cookie', workspaceId, id, header);
+      const nextProfileUrl = explicitProfileUrl !== undefined
+        ? explicitProfileUrl
+        : !existing?.profileUrl
+          ? detectedProfileUrl
+          : undefined;
       const commonData = {
         channelKind: 'manual' as const,
         accessMethod: 'cookie' as const,
@@ -519,6 +522,7 @@ export class AccountOnboardingService {
         ...(cookieExpiresAt !== undefined && { cookieExpiresAt }),
         ...(egressIp !== undefined && { egressIp }),
         ...(profileLabel !== undefined && { profileLabel }),
+        ...(nextProfileUrl !== undefined && { profileUrl: nextProfileUrl }),
         riskStatus: 'normal' as const,
         riskReason: null,
         riskDetectedAt: null,
@@ -616,60 +620,5 @@ export class AccountOnboardingService {
         },
       });
     });
-  }
-
-  async getManagedCredentials(workspaceId: string, accountId: string) {
-    const account = await this.prisma.channelAccount.findFirst({
-      where: { id: accountId, workspaceId },
-      select: {
-        id: true,
-        displayName: true,
-        platform: true,
-        accessMethod: true,
-        loginIdentifier: true,
-        passwordCiphertext: true,
-        passwordKeyId: true,
-        cookieCiphertext: true,
-        cookieKeyId: true,
-        cookieUpdatedAt: true,
-        readCookieCiphertext: true,
-        readCookieKeyId: true,
-        readCookieLabel: true,
-        readCookieUpdatedAt: true,
-      },
-    });
-    if (!account) throw new NotFoundException('账号不存在');
-
-    let decryptedLogin: { loginIdentifier?: string; password?: string } = {};
-    if (account.passwordCiphertext) {
-      const raw = decryptAccountSecret('password', workspaceId, accountId, account.passwordCiphertext, account.passwordKeyId);
-      if (raw) {
-        try {
-          decryptedLogin = JSON.parse(raw) as { loginIdentifier?: string; password?: string };
-        } catch {}
-      }
-    }
-    const cookie = account.cookieCiphertext
-      ? decryptAccountSecret('cookie', workspaceId, accountId, account.cookieCiphertext, account.cookieKeyId)
-      : undefined;
-    const readCookie = account.readCookieCiphertext
-      ? decryptAccountSecret('read-cookie', workspaceId, accountId, account.readCookieCiphertext, account.readCookieKeyId)
-      : undefined;
-
-    return {
-      id: account.id,
-      displayName: account.displayName,
-      platform: account.platform,
-      accessMethod: account.accessMethod,
-      loginIdentifier: decryptedLogin.loginIdentifier ?? account.loginIdentifier ?? null,
-      password: decryptedLogin.password ?? null,
-      hasCookie: Boolean(account.cookieCiphertext),
-      cookie: cookie ?? null,
-      cookieUpdatedAt: account.cookieUpdatedAt,
-      hasReadCookie: Boolean(account.readCookieCiphertext),
-      readCookie: readCookie ?? null,
-      readCookieLabel: account.readCookieLabel ?? null,
-      readCookieUpdatedAt: account.readCookieUpdatedAt,
-    };
   }
 }

@@ -1,6 +1,6 @@
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, type PublishTask, type Role } from '@prisma/client';
-import { bilibiliManualProfile, isUnverifiedBilibiliAccount } from '../../accounts/publish-account';
+import { isUnverifiedBilibiliAccount, resolveAccountProfileUrl } from '../../accounts/publish-account';
 import { inspectSnapshot, variantSnapshot } from '../../content/content.service';
 import { StorageService } from '../../content/storage.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -18,7 +18,7 @@ export class TaskEvidenceService {
     const task = await this.prisma.publishTask.findFirst({
       where: { id, workspaceId },
       include: {
-        account: { select: { ...taskRelations.account.select, externalId: true, accessMethod: true } },
+        account: { select: { ...taskRelations.account.select, externalId: true, accessMethod: true, profileUrl: true } },
         variant: { include: variantSnapshot },
       },
     });
@@ -30,9 +30,9 @@ export class TaskEvidenceService {
     if (!task.handedOffAt || (task.executionChannel !== 'manual' && task.status !== 'handed_off') || variant.contentHash !== task.variantContentHash
       || variant.approval?.workspaceId !== workspaceId || variant.approval.snapshotHash !== task.variantContentHash
       || inspectSnapshot(variant).issues.length) throw new ConflictException('任务尚无有效的人工交接包');
-    const { externalId, accessMethod: _acc, ...account } = task.account;
+    const { externalId, accessMethod: _acc, profileUrl, ...account } = task.account;
     return {
-      taskId: id, account, profileUrl: bilibiliManualProfile({ ...account, externalId }), variantId: variant.id, version: variant.version,
+      taskId: id, account, profileUrl: resolveAccountProfileUrl({ ...account, externalId, profileUrl }), variantId: variant.id, version: variant.version,
       title: variant.title, body: variant.body, tags: variant.tags,
       assets: variant.assets.map((asset) => ({ ...asset, url: assetUrl(workspaceId, asset.assetId) })),
       video: variant.videoAsset ? { ...variant.videoAsset, url: assetUrl(workspaceId, variant.videoAsset.id) + '/video' } : null,

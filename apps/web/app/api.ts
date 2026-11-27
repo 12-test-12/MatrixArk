@@ -20,6 +20,13 @@ export function formatPlatformAccount(platformText: string, displayName?: string
   return `${platformText} · ${cleanAccountName(displayName)}`;
 }
 export type AccountAccessMethod = 'manual_uid' | 'qr_login' | 'password' | 'cookie' | 'oauth' | 'sandbox';
+export type AccountAuthStatus = 'pending' | 'active' | 'expired' | 'revoked';
+export type CapabilityReasonCode =
+  | 'missing_external_id'
+  | 'auth_unverified'
+  | 'rate_limited'
+  | 'platform_policy'
+  | 'trial_restricted';
 export type AccountRiskStatus = 'normal' | 'warning' | 'risk';
 export type MatrixGroupColor = 'blue' | 'rose' | 'emerald' | 'amber' | 'violet' | 'cyan' | 'slate';
 export type MatrixGroup = {
@@ -40,7 +47,7 @@ export type Account = {
   displayName: string; alias?: string | null; operator?: string | null;
   tags?: string[]; pinned?: boolean;
   groupId?: string | null; group?: { id: string; name: string; color: string } | null;
-  profileUrl?: string | null;
+  profileUrl?: string | null; platformUid?: string | null;
   loginIdentifier?: string | null; hasPassword?: boolean; hasCookie?: boolean; cookieUpdatedAt?: string | null;
   readAccountId?: string | null; readAccount?: { id: string; displayName: string; alias: string | null } | null;
   hasReadCookie?: boolean; readCookieLabel?: string | null; readCookieUpdatedAt?: string | null;
@@ -48,7 +55,27 @@ export type Account = {
   egressIp?: string | null; egressIpCollision?: boolean; profileLabel?: string | null;
   cookieExpiresAt?: string | null; envCheckedAt?: string | null;
   riskStatus?: AccountRiskStatus; riskReason?: string | null; riskDetectedAt?: string | null;
-  identityVerified: boolean; identityCheckedAt: string | null; availableForHandoff: boolean; availableForOfficial: boolean;
+  authStatus?: AccountAuthStatus; authExpiresAt?: string | null; authCheckedAt?: string | null;
+  identityVerified: boolean; identityCheckedAt: string | null;
+  availableForHandoff: boolean; availableForOfficial: boolean; availableForMetrics?: boolean;
+  capabilityReason?: CapabilityReasonCode | null;
+  hasCredentials?: boolean;
+  taskCount?: number;
+  createdAt?: string;
+  archivedAt?: string | null;
+};
+export type AccountOperationsSummary = {
+  accountId: string;
+  totalTasks: number;
+  pendingTasks: number;
+  unknownTasks: number;
+  latestResult: {
+    taskId: string;
+    state: TaskStatus;
+    recordedAt: string;
+    remoteUrl: string | null;
+    title: string | null;
+  } | null;
 };
 export type Approval = { approvedAt: string; snapshotHash: string | null };
 export type Rejection = { id: string; reviewer?: { name: string } | null; reason: string; createdAt: string };

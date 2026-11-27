@@ -469,6 +469,7 @@ model ChannelAccount {
   readCookieUpdatedAt   DateTime?           @db.Timestamptz(3)
   egressIp              String?
   profileLabel          String?
+  profileUrl            String?
   cookieExpiresAt       DateTime?           @db.Timestamptz(3)
   envCheckedAt          DateTime?           @db.Timestamptz(3)
 
