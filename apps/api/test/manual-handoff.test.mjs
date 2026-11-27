@@ -2329,7 +2329,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
         accountId: backlogAccount.id,
         variantId: variant.id,
         variantContentHash: variant.contentHash,
-        scheduledAt: new Date(Date.now() - 400_000),
+        scheduledAt: new Date(Date.now() - 700_000),
         createdById: owner.user.id,
         idempotencyKey: randomUUID(),
       },
@@ -2339,6 +2339,24 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       completedAt: new Date(),
       ok: true,
     });
+    heartbeats.recordLoopResult('topics', {
+      startedAt: new Date(Date.now() - 20), completedAt: new Date(), ok: false,
+      error: 'Cookie=monitor-secret-token; stack=internal-sensitive-stack',
+    });
+    for (const status of ['failed', 'unknown']) {
+      const monitorAccount = await prisma.channelAccount.create({ data: {
+        workspaceId, platform: 'xiaohongshu', channelKind: 'manual', displayName: `监控${status}账号`,
+      } });
+      const monitorTask = await prisma.publishTask.create({ data: {
+        workspaceId, accountId: monitorAccount.id, variantId: variant.id, variantContentHash: variant.contentHash,
+        scheduledAt: new Date(), createdById: owner.user.id, idempotencyKey: randomUUID(), status,
+        lastError: 'Cookie=monitor-secret-token',
+      } });
+      await prisma.taskEvent.create({ data: {
+        workspaceId, taskId: monitorTask.id, kind: 'result', fromStatus: 'dispatching', toStatus: status,
+        reason: 'Token=monitor-secret-token; internal-sensitive-stack',
+      } });
+    }
     await heartbeats.beat('running');
     const healthRoot = await call('/health');
     assert.deepEqual(healthRoot.data, { ok: true });
@@ -2374,9 +2392,22 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.ok(!JSON.stringify(workerHealth).includes(heartbeats.workerId));
     assert.ok(workerHealth.backlog.dueScheduledTasks >= 1);
     assert.ok(workerHealth.backlog.oldestDueScheduledAgeSeconds >= 390);
+    assert.ok(workerHealth.backlog.failedTasks >= 1);
+    assert.ok(workerHealth.backlog.unknownTasks >= 1);
+    assert.ok(workerHealth.backlog.longBacklogTasks >= 1);
+    assert.ok(Date.parse(selfWorker.startedAt) <= Date.parse(workerHealth.checkedAt));
+    assert.equal(selfWorker.loopStates.topics.consecutiveFailures, 1);
+    assert.ok(workerHealth.recentTasks.some(task => task.status === 'unknown' && task.needsVerification));
+    assert.ok(workerHealth.recentEvents.some(event => event.toStatus === 'unknown'));
+    assert.ok(!JSON.stringify(workerHealth).includes('monitor-secret-token'));
+    assert.ok(!JSON.stringify(workerHealth).includes('internal-sensitive-stack'));
     // 积压数据按工作室严格隔离：外部工作室只能看到自己的 0 积压
     const { data: foreignHealth } = await call(foreign + '/worker-health', { cookie: otherCookie });
     assert.equal(foreignHealth.backlog.dueScheduledTasks, 0);
+    assert.equal(foreignHealth.backlog.failedTasks, 0);
+    assert.equal(foreignHealth.backlog.unknownTasks, 0);
+    assert.ok(foreignHealth.recentTasks.every(task => !workerHealth.recentTasks.some(ownTask => ownTask.id === task.id)));
+    assert.ok(foreignHealth.recentEvents.every(event => !workerHealth.recentEvents.some(ownEvent => ownEvent.id === event.id)));
 
     const runnerSnapshot = await runner.checkBacklog();
     assert.ok(runnerSnapshot.warnings.some((w) => w.includes('尚未领取的任务')));

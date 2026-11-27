@@ -140,7 +140,7 @@ function WorkspaceBody({ workspace, section, itemId, topicView, topicWorkId, onT
   if (section === 'performance') return <Performance scope={scope} role={workspace.role} initialAccount={itemId} openTask={openTasks} />;
   if (section === 'members') return <Members scope={scope} />;
   if (section === 'monitor') return canMonitorWorker(workspace.role)
-    ? <WorkerMonitor scope={scope} />
+    ? <WorkerMonitor key={scope} scope={scope} openTask={openTasks} />
     : <section className="card"><Empty icon={Check} title="仅负责人与运营可查看运行监控" /></section>;
   if (section === 'notifications') return workspace.trial ? <>
     <PageHeader title="飞书提醒演练" description="交接提醒和 2 分钟未回填提醒会在任务详情里生成模拟投递记录。" />

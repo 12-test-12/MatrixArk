@@ -141,6 +141,7 @@ export type WorkerMonitorSnapshot = {
       maxConcurrency: number;
       activeTasks: number;
       lastHeartbeatAt: string;
+      startedAt: string;
       expiresAt: string;
       lastError: string | null;
       loopStates: Record<string, WorkerMonitorLoopState>;
@@ -154,7 +155,20 @@ export type WorkerMonitorSnapshot = {
     dueNotifications: number;
     dueTopicSources: number;
     oldestDueScheduledAgeSeconds: number | null;
+    failedTasks: number;
+    unknownTasks: number;
+    longBacklogTasks: number;
+    overdueReceiptTasks: number;
   };
+  thresholds: { longBacklogSeconds: number; receiptWaitingSeconds: number };
+  recentTasks: {
+    id: string; title: string; status: TaskStatus; scheduledAt: string; updatedAt: string;
+    handedOffAt: string | null; leaseExpiresAt: string | null; needsVerification: boolean; receiptRecordedAt: string | null;
+    account: { id: string; displayName: string; platform: Platform; operator: string | null };
+    latestEvent: { kind: string; createdAt: string } | null;
+  }[];
+  recentEvents: { id: string; taskId: string; title: string; kind: string;
+    toStatus: TaskStatus | null; createdAt: string }[];
 };
 
 export const canEdit = (role: Role) => role === 'owner' || role === 'editor';

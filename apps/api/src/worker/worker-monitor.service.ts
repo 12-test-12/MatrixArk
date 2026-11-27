@@ -3,6 +3,10 @@ import { Injectable } from '@nestjs/common';
 import { config } from '../config';
 import { PrismaService } from '../prisma/prisma.service';
 import { databaseTime } from '../tasks/infrastructure/task-locks';
+import type { Platform, TaskStatus, TaskEventKind } from '@prisma/client';
+
+const longBacklogSeconds = 600;
+const receiptWaitingSeconds = 1800;
 
 export type WorkerMonitorSnapshot = {
   checkedAt: string;
@@ -21,6 +25,7 @@ export type WorkerMonitorSnapshot = {
       maxConcurrency: number;
       activeTasks: number;
       lastHeartbeatAt: string;
+      startedAt: string;
       expiresAt: string;
       lastError: string | null;
       loopStates: unknown;
@@ -34,7 +39,21 @@ export type WorkerMonitorSnapshot = {
     dueNotifications: number;
     dueTopicSources: number;
     oldestDueScheduledAgeSeconds: number | null;
+    failedTasks: number;
+    unknownTasks: number;
+    longBacklogTasks: number;
+    overdueReceiptTasks: number;
   };
+  thresholds: { longBacklogSeconds: number; receiptWaitingSeconds: number };
+  recentTasks: {
+    id: string; title: string; status: TaskStatus; scheduledAt: string; updatedAt: string;
+    handedOffAt: string | null; leaseExpiresAt: string | null; needsVerification: boolean;
+    receiptRecordedAt: string | null;
+    account: { id: string; displayName: string; platform: Platform; operator: string | null };
+    latestEvent: { kind: TaskEventKind; createdAt: string } | null;
+  }[];
+  recentEvents: { id: string; taskId: string; title: string; kind: TaskEventKind;
+    toStatus: TaskStatus | null; createdAt: string }[];
 };
 
 /** 把 `主机名:pid:随机串` 换成稳定但不可反推的节点标识。 */
@@ -75,6 +94,12 @@ export class WorkerMonitorService {
       overdueHandoffTasks,
       dueNotifications,
       dueTopicSources,
+      failedTasks,
+      unknownTasks,
+      longBacklogTasks,
+      overdueReceiptTasks,
+      recentTasks,
+      recentEvents,
     ] = await Promise.all([
       this.prisma.workerHeartbeat.findMany({
         where: { lastHeartbeatAt: { gte: recentWindow } },
@@ -115,6 +140,32 @@ export class WorkerMonitorService {
       this.prisma.topicSource.count({
         where: { ...scope, enabled: true, deletedAt: null, nextRunAt: { lte: now } },
       }),
+      this.prisma.publishTask.count({ where: { ...scope, status: 'failed' } }),
+      this.prisma.publishTask.count({ where: { ...scope, status: 'unknown' } }),
+      this.prisma.publishTask.count({ where: { ...scope, status: 'scheduled',
+        scheduledAt: { lte: new Date(now.getTime() - longBacklogSeconds * 1000) } } }),
+      this.prisma.publishTask.count({ where: { ...scope, status: { in: ['submitted', 'under_review'] },
+        result: { recordedAt: { lte: new Date(now.getTime() - receiptWaitingSeconds * 1000) } } } }),
+      workspaceId ? this.prisma.publishTask.findMany({
+        where: { workspaceId, OR: [
+          { status: { in: ['failed', 'unknown'] } },
+          { status: 'dispatching', executionChannel: { in: ['official', 'sandbox'] }, leaseExpiresAt: { lte: now } },
+          { status: 'handed_off', handedOffAt: { lte: fourHoursAgo } },
+          { status: 'scheduled', scheduledAt: { lte: new Date(now.getTime() - longBacklogSeconds * 1000) } },
+          { status: { in: ['submitted', 'under_review'] }, result: { recordedAt: { lte: new Date(now.getTime() - receiptWaitingSeconds * 1000) } } },
+        ] },
+        orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }], take: 10,
+        select: { id: true, status: true, scheduledAt: true, updatedAt: true, handedOffAt: true, leaseExpiresAt: true,
+          variant: { select: { title: true } },
+          result: { select: { recordedAt: true } },
+          account: { select: { id: true, displayName: true, platform: true, operator: true } },
+          events: { orderBy: { id: 'desc' }, take: 1, select: { kind: true, createdAt: true } } },
+      }) : Promise.resolve([]),
+      workspaceId ? this.prisma.taskEvent.findMany({
+        where: { workspaceId, createdAt: { gte: recentWindow } }, orderBy: { id: 'desc' }, take: 20,
+        select: { id: true, taskId: true, kind: true, toStatus: true, createdAt: true,
+          task: { select: { variant: { select: { title: true } } } } },
+      }) : Promise.resolve([]),
     ]);
 
     // 工作室视图只给节点状态、并发和轮询耗时：主机名、PID 和错误原文留在服务端日志里，
@@ -130,6 +181,7 @@ export class WorkerMonitorService {
         maxConcurrency: item.maxConcurrency,
         activeTasks: item.activeTasks,
         lastHeartbeatAt: item.lastHeartbeatAt.toISOString(),
+        startedAt: item.startedAt.toISOString(),
         expiresAt: item.expiresAt.toISOString(),
         lastError: tenantView ? null : item.lastError,
         loopStates: tenantView ? publicLoopStates(item.loopStates) : item.loopStates,
@@ -183,7 +235,20 @@ export class WorkerMonitorService {
         dueNotifications,
         dueTopicSources,
         oldestDueScheduledAgeSeconds,
+        failedTasks, unknownTasks, longBacklogTasks, overdueReceiptTasks,
       },
+      thresholds: { longBacklogSeconds, receiptWaitingSeconds },
+      recentTasks: recentTasks.map(({ variant, events, result, ...task }) => ({
+        ...task, title: variant.title,
+        scheduledAt: task.scheduledAt.toISOString(), updatedAt: task.updatedAt.toISOString(),
+        handedOffAt: task.handedOffAt?.toISOString() ?? null, leaseExpiresAt: task.leaseExpiresAt?.toISOString() ?? null,
+        needsVerification: task.status === 'unknown',
+        receiptRecordedAt: result?.recordedAt.toISOString() ?? null,
+        latestEvent: events[0] ? { kind: events[0].kind, createdAt: events[0].createdAt.toISOString() } : null,
+      })),
+      recentEvents: recentEvents.map(({ id, task, createdAt, ...event }) => ({
+        ...event, id: id.toString(), title: task.variant.title, createdAt: createdAt.toISOString(),
+      })),
     };
   }
 }
