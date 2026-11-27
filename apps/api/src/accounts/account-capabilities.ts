@@ -52,7 +52,6 @@ function resolveCapabilityReason(
     if (account.platform !== 'bilibili' || config.sandboxChannel) return 'platform_policy';
     return 'auth_unverified';
   }
-  if (account.platform === 'bilibili' && isUnverifiedBilibiliAccount(account)) return 'auth_unverified';
   return 'auth_unverified';
 }
 

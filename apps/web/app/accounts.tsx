@@ -361,7 +361,7 @@ function OnboardingPanel({
         </div>
         <div className="onboarding-target-row">
           <label>目标平台
-            <select value={platform} onChange={(e) => {
+            <select value={platform} disabled={qrAction.busy} onChange={(e) => {
               setPlatform(e.target.value as Platform);
               setQrTicket(undefined);
               setQrStatus('');
@@ -711,7 +711,7 @@ const drawerTabs: { id: DrawerTab; label: string }[] = [
 
 function AccountDetailsDrawer({
   account, drawer, isMobile, onTabChange, onClose, trial, showArchived, canManage, canReportRisk,
-  groups, samePlatformPeers, accountsPath, diag, healthBusy, onRunHealthCheck, onChanged, openPerformance,
+  groups, samePlatformPeers, accountsPath, diag, healthBusy, onRunHealthCheck, onChanged, onMetaSaved, openPerformance,
 }: {
   account: Account;
   drawer: DrawerState;
@@ -729,6 +729,7 @@ function AccountDetailsDrawer({
   healthBusy: boolean;
   onRunHealthCheck: (accountId: string) => void;
   onChanged: () => void;
+  onMetaSaved: (accountId: string) => void;
   openPerformance: (id: string) => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -892,11 +893,12 @@ function AccountDetailsDrawer({
           ...(nextReadLabel ? { readCookieLabel: nextReadLabel } : {}),
         });
       }
-      setReadCookieInput('');
+      // 出口 IP、读会话或分组变化后旧的体检结论可能过期；先失效缓存，再判断是否还停留在该账号。
+      onMetaSaved(targetAccountId);
       if (activeAccountIdRef.current !== targetAccountId) return;
+      setReadCookieInput('');
       setEditingMeta(false);
       pushToast('账号分组、环境与读写分离配置已保存。', 'success');
-      onChanged();
     });
   }
 
@@ -1788,6 +1790,15 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
     if (showRisksPanel) risksRes.refresh();
   }
 
+  function forgetDiag(accountId: string) {
+    setDiagByAccount((prev) => {
+      if (!(accountId in prev)) return prev;
+      const next = { ...prev };
+      delete next[accountId];
+      return next;
+    });
+  }
+
   const availableCount = accounts.filter((a) => a.availableForOfficial || a.availableForHandoff).length;
   const pendingCount = accounts.filter((a) => !a.identityVerified || (!a.availableForOfficial && !a.availableForHandoff)).length;
   const warningCount = accounts.filter((a) => a.riskStatus === 'warning').length;
@@ -1918,7 +1929,8 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
         if (res.diagnostics) {
           setDiagByAccount((prev) => ({ ...prev, [accountId]: res.diagnostics! }));
         }
-        setDrawer({ accountId, tab: 'environment' });
+        // 体检期间用户可能已切到别的账号或关闭抽屉，不要抢回关注点。
+        setDrawer((prev) => (prev && prev.accountId !== accountId ? prev : { accountId, tab: 'environment' }));
         pushToast(
           res.status === 'normal'
             ? '体检正常：登录态、读写分离与网络环境通过。'
@@ -1949,7 +1961,7 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
           <FolderPlus size={15} aria-hidden="true" />{creatingGroup ? '收起建组' : '新建矩阵组'}
         </button>}
         {canManage && <button type="button" className="button compact" aria-pressed={showArchived}
-          onClick={() => { setShowArchived(!showArchived); setSelectedIds([]); setOnboardingOpen(false); archiveAction.reset(); }} disabled={archiveAction.busy}>
+          onClick={() => { setShowArchived(!showArchived); setSelectedIds([]); setOnboardingOpen(false); setDrawer(null); archiveAction.reset(); }} disabled={archiveAction.busy}>
           {showArchived ? '返回在用账号' : '查看已归档'}
         </button>}
       </div>
@@ -2139,7 +2151,7 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
         canConfigure={canConfigure}
         groups={groups}
         hasOfficialBili={accounts.some((a) => a.platform === 'bilibili' && a.channelKind === 'official' && a.identityVerified)}
-        onDone={() => { refreshAll(); settings.refresh(); }}
+        onDone={() => { setDiagByAccount({}); refreshAll(); settings.refresh(); }}
       />
     )}
 
@@ -2305,6 +2317,7 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
 
       {drawer && drawerAccount && (
         <AccountDetailsDrawer
+          key={drawerAccount.id}
           account={drawerAccount}
           drawer={drawer}
           isMobile={isMobileDrawer}
@@ -2321,6 +2334,7 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
           healthBusy={checkingAccountId === drawerAccount.id}
           onRunHealthCheck={runHealthCheck}
           onChanged={refreshAll}
+          onMetaSaved={(accountId) => { forgetDiag(accountId); refreshAll(); }}
           openPerformance={openPerformance}
         />
       )}

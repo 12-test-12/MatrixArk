@@ -341,6 +341,13 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(registered.availableForOfficial, false);
     assert.equal(registered.hasCredentials, false);
     assert.equal(registered.authAuthorizedBy, undefined);
+    await call(`${own}/accounts/${bilibili.id}`, {
+      method: 'PATCH', cookie, body: { profileUrl: 'https://space.bilibili.com/999999999' }, status: 409,
+    });
+    const { data: biliPatched } = await call(`${own}/accounts/${bilibili.id}`, {
+      method: 'PATCH', cookie, body: { profileUrl: profileUrl + '/?from=edit' },
+    });
+    assert.equal(biliPatched.profileUrl, profileUrl);
     const official = await fixtureAccount('bilibili', 'official', '专栏官方账号');
     const { data: [article] } = await post(source + '/generate', { platforms: ['bilibili'] });
     await post(own + '/variants/' + article.id + '/confirm', {});

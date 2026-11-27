@@ -41,7 +41,7 @@ import {
   updateMatrixGroupSchema,
 } from './matrix-groups.service';
 import { encryptPlatformSecret, readPlatformApp, workspacePlatformApp } from './platform-app';
-import { parseProfileInput, resolveAccountProfileUrl } from './publish-account';
+import { extractBilibiliUid, parseProfileInput, resolveAccountProfileUrl } from './publish-account';
 import { derivePlatformUid, resolveAccountCapabilities } from './account-capabilities';
 import { XiaohongshuIdentityService } from './xiaohongshu-identity.service';
 
@@ -520,9 +520,15 @@ export class AccountsController {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.channelAccount.findFirst({ where: { id, workspaceId } });
       if (!existing) throw new NotFoundException('账号不存在');
-      const nextProfileUrl = input.profileUrl !== undefined
-        ? parseProfileInput(existing.platform, input.profileUrl).profileUrl
-        : undefined;
+      const parsedProfile = input.profileUrl !== undefined
+        ? parseProfileInput(existing.platform, input.profileUrl)
+        : null;
+      const nextProfileUrl = parsedProfile?.profileUrl;
+      const registeredUid = existing.platform === 'bilibili' && existing.channelKind === 'manual'
+        ? extractBilibiliUid(existing.externalId) : null;
+      if (registeredUid && parsedProfile?.uid && parsedProfile.uid !== registeredUid) {
+        throw new ConflictException(`该账号已登记 UID ${registeredUid}，主页链接须与已登记 UID 一致`);
+      }
       if (existing.externalId && existing.authCheckedAt && existing.accessMethod !== 'password' && input.displayName !== undefined) {
         throw new ConflictException('已核验账号使用平台昵称。');
       }
