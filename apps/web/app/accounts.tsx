@@ -6,9 +6,10 @@ import {
 } from 'lucide-react';
 import qrcode from 'qrcode-generator';
 import {
-  api, formatTime, platformLabel, platforms, post, taskLabel, useAction, useResource,
+  api, ApiError, formatTime, platformLabel, platforms, post, taskLabel, useAction, useResource,
   type Account, type AccountOperationsSummary, type AccountRiskEvent, type AccountRiskStatus,
-  type MatrixGroup, type MatrixGroupColor, type Platform,
+  type BilibiliQrStartResult, type MatrixGroup, type MatrixGroupColor, type Platform,
+  type QrLoginState, type QrPollResult,
 } from './api';
 import {
   accessMethodLabels, authStatusLabels, buildAccountStatusView, statusCategoryLabels,
@@ -186,6 +187,40 @@ const qrPlatforms = {
   startPath: string; pollPath: (id: string) => string;
 }>;
 
+type QrTicketView = {
+  platform: Platform;
+  id: string;
+  image: string;
+  userCode?: string;
+  expiresAt?: number;
+  state: QrLoginState;
+  canRetry?: boolean;
+};
+
+const QR_BADGES: Record<QrLoginState, { label: string; tone: string }> = {
+  WAITING_SCAN: { label: '等待扫码', tone: 'is-waiting' },
+  SCANNED: { label: '已扫码', tone: 'is-scanned' },
+  VERIFYING: { label: '正在核验', tone: 'is-verifying' },
+  NETWORK_ERROR: { label: '网络波动', tone: 'is-warning' },
+  RATE_LIMITED: { label: '查询受限', tone: 'is-warning' },
+  VERIFY_FAILED: { label: '核验失败', tone: 'is-danger' },
+  SAVE_FAILED: { label: '保存失败', tone: 'is-danger' },
+  QR_EXPIRED: { label: '已过期', tone: 'is-danger' },
+  CANCELED: { label: '已取消', tone: 'is-waiting' },
+  CONNECTED: { label: '已接入', tone: 'is-scanned' },
+};
+
+function isTerminalQrState(state: QrLoginState): boolean {
+  return state === 'CONNECTED' || state === 'QR_EXPIRED' || state === 'CANCELED';
+}
+
+function formatQrCountdown(ms: number): string {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
 function OnboardingPanel({
   open, defaultGroupId, onClose, accountsPath, settingsPath, settings, canConfigure, groups, hasOfficialBili, onDone,
 }: {
@@ -196,57 +231,327 @@ function OnboardingPanel({
   const [tab, setTab] = useState<OnboardingTab>('qr');
   const [platform, setPlatform] = useState<Platform>('bilibili');
   const [groupId, setGroupId] = useState(defaultGroupId);
-  const [qrTicket, setQrTicket] = useState<{ platform: Platform; id: string; image: string; userCode?: string }>();
+  const [qrTicket, setQrTicket] = useState<QrTicketView>();
   const [qrStatus, setQrStatus] = useState('');
+  const [qrNoticeError, setQrNoticeError] = useState<string>();
+  const [autoPaused, setAutoPaused] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [xhsSettingsOpen, setXhsSettingsOpen] = useState(false);
 
   const qrAction = useAction();
   const pwdAction = useAction();
   const cookieAction = useAction();
 
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
+
+  const qrTicketRef = useRef<QrTicketView | undefined>(qrTicket);
+  qrTicketRef.current = qrTicket;
+
+  const inFlightPollRef = useRef<AbortController | null>(null);
+  const pollGenerationRef = useRef(0);
+  const skipRestoreRef = useRef(false);
+
+  function cancelBiliTicketRemote(id: string) {
+    void post(`${accountsPath}/bilibili/qr/${encodeURIComponent(id)}/cancel`, {}).catch(() => {});
+  }
+
+  function closeQrTicket(options: { cancelRemote?: boolean; suppressRestore?: boolean; statusText?: string } = {}) {
+    pollGenerationRef.current += 1;
+    inFlightPollRef.current?.abort();
+    inFlightPollRef.current = null;
+    const current = qrTicketRef.current;
+    if (options.cancelRemote && current?.platform === 'bilibili' && !isTerminalQrState(current.state)) {
+      cancelBiliTicketRemote(current.id);
+    }
+    if (options.suppressRestore) {
+      skipRestoreRef.current = true;
+    }
+    setQrTicket(undefined);
+    setQrStatus(options.statusText ?? '');
+    setQrNoticeError(undefined);
+    setAutoPaused(false);
+    qrAction.reset();
+  }
+
   useEffect(() => {
-    if (open) setGroupId(defaultGroupId);
+    if (open) {
+      setGroupId(defaultGroupId);
+    } else {
+      pollGenerationRef.current += 1;
+      inFlightPollRef.current?.abort();
+      inFlightPollRef.current = null;
+      skipRestoreRef.current = false;
+    }
   }, [open, defaultGroupId]);
 
   useEffect(() => {
-    if (!open || tab !== 'qr' || !qrTicket || qrTicket.platform !== platform) return;
-    const cfg = qrPlatforms[qrTicket.platform];
-    const timer = window.setInterval(async () => {
-      try {
-        const res = await post<{ status: 'pending' | 'scanned' | 'expired' | 'denied' | 'connected' }>(
-          `${accountsPath}${cfg.pollPath(qrTicket.id)}`, {},
-        );
-        if (res.status === 'scanned') setQrStatus(cfg.scannedStatus);
-        else if (res.status === 'pending') setQrStatus(cfg.pendingStatus);
-        else if (res.status === 'expired' || res.status === 'denied') {
-          setQrTicket(undefined);
-          setQrStatus(res.status === 'denied' ? '授权未通过，请重新生成二维码。' : '二维码已过期，请重新生成。');
-        } else if (res.status === 'connected') {
-          setQrTicket(undefined);
-          setQrStatus('');
-          pushToast(cfg.connectedToast, 'success');
-          onDone();
-        }
-      } catch {
-        // 票据被服务端回收后轮询会 404，必须停掉轮询并提示重新生成，否则会一直空转。
+    if (!open || tab !== 'qr' || platform !== 'bilibili' || qrTicket || skipRestoreRef.current) return;
+    const controller = new AbortController();
+    void api<(BilibiliQrStartResult) | null>(`${accountsPath}/bilibili/qr/active`, {
+      signal: controller.signal,
+      timeoutMs: 8000,
+    }).then((active) => {
+      if (!active || controller.signal.aborted) return;
+      if (active.expiresAt <= Date.now() && active.state !== 'SAVE_FAILED' && active.state !== 'VERIFY_FAILED') return;
+      setNowMs(Date.now());
+      setAutoPaused(false);
+      setQrNoticeError(undefined);
+      setQrTicket({
+        platform: 'bilibili',
+        id: active.id,
+        image: makeQrDataUrl(active.verificationUrl),
+        expiresAt: active.expiresAt,
+        state: active.state,
+        canRetry: active.canRetry,
+      });
+      setQrStatus(active.message);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [open, tab, platform, qrTicket, accountsPath]);
+
+  useEffect(() => {
+    if (!open || tab !== 'qr' || !qrTicket?.expiresAt || isTerminalQrState(qrTicket.state)) return;
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [open, tab, qrTicket?.id, qrTicket?.expiresAt, qrTicket?.state]);
+
+  async function executePoll(
+    ticket: QrTicketView,
+    manual: boolean,
+    signal: AbortSignal,
+  ): Promise<{ continuePolling: boolean; nextDelayMs: number; transientFailure: boolean }> {
+    const cfg = qrPlatforms[ticket.platform];
+
+    if (ticket.platform === 'bilibili') {
+      const res = await post<QrPollResult>(
+        `${accountsPath}${cfg.pollPath(ticket.id)}${manual ? '?manual=true' : ''}`,
+        {},
+        { signal, timeoutMs: 12000 },
+      );
+      if (signal.aborted) return { continuePolling: false, nextDelayMs: 0, transientFailure: false };
+
+      setQrStatus(res.message);
+      setQrNoticeError(undefined);
+
+      if (res.state === 'CONNECTED') {
         setQrTicket(undefined);
-        setQrStatus('二维码已失效，请重新生成。');
+        setQrStatus('');
+        setAutoPaused(false);
+        skipRestoreRef.current = false;
+        pushToast(cfg.connectedToast, 'success');
+        onDoneRef.current();
+        return { continuePolling: false, nextDelayMs: 0, transientFailure: false };
       }
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [qrTicket, accountsPath, onDone, open, tab, platform]);
+
+      if (res.state === 'QR_EXPIRED' || res.state === 'CANCELED') {
+        skipRestoreRef.current = true;
+        setAutoPaused(false);
+        setQrTicket((prev) => (prev && prev.id === ticket.id ? { ...prev, state: res.state, canRetry: false } : prev));
+        return { continuePolling: false, nextDelayMs: 0, transientFailure: false };
+      }
+
+      if (res.state === 'VERIFY_FAILED' || res.state === 'SAVE_FAILED') {
+        setAutoPaused(false);
+        setQrTicket((prev) => (
+          prev && prev.id === ticket.id
+            ? { ...prev, state: res.state, canRetry: Boolean(res.canRetry) }
+            : prev
+        ));
+        return { continuePolling: false, nextDelayMs: 0, transientFailure: false };
+      }
+
+      if (res.state === 'NETWORK_ERROR' || res.state === 'RATE_LIMITED') {
+        setQrTicket((prev) => (
+          prev && prev.id === ticket.id
+            ? { ...prev, state: res.state, canRetry: true }
+            : prev
+        ));
+        return {
+          continuePolling: true,
+          nextDelayMs: res.retryAfterMs ?? (res.state === 'RATE_LIMITED' ? 5000 : 3500),
+          transientFailure: true,
+        };
+      }
+
+      setQrTicket((prev) => (
+        prev && prev.id === ticket.id
+          ? { ...prev, state: res.state, expiresAt: res.expiresAt, canRetry: false }
+          : prev
+      ));
+      return {
+        continuePolling: true,
+        nextDelayMs: res.state === 'SCANNED' || res.state === 'VERIFYING' ? 1500 : 2000,
+        transientFailure: false,
+      };
+    }
+
+    const res = await post<{ status: 'pending' | 'scanned' | 'expired' | 'denied' | 'connected' }>(
+      `${accountsPath}${cfg.pollPath(ticket.id)}`,
+      {},
+      { signal, timeoutMs: 12000 },
+    );
+    if (signal.aborted) return { continuePolling: false, nextDelayMs: 0, transientFailure: false };
+
+    if (res.status === 'scanned') {
+      setQrStatus(cfg.scannedStatus);
+      setQrTicket((prev) => (prev && prev.id === ticket.id ? { ...prev, state: 'SCANNED' } : prev));
+      return { continuePolling: true, nextDelayMs: 1500, transientFailure: false };
+    }
+    if (res.status === 'pending') {
+      setQrStatus(cfg.pendingStatus);
+      setQrTicket((prev) => (prev && prev.id === ticket.id ? { ...prev, state: 'WAITING_SCAN' } : prev));
+      return { continuePolling: true, nextDelayMs: 2000, transientFailure: false };
+    }
+    if (res.status === 'expired' || res.status === 'denied') {
+      setQrTicket(undefined);
+      const msg = res.status === 'denied' ? '授权未通过，请重新生成二维码。' : '二维码已过期，请重新生成。';
+      setQrStatus(msg);
+      return { continuePolling: false, nextDelayMs: 0, transientFailure: false };
+    }
+
+    setQrTicket(undefined);
+    setQrStatus('');
+    pushToast(cfg.connectedToast, 'success');
+    onDoneRef.current();
+    return { continuePolling: false, nextDelayMs: 0, transientFailure: false };
+  }
+
+  useEffect(() => {
+    if (
+      !open
+      || tab !== 'qr'
+      || !qrTicket
+      || qrTicket.platform !== platform
+      || autoPaused
+      || isTerminalQrState(qrTicket.state)
+      || qrTicket.state === 'VERIFY_FAILED'
+      || qrTicket.state === 'SAVE_FAILED'
+    ) {
+      return;
+    }
+
+    const activeTicket = qrTicket;
+    const generation = ++pollGenerationRef.current;
+    let timerId: number | undefined;
+    let consecutiveFailures = 0;
+    let unmounted = false;
+
+    async function scheduleNext(delayMs: number) {
+      if (unmounted || pollGenerationRef.current !== generation) return;
+      timerId = window.setTimeout(async () => {
+        if (unmounted || pollGenerationRef.current !== generation) return;
+        if (inFlightPollRef.current) {
+          void scheduleNext(1000);
+          return;
+        }
+        const controller = new AbortController();
+        inFlightPollRef.current = controller;
+        try {
+          const outcome = await executePoll(activeTicket, false, controller.signal);
+          if (inFlightPollRef.current === controller) inFlightPollRef.current = null;
+          if (unmounted || pollGenerationRef.current !== generation) return;
+
+          if (!outcome.continuePolling) return;
+          if (outcome.transientFailure) {
+            consecutiveFailures += 1;
+            if (consecutiveFailures >= 6) {
+              setAutoPaused(true);
+              setQrNoticeError('连续多次查询未收到有效响应，已暂停自动轮询。若二维码仍在有效期内，可点击「立即重试」。');
+              return;
+            }
+          } else {
+            consecutiveFailures = 0;
+            setQrNoticeError(undefined);
+          }
+          void scheduleNext(outcome.nextDelayMs);
+        } catch (error) {
+          if (inFlightPollRef.current === controller) inFlightPollRef.current = null;
+          if (controller.signal.aborted || unmounted || pollGenerationRef.current !== generation) return;
+
+          if (error instanceof ApiError && error.status === 404) {
+            skipRestoreRef.current = true;
+            setQrTicket(undefined);
+            setQrStatus('');
+            setQrNoticeError('扫码会话不存在或已被服务端清理，请重新生成二维码。');
+            return;
+          }
+
+          consecutiveFailures += 1;
+          const message = error instanceof ApiError
+            ? error.message
+            : '查询扫码状态时出现临时网络异常，二维码仍有效。';
+          setQrTicket((prev) => (
+            prev && prev.id === activeTicket.id ? { ...prev, state: 'NETWORK_ERROR', canRetry: true } : prev
+          ));
+          setQrNoticeError(message);
+
+          if (consecutiveFailures >= 6) {
+            setAutoPaused(true);
+            setQrStatus('自动轮询已暂停，可点击「立即重试」恢复检查或重新生成二维码。');
+            return;
+          }
+          void scheduleNext(Math.min(6000, 2500 + consecutiveFailures * 1000));
+        }
+      }, delayMs);
+    }
+
+    void scheduleNext(1500);
+
+    return () => {
+      unmounted = true;
+      pollGenerationRef.current += 1;
+      if (timerId !== undefined) window.clearTimeout(timerId);
+      inFlightPollRef.current?.abort();
+      inFlightPollRef.current = null;
+    };
+  }, [open, tab, qrTicket?.id, qrTicket?.platform, platform, autoPaused]);
 
   function startQr() {
+    skipRestoreRef.current = false;
     setQrStatus('');
+    setQrNoticeError(undefined);
+    setAutoPaused(false);
     const target = platform;
     const cfg = qrPlatforms[target];
     void qrAction.run(async () => {
       try {
-        const ticket = await post<{ id: string; verificationUrl: string; userCode?: string }>(
+        if (target === 'bilibili') {
+          const current = qrTicketRef.current;
+          if (current?.platform === 'bilibili' && !isTerminalQrState(current.state)) {
+            cancelBiliTicketRemote(current.id);
+          }
+          const ticket = await post<BilibiliQrStartResult>(
+            `${accountsPath}${cfg.startPath}`,
+            { groupId: groupId || null },
+            { timeoutMs: 12000 },
+          );
+          setNowMs(Date.now());
+          setQrTicket({
+            platform: 'bilibili',
+            id: ticket.id,
+            image: makeQrDataUrl(ticket.verificationUrl),
+            expiresAt: ticket.expiresAt,
+            state: ticket.state,
+          });
+          setQrStatus(ticket.message || cfg.startStatus);
+          return;
+        }
+        const ticket = await post<{ id: string; verificationUrl: string; userCode?: string; expiresAt?: number }>(
           `${accountsPath}${cfg.startPath}`,
           { groupId: groupId || null },
+          { timeoutMs: 12000 },
         );
-        setQrTicket({ platform: target, id: ticket.id, userCode: ticket.userCode, image: makeQrDataUrl(ticket.verificationUrl) });
+        setNowMs(Date.now());
+        setQrTicket({
+          platform: target,
+          id: ticket.id,
+          userCode: ticket.userCode,
+          expiresAt: ticket.expiresAt,
+          image: makeQrDataUrl(ticket.verificationUrl),
+          state: 'WAITING_SCAN',
+        });
         setQrStatus(cfg.startStatus);
       } catch (failure) {
         if (target === 'xiaohongshu') setXhsSettingsOpen(true);
@@ -256,22 +561,28 @@ function OnboardingPanel({
   }
 
   function pollQrOnce() {
-    if (!qrTicket) return;
-    const cfg = qrPlatforms[qrTicket.platform];
+    const activeTicket = qrTicketRef.current;
+    if (!activeTicket || isTerminalQrState(activeTicket.state)) return;
+    pollGenerationRef.current += 1;
+    inFlightPollRef.current?.abort();
+    inFlightPollRef.current = null;
+    setAutoPaused(false);
+    setQrNoticeError(undefined);
     void qrAction.run(async () => {
-      const res = await post<{ status: 'pending' | 'scanned' | 'expired' | 'denied' | 'connected' }>(
-        `${accountsPath}${cfg.pollPath(qrTicket.id)}`, {},
-      );
-      if (res.status === 'pending') setQrStatus(cfg.pendingStatus);
-      else if (res.status === 'scanned') setQrStatus(cfg.scannedStatus);
-      else if (res.status === 'expired' || res.status === 'denied') {
-        setQrTicket(undefined);
-        throw new Error(res.status === 'denied' ? '授权未通过。' : '二维码已过期，请重新获取。');
-      } else {
-        setQrTicket(undefined);
-        setQrStatus('');
-        pushToast(cfg.connectedToast, 'success');
-        onDone();
+      const controller = new AbortController();
+      inFlightPollRef.current = controller;
+      try {
+        await executePoll(activeTicket, true, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        if (error instanceof ApiError && error.status === 404) {
+          skipRestoreRef.current = true;
+          setQrTicket(undefined);
+          setQrStatus('');
+        }
+        throw error;
+      } finally {
+        if (inFlightPollRef.current === controller) inFlightPollRef.current = null;
       }
     });
   }
@@ -363,11 +674,10 @@ function OnboardingPanel({
         <div className="onboarding-target-row">
           <label>目标平台
             <select value={platform} disabled={qrAction.busy} onChange={(e) => {
-              setPlatform(e.target.value as Platform);
-              setQrTicket(undefined);
-              setQrStatus('');
+              const next = e.target.value as Platform;
+              closeQrTicket({ cancelRemote: true, suppressRestore: false });
+              setPlatform(next);
               setXhsSettingsOpen(false);
-              qrAction.reset();
             }}>
               <option value="bilibili">B 站</option>
               <option value="xiaohongshu">小红书</option>
@@ -385,35 +695,93 @@ function OnboardingPanel({
       {tab === 'qr' && <div className="onboarding-panel">
         <div className="form-stack">
           <p className="muted small">{activeQr.hint}</p>
-          {qrTicket ? <div className="qr-box">
-            <img src={qrTicket.image} width={188} height={188}
-              alt={qrTicket.userCode ? `${activeQr.alt}，授权码 ${qrTicket.userCode}` : activeQr.alt} />
-            <div className="form-stack">
-              <p role="status">{qrStatus}</p>
-              {qrTicket.userCode && <p className="muted small">授权确认码：<code>{qrTicket.userCode}</code></p>}
-              <div className="actions">
-                <button type="button" className="button primary compact" onClick={pollQrOnce} disabled={qrAction.busy}>检查扫码结果</button>
-                <button type="button" className="button compact" onClick={() => { setQrTicket(undefined); setQrStatus(''); }}>关闭二维码</button>
+          {qrTicket ? (() => {
+            const badge = QR_BADGES[qrTicket.state];
+            const remainingMs = qrTicket.expiresAt ? Math.max(0, qrTicket.expiresAt - nowMs) : null;
+            const terminal = isTerminalQrState(qrTicket.state);
+            const needRegenerate = qrTicket.state === 'QR_EXPIRED' || qrTicket.state === 'CANCELED' || qrTicket.state === 'VERIFY_FAILED';
+            const primaryPollLabel = qrTicket.state === 'SAVE_FAILED'
+              ? '重试保存账号'
+              : autoPaused || qrTicket.state === 'NETWORK_ERROR' || qrTicket.state === 'RATE_LIMITED'
+                ? '立即重试'
+                : '检查扫码结果';
+            return <div className="qr-box">
+              <img src={qrTicket.image} width={188} height={188}
+                alt={qrTicket.userCode ? `${activeQr.alt}，授权码 ${qrTicket.userCode}` : activeQr.alt} />
+              <div className="form-stack">
+                <div className="qr-status-head">
+                  <span className={`qr-state-badge ${badge.tone}`}>{badge.label}</span>
+                  {remainingMs !== null && !terminal && (
+                    <span className={`qr-countdown${remainingMs <= 30_000 ? ' is-urgent' : ''}`}>
+                      {remainingMs > 0 ? `有效倒计时 ${formatQrCountdown(remainingMs)}` : '正在确认二维码有效期…'}
+                    </span>
+                  )}
+                </div>
+                <p role="status">{qrStatus}</p>
+                {qrNoticeError && <p className="muted small" role="alert">{qrNoticeError}</p>}
+                {qrTicket.userCode && <p className="muted small">授权确认码：<code>{qrTicket.userCode}</code></p>}
+                <div className="actions">
+                  {!terminal && qrTicket.state !== 'VERIFY_FAILED' && (
+                    <button type="button" className="button primary compact" onClick={pollQrOnce} disabled={qrAction.busy}>
+                      {primaryPollLabel}
+                    </button>
+                  )}
+                  {(needRegenerate || qrTicket.state === 'NETWORK_ERROR') && (
+                    <button type="button" className={`button compact${needRegenerate ? ' primary' : ''}`} onClick={startQr} disabled={qrAction.busy}>
+                      <RotateCcw size={14} aria-hidden="true" />重新生成二维码
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="button compact"
+                    onClick={() => closeQrTicket({ cancelRemote: true, suppressRestore: true })}
+                  >
+                    关闭二维码
+                  </button>
+                </div>
               </div>
-            </div>
-          </div> : <div className="actions">
+            </div>;
+          })() : <div className="actions">
             <button type="button" className="button primary" onClick={startQr} disabled={qrAction.busy}>
               <ScanLine size={16} aria-hidden="true" />{qrAction.busy ? activeQr.busyLabel : activeQr.buttonLabel}
             </button>
           </div>}
-          <Feedback error={qrAction.error} notice={qrTicket ? undefined : qrStatus} />
-          {platform === 'bilibili' ? <details className="source">
-            <summary>开放平台专栏自动投稿与授权设置</summary>
-            <div className="form-stack">
-              {canConfigure && !settings?.bilibiliSandbox && <label>B 站授权回调地址
-                <input readOnly value={biliOAuthOrigin + '/api/channels/bilibili/oauth/callback'}
-                  onFocus={(e) => e.currentTarget.select()} />
-              </label>}
-              {canConfigure && <AppCredentials path={`${settingsPath}/bilibili`} platform="bilibili" configured={biliConfigured} onSaved={onDone} />}
-              {settings?.bilibiliSandbox ? <p className="muted small">当前为沙箱模式。</p>
-                : biliConfigured && <BilibiliConnection path={`${accountsPath}/bilibili`} hasAccounts={hasOfficialBili} onConnected={onDone} />}
-            </div>
-          </details> : <details className="source" open={xhsSettingsOpen} onToggle={(e) => setXhsSettingsOpen(e.currentTarget.open)}>
+          <Feedback error={qrAction.error ?? qrNoticeError} notice={qrTicket ? undefined : qrStatus} />
+          {platform === 'bilibili' ? (
+            biliConfigured && !settings?.bilibiliSandbox ? (
+              <div className="account-drawer-card form-stack">
+                <div className="account-drawer-section-head">
+                  <strong>开放平台官方自动投稿（OAuth 授权通道）</strong>
+                  <span className="badge violet">已配置开放平台凭据</span>
+                </div>
+                <p className="muted small">
+                  上方的「B 站网页登录二维码」仅用于账号登记与人工交接（<code>manual</code>）；若要让 B 站账号进入「官方自动投稿（<code>official</code>）」通道（当前支持专栏图文自动投稿与成效回读），请使用下方 OAuth 授权连接真实账号：
+                </p>
+                {canConfigure && <label>B 站授权回调地址
+                  <input readOnly value={biliOAuthOrigin + '/api/channels/bilibili/oauth/callback'}
+                    onFocus={(e) => e.currentTarget.select()} />
+                </label>}
+                <BilibiliConnection path={`${accountsPath}/bilibili`} hasAccounts={hasOfficialBili} onConnected={onDone} />
+                {canConfigure && <details className="source">
+                  <summary>更新开放平台应用 ID / 密钥</summary>
+                  <div className="form-stack">
+                    <AppCredentials path={`${settingsPath}/bilibili`} platform="bilibili" configured={biliConfigured} onSaved={onDone} />
+                  </div>
+                </details>}
+              </div>
+            ) : <details className="source" open={canConfigure}>
+              <summary>开放平台专栏自动投稿与授权设置</summary>
+              <div className="form-stack">
+                {canConfigure && !settings?.bilibiliSandbox && <label>B 站授权回调地址
+                  <input readOnly value={biliOAuthOrigin + '/api/channels/bilibili/oauth/callback'}
+                    onFocus={(e) => e.currentTarget.select()} />
+                </label>}
+                {canConfigure && <AppCredentials path={`${settingsPath}/bilibili`} platform="bilibili" configured={biliConfigured} onSaved={onDone} />}
+                {settings?.bilibiliSandbox ? <p className="muted small">当前为沙箱模式。</p>
+                  : biliConfigured && <BilibiliConnection path={`${accountsPath}/bilibili`} hasAccounts={hasOfficialBili} onConnected={onDone} />}
+              </div>
+            </details>
+          ) : <details className="source" open={xhsSettingsOpen} onToggle={(e) => setXhsSettingsOpen(e.currentTarget.open)}>
             <summary>开放平台扫码与身份核验设置</summary>
             <div className="form-stack">
               {canConfigure
@@ -712,7 +1080,7 @@ const drawerTabs: { id: DrawerTab; label: string }[] = [
 
 function AccountDetailsDrawer({
   account, drawer, isMobile, onTabChange, onClose, trial, showArchived, canManage, canReportRisk,
-  groups, samePlatformPeers, accountsPath, diag, healthBusy, onRunHealthCheck, onChanged, onMetaSaved, openPerformance,
+  groups, samePlatformPeers, accountsPath, settings, hasOfficialBili, diag, healthBusy, onRunHealthCheck, onChanged, onMetaSaved, openPerformance,
 }: {
   account: Account;
   drawer: DrawerState;
@@ -726,6 +1094,8 @@ function AccountDetailsDrawer({
   groups: MatrixGroup[];
   samePlatformPeers: Account[];
   accountsPath: string;
+  settings?: PlatformSettings;
+  hasOfficialBili: boolean;
   diag?: HealthCheckDiagnostics;
   healthBusy: boolean;
   onRunHealthCheck: (accountId: string) => void;
@@ -1303,6 +1673,21 @@ function AccountDetailsDrawer({
                 托管密码与 Cookie 仅由服务端 AES-256-GCM 加密保存，GET /accounts/:id/credentials 已下线，前端无法查看或复制明文，也不将凭据写入浏览器存储或日志。
               </p>
             </div>
+            {account.platform === 'bilibili' && account.channelKind === 'manual' && !showArchived && !trial && canManage && !settings?.bilibiliSandbox && (
+              <div className="account-drawer-card form-stack">
+                <strong>开通官方自动投稿（OAuth 授权）</strong>
+                {settings?.bilibili ? (
+                  <>
+                    <p className="muted small">
+                      此账号当前通过网页扫码 / Cookie / 密码接入（仅支持人工交接）。工作区已配置 B 站开放平台 Key，请点击下方完成账号级 OAuth 授权以创建官方自动投稿（专栏图文）通道：
+                    </p>
+                    <BilibiliConnection path={`${accountsPath}/bilibili`} hasAccounts={hasOfficialBili} onConnected={onChanged} />
+                  </>
+                ) : (
+                  <p className="muted small">如需开通官方自动投稿，请先在上方「添加账号」中配置 B 站开放平台应用 ID 与密钥。</p>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -2107,6 +2492,25 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
       <Feedback error={demoAction.error} notice={demoAction.notice} />
     </section>}
 
+    {!showArchived && !trial && canManage && settings.data?.bilibili && !settings.data?.bilibiliSandbox
+      && !accounts.some((a) => a.platform === 'bilibili' && a.channelKind === 'official' && a.identityVerified) && (
+      <section className="card form-card form-stack">
+        <div className="card-heading">
+          <div>
+            <h2>B 站开放平台已配置，尚无已完成 OAuth 授权的自动投稿账号</h2>
+            <p className="muted small">
+              当前列表中通过「网页扫码 / Cookie / 账号密码」添加的 B 站账号仅支持人工交接；完成下方 OAuth 授权即可接入官方自动投稿通道（当前官方适配器支持专栏图文自动投稿与阅读数据回读，视频暂保留人工交接）。
+            </p>
+          </div>
+        </div>
+        <BilibiliConnection
+          path={`${accountsPath}/bilibili`}
+          hasAccounts={false}
+          onConnected={() => { setDiagByAccount({}); refreshAll(); settings.refresh(); }}
+        />
+      </section>
+    )}
+
     <div className="account-toolbar-wrap">
       <div className="account-toolbar">
         <div className="filters" role="group" aria-label="账号分组视图">
@@ -2359,6 +2763,8 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
           groups={groups}
           samePlatformPeers={accounts.filter((peer) => peer.platform === drawerAccount.platform && peer.id !== drawerAccount.id)}
           accountsPath={accountsPath}
+          settings={settings.data}
+          hasOfficialBili={accounts.some((a) => a.platform === 'bilibili' && a.channelKind === 'official' && a.identityVerified)}
           diag={diagByAccount[drawerAccount.id]}
           healthBusy={checkingAccountId === drawerAccount.id}
           onRunHealthCheck={runHealthCheck}

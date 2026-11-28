@@ -155,6 +155,7 @@ model User {
   topicAiAnalyses      TopicAiAnalysis[]
   riskEvents           AccountRiskEvent[]    @relation("RiskEventActor")
   resolvedRiskEvents   AccountRiskEvent[]    @relation("RiskEventResolver")
+  bilibiliQrTickets    BilibiliQrTicket[]
 }
 
 model Session {
@@ -193,6 +194,7 @@ model Workspace {
   topicAiSetting         TopicAiSetting?
   matrixGroups           MatrixGroup[]
   accountRiskEvents      AccountRiskEvent[]
+  bilibiliQrTickets      BilibiliQrTicket[]
 }
 
 model Membership {
@@ -769,4 +771,33 @@ model WorkerHeartbeat {
   updatedAt       DateTime     @updatedAt @db.Timestamptz(3)
 
   @@index([status, expiresAt])
+}
+
+model BilibiliQrTicket {
+  id                   String    @id @default(uuid())
+  workspaceId          String
+  userId               String
+  groupId              String?
+  verificationUrl      String
+  qrcodeKeyCiphertext  String?
+  qrcodeKeyKeyId       String?
+  tempCookieCiphertext String?
+  tempCookieKeyId      String?
+  tempMid              String?
+  tempUname            String?
+  state                String    @default("WAITING_SCAN")
+  lastBiliCode         Int?
+  lastError            String?
+  accountId            String?
+  expiresAt            DateTime  @db.Timestamptz(3)
+  nextPollAt           DateTime  @db.Timestamptz(3)
+  lockedUntil          DateTime? @db.Timestamptz(3)
+  createdAt            DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime  @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, userId, createdAt(sort: Desc)])
+  @@index([expiresAt])
 }

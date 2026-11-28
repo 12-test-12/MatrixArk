@@ -203,15 +203,82 @@ export const canReview = (role: Role) => canEdit(role) || role === 'reviewer';
 export const canRecord = (role: Role) => canEdit(role) || role === 'operator';
 export const canMonitorWorker = (role: Role) => role === 'owner' || role === 'operator';
 
+export type QrLoginState =
+  | 'WAITING_SCAN'
+  | 'SCANNED'
+  | 'VERIFYING'
+  | 'QR_EXPIRED'
+  | 'VERIFY_FAILED'
+  | 'SAVE_FAILED'
+  | 'NETWORK_ERROR'
+  | 'RATE_LIMITED'
+  | 'CONNECTED'
+  | 'CANCELED';
+
+export type QrBusinessState =
+  | 'WAITING_SCAN'
+  | 'SCANNED'
+  | 'VERIFYING'
+  | 'QR_EXPIRED'
+  | 'VERIFY_FAILED'
+  | 'SAVE_FAILED'
+  | 'CONNECTED'
+  | 'CANCELED';
+
+export type LegacyQrStatus = 'pending' | 'scanned' | 'expired' | 'denied' | 'connected';
+
+export type QrPollResult = {
+  id: string;
+  state: QrLoginState;
+  businessState: QrBusinessState;
+  status: LegacyQrStatus;
+  code: number | null;
+  message: string;
+  expiresAt: number;
+  retryAfterMs?: number;
+  accountId?: string;
+  canRetry?: boolean;
+};
+
+export type BilibiliQrStartResult = QrPollResult & {
+  verificationUrl: string;
+};
+
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 
-export async function api<T>(path: string, options: {
-  method?: string; body?: unknown; headers?: Record<string, string>; signal?: AbortSignal; keepalive?: boolean;
-} = {}): Promise<T> {
+export type ApiRequestOptions = {
+  method?: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  keepalive?: boolean;
+  timeoutMs?: number;
+};
+
+export async function api<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   const form = options.body instanceof FormData;
   const blob = options.body instanceof Blob ? options.body : undefined;
+  const timeoutController = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onCallerAbort = () => {
+    timeoutController.abort(options.signal?.reason);
+  };
+  if (options.signal) {
+    if (options.signal.aborted) {
+      timeoutController.abort(options.signal.reason);
+    } else {
+      options.signal.addEventListener('abort', onCallerAbort, { once: true });
+    }
+  }
+  if (options.timeoutMs && options.timeoutMs > 0) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort();
+    }, options.timeoutMs);
+  }
   let response: Response;
   try {
     const defaultHeaders: Record<string, string> = {};
@@ -225,13 +292,17 @@ export async function api<T>(path: string, options: {
       method: options.method ?? 'GET',
       headers: options.headers ? { ...defaultHeaders, ...options.headers } : (Object.keys(defaultHeaders).length ? defaultHeaders : undefined),
       body: blob ?? (form ? options.body as FormData : JSON.stringify(options.body)),
-      signal: options.signal,
+      signal: timeoutController.signal,
       keepalive: options.keepalive,
       cache: 'no-store',
     });
   } catch (error) {
     if (options.signal?.aborted) throw error;
-    throw new ApiError(0, '无法连接服务，请确认 API 已启动后重试。');
+    if (timedOut) throw new ApiError(408, '请求超时，请检查网络连接或服务端状态后重试。');
+    throw new ApiError(0, '无法连接服务，请确认 API 已启动或检查网络后重试。');
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onCallerAbort);
   }
   const data = await response.json().catch(() => null);
   if (!response.ok) {
@@ -242,6 +313,9 @@ export async function api<T>(path: string, options: {
     if (response.status === 404 && typeof message === 'string' && message.toUpperCase().startsWith(`CANNOT ${method} /`)) {
       throw new ApiError(404, '当前 API 未提供此功能。请启动与工作台同版本的 API，再重试。');
     }
+    if (response.status >= 502 && response.status <= 504 && message && message !== 'Bad Gateway') {
+      throw new ApiError(response.status, message);
+    }
     throw new ApiError(response.status, response.status >= 500
       ? 'API 暂时不可用，请稍后重试。' : message ?? (response.status === 404 ? '当前 API 未提供此功能或服务未启动。' : '请求未能完成'));
   }
@@ -249,7 +323,11 @@ export async function api<T>(path: string, options: {
   return data as T;
 }
 
-export const post = <T,>(path: string, body: unknown) => api<T>(path, { method: 'POST', body });
+export const post = <T,>(
+  path: string,
+  body: unknown,
+  options: Omit<ApiRequestOptions, 'method' | 'body'> = {},
+) => api<T>(path, { ...options, method: 'POST', body });
 export const fileBody = (file: File) => {
   const body = new FormData();
   body.set('file', file);

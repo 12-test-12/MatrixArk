@@ -297,6 +297,7 @@ export class AccountsController {
   }
 
   @Post('bilibili/qr')
+  @Header('Cache-Control', 'no-store')
   startBilibiliQr(
     @Param('workspaceId') workspaceId: string,
     @CurrentMembership() membership: { role: Role },
@@ -310,16 +311,44 @@ export class AccountsController {
     return this.onboarding.startBilibiliWebQr(workspaceId, user.id, parsed?.groupId);
   }
 
+  @Get('bilibili/qr/active')
+  @Header('Cache-Control', 'no-store')
+  activeBilibiliQr(
+    @Param('workspaceId') workspaceId: string,
+    @CurrentMembership() membership: { role: Role },
+    @CurrentUser() user: SessionUser,
+    @CurrentTrial() trial: boolean,
+  ) {
+    assertCan(membership.role, 'account:manage');
+    if (trial) return null;
+    return this.onboarding.getActiveBilibiliWebQr(workspaceId, user.id);
+  }
+
   @Post('bilibili/qr/:id/poll')
+  @Header('Cache-Control', 'no-store')
   @HttpCode(200)
   pollBilibiliQr(
     @Param('workspaceId') workspaceId: string,
     @Param('id') id: string,
     @CurrentMembership() membership: { role: Role },
     @CurrentUser() user: SessionUser,
+    @Query('manual') manual?: string,
   ) {
     assertCan(membership.role, 'account:manage');
-    return this.onboarding.pollBilibiliWebQr(workspaceId, user.id, id);
+    return this.onboarding.pollBilibiliWebQr(workspaceId, user.id, id, manual === 'true');
+  }
+
+  @Post('bilibili/qr/:id/cancel')
+  @Header('Cache-Control', 'no-store')
+  @HttpCode(200)
+  cancelBilibiliQr(
+    @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string,
+    @CurrentMembership() membership: { role: Role },
+    @CurrentUser() user: SessionUser,
+  ) {
+    assertCan(membership.role, 'account:manage');
+    return this.onboarding.cancelBilibiliWebQr(workspaceId, user.id, id);
   }
 
   @Post('demo')

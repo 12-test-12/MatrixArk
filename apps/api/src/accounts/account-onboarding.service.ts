@@ -1,9 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  assertQrTransition,
+  canQrTransition,
+  QR_STATE_MESSAGES,
+  toLegacyQrStatus,
+  type QrBusinessState,
+  type QrLoginState,
+  type QrPollResult,
+} from '@matrixark/shared';
+import {
   BadGatewayException,
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -18,7 +28,21 @@ import {
   validatePlatformCookie,
 } from './account-secrets';
 import { MatrixGroupsService } from './matrix-groups.service';
+import { decryptPlatformSecret, encryptPlatformSecret, platformKeyId } from './platform-app';
 import { bilibiliManualUidPrefix, bilibiliWebUidPrefix, parseProfileInput } from './publish-account';
+
+const BILI_QR_TTL_MS = 180_000;
+const BILI_POLL_INTERVAL_MS = 1500;
+const BILI_POLL_LOCK_MS = 25_000;
+const BILI_TERMINAL_RETENTION_MS = 10 * 60_000;
+
+const biliWebHeaders = {
+  accept: 'application/json, text/plain, */*',
+  'accept-language': 'zh-CN,zh;q=0.9',
+  referer: 'https://www.bilibili.com/',
+  origin: 'https://www.bilibili.com',
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+} as const;
 
 const qrGenerateResponseSchema = z.object({
   code: z.literal(0),
@@ -31,19 +55,19 @@ const qrGenerateResponseSchema = z.object({
 const qrPollResponseSchema = z.object({
   code: z.literal(0),
   data: z.object({
-    url: z.string().optional(),
+    url: z.string().nullish(),
     code: z.number().int(),
-    message: z.string().optional(),
+    message: z.string().nullish(),
   }),
 });
 
 const biliNavResponseSchema = z.object({
   code: z.number().int(),
   data: z.object({
-    isLogin: z.boolean().optional(),
-    mid: z.union([z.number().int().positive(), z.string().regex(/^[1-9]\d{0,19}$/)]).optional(),
-    uname: z.string().optional(),
-  }).optional(),
+    isLogin: z.boolean().nullish(),
+    mid: z.union([z.number().int().positive(), z.string().regex(/^[1-9]\d{0,19}$/)]).nullish(),
+    uname: z.string().nullish(),
+  }).nullish(),
 });
 
 export const passwordAccountSchema = z.object({
@@ -82,43 +106,67 @@ export const readSessionSchema = z.object({
   readCookieLabel: z.string().trim().max(60).nullable().optional(),
 }).strict();
 
-type BiliQrTicket = {
-  id: string;
-  qrcodeKey: string;
-  verificationUrl: string;
-  expiresAt: number;
-  nextPollAt: number;
-  busy: boolean;
-  status: 'pending' | 'scanned' | 'expired' | 'connected';
-  groupId: string | null;
-  accountId?: string;
-};
+function splitCombinedSetCookieHeader(raw: string): string[] {
+  // Split combined Set-Cookie header only at boundaries before "<name>=" (ignoring commas inside Expires=Wed, ...)
+  return raw.split(/,(?=\s*[^;=,\s]+=)/g).map((part) => part.trim()).filter(Boolean);
+}
 
-function extractCookiesFromResponse(response: Response, callbackUrl?: string) {
+export function extractCookiesFromResponse(response: Response, callbackUrl?: string | null) {
   const entries: Record<string, string> = {};
-  const setCookies = typeof response.headers.getSetCookie === 'function'
-    ? response.headers.getSetCookie()
-    : [];
+  let setCookies: string[] = [];
+  if (typeof response.headers.getSetCookie === 'function') {
+    setCookies = response.headers.getSetCookie();
+  }
+  if (!setCookies.length) {
+    const rawHeader = response.headers.get('set-cookie');
+    if (rawHeader) setCookies = splitCombinedSetCookieHeader(rawHeader);
+  }
   for (const raw of setCookies) {
     const first = raw.split(';')[0]?.trim();
     if (!first) continue;
     const eq = first.indexOf('=');
-    if (eq > 0) entries[first.slice(0, eq).trim()] = first.slice(eq + 1).trim();
+    if (eq > 0) {
+      const name = first.slice(0, eq).trim();
+      const value = first.slice(eq + 1).trim();
+      if (name && value) entries[name] = value;
+    }
   }
   if (callbackUrl && URL.canParse(callbackUrl)) {
     const parsed = new URL(callbackUrl);
-    for (const key of ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid']) {
-      const val = parsed.searchParams.get(key);
+    for (const key of ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid', 'bili_ticket']) {
+      const val = parsed.searchParams.get(key)?.trim();
       if (val && !entries[key]) entries[key] = val;
     }
   }
-  return Object.entries(entries).map(([k, v]) => `${k}=${v}`).join('; ');
+  return {
+    cookieHeader: Object.entries(entries).map(([k, v]) => `${k}=${v}`).join('; '),
+    hasSessdata: Boolean(entries.SESSDATA),
+    hasBiliJct: Boolean(entries.bili_jct),
+    hasDedeUserId: Boolean(entries.DedeUserID),
+  };
 }
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+}
+
+function errorName(error: unknown): string {
+  if (error instanceof Error) return error.name || 'Error';
+  return typeof error;
+}
+
+type NavProbeOutcome =
+  | { kind: 'ok'; mid: string; uname: string }
+  | { kind: 'invalid'; message: string; biliCode?: number }
+  | { kind: 'rate_limited'; httpStatus: number }
+  | { kind: 'timeout'; durationMs: number }
+  | { kind: 'network'; errorType: string; durationMs: number }
+  | { kind: 'upstream_http'; httpStatus: number; durationMs: number }
+  | { kind: 'invalid_json'; durationMs: number };
 
 @Injectable()
 export class AccountOnboardingService {
-  // Pending Bilibili web QR logins in-memory (short-lived 180s tickets).
-  private readonly pendingBiliQr = new Map<string, BiliQrTicket>();
+  private readonly logger = new Logger(AccountOnboardingService.name);
   private readonly startingBiliQr = new Set<string>();
 
   constructor(
@@ -126,30 +174,108 @@ export class AccountOnboardingService {
     private readonly groups: MatrixGroupsService,
   ) {}
 
-  private async verifyBilibiliCookie(cookieHeader: string) {
+  private buildQrResult(params: {
+    id: string;
+    state: QrLoginState;
+    businessState: QrBusinessState;
+    code: number | null;
+    expiresAt: number;
+    message?: string;
+    retryAfterMs?: number;
+    accountId?: string | null;
+    canRetry?: boolean;
+  }): QrPollResult {
+    return {
+      id: params.id,
+      state: params.state,
+      businessState: params.businessState,
+      status: toLegacyQrStatus(params.state, params.businessState),
+      code: params.code,
+      message: params.message ?? QR_STATE_MESSAGES[params.state],
+      expiresAt: params.expiresAt,
+      ...(params.retryAfterMs !== undefined && { retryAfterMs: params.retryAfterMs }),
+      ...(params.accountId ? { accountId: params.accountId } : {}),
+      ...(params.canRetry !== undefined && { canRetry: params.canRetry }),
+    };
+  }
+
+  private async cleanupQrTickets(workspaceId: string, userId: string, now: Date) {
+    const retentionCutoff = new Date(now.getTime() - BILI_TERMINAL_RETENTION_MS);
+    await this.prisma.bilibiliQrTicket.deleteMany({
+      where: {
+        OR: [
+          { expiresAt: { lte: retentionCutoff } },
+          {
+            workspaceId,
+            userId,
+            state: { in: ['CONNECTED', 'QR_EXPIRED', 'CANCELED'] },
+            updatedAt: { lte: retentionCutoff },
+          },
+        ],
+      },
+    });
+  }
+
+  private async probeBilibiliNavCookie(cookieHeader: string): Promise<NavProbeOutcome> {
+    const startedAt = Date.now();
     let response: Response;
     try {
       response = await fetch('https://api.bilibili.com/x/web-interface/nav', {
         headers: {
+          ...biliWebHeaders,
           cookie: cookieHeader,
-          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          referer: 'https://www.bilibili.com/',
         },
-        redirect: 'error',
+        redirect: 'manual',
         signal: AbortSignal.timeout(10_000),
       });
-    } catch {
-      throw new BadGatewayException('暂时无法连接 B 站核验接口，请检查网络后重试');
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      if (isTimeoutError(error)) return { kind: 'timeout', durationMs };
+      return { kind: 'network', errorType: errorName(error), durationMs };
     }
-    if (!response.ok) throw new BadGatewayException(`B 站核验接口返回 HTTP ${response.status}`);
-    const parsed = biliNavResponseSchema.safeParse(await response.json().catch(() => null));
-    if (!parsed.success || parsed.data.code === -101 || !parsed.data.data?.isLogin || !parsed.data.data.mid) {
-      throw new BadRequestException('B 站 Cookie 无效或尚未登录，请重新扫码或确认已复制最新的 SESSDATA');
+    const durationMs = Date.now() - startedAt;
+    if (response.status === 429 || response.status === 412) {
+      return { kind: 'rate_limited', httpStatus: response.status };
+    }
+    if (!response.ok) {
+      return { kind: 'upstream_http', httpStatus: response.status, durationMs };
+    }
+    const json = await response.json().catch(() => null);
+    const parsed = biliNavResponseSchema.safeParse(json);
+    if (!parsed.success) {
+      return { kind: 'invalid_json', durationMs };
+    }
+    if (parsed.data.code === -412 || parsed.data.code === -509 || parsed.data.code === -799) {
+      return { kind: 'rate_limited', httpStatus: response.status };
+    }
+    if (parsed.data.code === -101 || !parsed.data.data?.isLogin || !parsed.data.data.mid) {
+      return {
+        kind: 'invalid',
+        biliCode: parsed.data.code,
+        message: 'B 站 Cookie 无效或尚未通过登录核验，请重新扫码或确认已复制最新的 SESSDATA',
+      };
     }
     return {
+      kind: 'ok',
       mid: String(parsed.data.data.mid),
       uname: parsed.data.data.uname?.trim() || `B站用户 ${parsed.data.data.mid}`,
     };
+  }
+
+  private async verifyBilibiliCookie(cookieHeader: string) {
+    const outcome = await this.probeBilibiliNavCookie(cookieHeader);
+    if (outcome.kind === 'ok') return { mid: outcome.mid, uname: outcome.uname };
+    if (outcome.kind === 'invalid') throw new BadRequestException(outcome.message);
+    if (outcome.kind === 'timeout' || outcome.kind === 'network') {
+      throw new BadGatewayException('暂时无法连接 B 站核验接口，请检查网络后重试');
+    }
+    if (outcome.kind === 'rate_limited') {
+      throw new BadGatewayException(`B 站核验接口触发限流（HTTP ${outcome.httpStatus}），请稍后重试`);
+    }
+    if (outcome.kind === 'upstream_http') {
+      throw new BadGatewayException(`B 站核验接口返回 HTTP ${outcome.httpStatus}`);
+    }
+    throw new BadGatewayException('B 站核验接口返回格式异常，请稍后重试');
   }
 
   private async uniqueDisplayName(
@@ -173,120 +299,740 @@ export class AccountOnboardingService {
     return candidate;
   }
 
+  private decryptTicketSecret(scope: string, workspaceId: string, userId: string, ticketId: string, ciphertext: string | null, keyId: string | null) {
+    if (!ciphertext || keyId !== platformKeyId) return null;
+    try {
+      return decryptPlatformSecret([scope, workspaceId, userId, ticketId], ciphertext);
+    } catch {
+      return null;
+    }
+  }
+
   async startBilibiliWebQr(workspaceId: string, userId: string, groupId?: string | null) {
     const key = JSON.stringify([workspaceId, userId]);
-    if (this.startingBiliQr.has(key) || this.pendingBiliQr.get(key)?.busy) {
+    if (this.startingBiliQr.has(key)) {
       throw new ConflictException('正在生成二维码，请稍后重试');
     }
     this.startingBiliQr.add(key);
     try {
       const validGroupId = await this.groups.assertWorkspaceGroup(this.prisma, workspaceId, groupId);
+      const now = new Date();
+      await this.cleanupQrTickets(workspaceId, userId, now);
+
+      const startedAt = Date.now();
       let response: Response;
       try {
         response = await fetch('https://passport.bilibili.com/x/passport-login/web/qrcode/generate', {
-          headers: {
-            accept: 'application/json',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          },
-          redirect: 'error',
+          headers: biliWebHeaders,
+          redirect: 'manual',
           signal: AbortSignal.timeout(10_000),
         });
-      } catch {
-        throw new BadGatewayException('暂时无法连接 B 站扫码登录服务，请稍后重试');
+      } catch (error) {
+        const durationMs = Date.now() - startedAt;
+        if (isTimeoutError(error)) {
+          this.logger.warn(`[QR] upstream_timeout ticketId=pending stage=generate durationMs=${durationMs}`);
+          throw new BadGatewayException('连接 B 站二维码生成接口超时，请稍后重试');
+        }
+        this.logger.warn(`[QR] network_error ticketId=pending stage=generate errorType=${errorName(error)} durationMs=${durationMs}`);
+        throw new BadGatewayException('暂时无法连接 B 站扫码登录服务，请检查网络后重试');
       }
-      if (!response.ok) throw new BadGatewayException(`B 站二维码服务返回 HTTP ${response.status}`);
-      const payload = qrGenerateResponseSchema.safeParse(await response.json().catch(() => null));
-      if (!payload.success) throw new BadGatewayException('B 站二维码返回格式异常，请稍后重试');
 
-      const now = Date.now();
-      const ticket: BiliQrTicket = {
-        id: randomUUID(),
-        qrcodeKey: payload.data.data.qrcode_key,
+      const durationMs = Date.now() - startedAt;
+      if (response.status === 429 || response.status === 412) {
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=pending stage=generate httpStatus=${response.status} durationMs=${durationMs}`);
+        throw new BadGatewayException(`B 站二维码服务请求受限（HTTP ${response.status}），请稍后重试`);
+      }
+      if (!response.ok) {
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=pending stage=generate httpStatus=${response.status} durationMs=${durationMs}`);
+        throw new BadGatewayException(`B 站二维码服务返回 HTTP ${response.status}`);
+      }
+
+      const rawJson = await response.json().catch(() => null);
+      const payload = qrGenerateResponseSchema.safeParse(rawJson);
+      if (!payload.success) {
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=pending stage=generate httpStatus=${response.status} durationMs=${durationMs}`);
+        throw new BadGatewayException('B 站二维码返回格式异常，请稍后重试');
+      }
+
+      const qrUrl = new URL(payload.data.data.url);
+      const urlKey = qrUrl.searchParams.get('qrcode_key');
+      if (urlKey && urlKey !== payload.data.data.qrcode_key) {
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=pending stage=generate reason=qrcode_key_mismatch durationMs=${durationMs}`);
+        throw new BadGatewayException('B 站返回的二维码参数不一致，请重试生成');
+      }
+
+      const ticketId = randomUUID();
+      const createdAtMs = Date.now();
+      const expiresAt = new Date(createdAtMs + BILI_QR_TTL_MS);
+      const nextPollAt = new Date(createdAtMs + BILI_POLL_INTERVAL_MS);
+      const qrcodeKeyCiphertext = encryptPlatformSecret(
+        ['bili-qr', workspaceId, userId, ticketId],
+        payload.data.data.qrcode_key,
+      );
+
+      // Supersede previous active tickets for the same operator in this workspace.
+      await this.prisma.bilibiliQrTicket.updateMany({
+        where: {
+          workspaceId,
+          userId,
+          state: { in: ['WAITING_SCAN', 'SCANNED', 'VERIFYING', 'VERIFY_FAILED', 'SAVE_FAILED'] },
+        },
+        data: {
+          state: 'CANCELED',
+          lastError: '用户已重新生成二维码',
+          qrcodeKeyCiphertext: null,
+          qrcodeKeyKeyId: null,
+          tempCookieCiphertext: null,
+          tempCookieKeyId: null,
+          tempMid: null,
+          tempUname: null,
+          lockedUntil: null,
+        },
+      });
+
+      await this.prisma.bilibiliQrTicket.create({
+        data: {
+          id: ticketId,
+          workspaceId,
+          userId,
+          groupId: validGroupId,
+          verificationUrl: payload.data.data.url,
+          qrcodeKeyCiphertext,
+          qrcodeKeyKeyId: platformKeyId,
+          state: 'WAITING_SCAN',
+          expiresAt,
+          nextPollAt,
+        },
+      });
+
+      this.logger.log(`[QR] ticket_created ticketId=${ticketId} httpStatus=${response.status} durationMs=${durationMs}`);
+      return {
+        id: ticketId,
         verificationUrl: payload.data.data.url,
-        expiresAt: now + 180_000,
-        nextPollAt: now + 1500,
-        busy: false,
-        status: 'pending',
-        groupId: validGroupId,
+        expiresAt: expiresAt.getTime(),
+        state: 'WAITING_SCAN' as const,
+        businessState: 'WAITING_SCAN' as const,
+        status: 'pending' as const,
+        code: null,
+        message: QR_STATE_MESSAGES.WAITING_SCAN,
       };
-      this.pendingBiliQr.set(key, ticket);
-      setTimeout(() => {
-        if (this.pendingBiliQr.get(key) === ticket) this.pendingBiliQr.delete(key);
-      }, 180_000).unref();
-      return { id: ticket.id, verificationUrl: ticket.verificationUrl, expiresAt: ticket.expiresAt };
     } finally {
       this.startingBiliQr.delete(key);
     }
   }
 
-  async pollBilibiliWebQr(workspaceId: string, userId: string, id: string) {
-    const key = JSON.stringify([workspaceId, userId]);
-    const ticket = this.pendingBiliQr.get(key);
-    if (!ticket || ticket.id !== id) throw new NotFoundException('扫码请求不存在或已失效，请重新获取二维码');
-    if (ticket.expiresAt <= Date.now()) {
-      this.pendingBiliQr.delete(key);
-      return { status: 'expired' as const };
+  async getActiveBilibiliWebQr(workspaceId: string, userId: string) {
+    const now = new Date();
+    const ticket = await this.prisma.bilibiliQrTicket.findFirst({
+      where: {
+        workspaceId,
+        userId,
+        expiresAt: { gt: now },
+        state: { in: ['WAITING_SCAN', 'SCANNED', 'VERIFYING', 'VERIFY_FAILED', 'SAVE_FAILED'] },
+      },
+      orderBy: [{ createdAt: 'desc' }],
+    });
+    if (!ticket) return null;
+    const businessState = ticket.state as QrBusinessState;
+    return {
+      ...this.buildQrResult({
+        id: ticket.id,
+        state: businessState,
+        businessState,
+        code: ticket.lastBiliCode,
+        expiresAt: ticket.expiresAt.getTime(),
+        message: ticket.lastError || QR_STATE_MESSAGES[businessState],
+        accountId: ticket.accountId,
+        canRetry: businessState === 'VERIFY_FAILED' || businessState === 'SAVE_FAILED',
+      }),
+      verificationUrl: ticket.verificationUrl,
+    };
+  }
+
+  async cancelBilibiliWebQr(workspaceId: string, userId: string, id: string): Promise<QrPollResult> {
+    const ticket = await this.prisma.bilibiliQrTicket.findFirst({
+      where: { id, workspaceId, userId },
+    });
+    if (!ticket) throw new NotFoundException('扫码请求不存在或已清理');
+    const businessState = ticket.state as QrBusinessState;
+    if (businessState === 'CONNECTED' || businessState === 'QR_EXPIRED' || businessState === 'CANCELED') {
+      return this.buildQrResult({
+        id: ticket.id,
+        state: businessState,
+        businessState,
+        code: ticket.lastBiliCode,
+        expiresAt: ticket.expiresAt.getTime(),
+        message: ticket.lastError || QR_STATE_MESSAGES[businessState],
+        accountId: ticket.accountId,
+      });
     }
-    if (ticket.status === 'connected' || ticket.status === 'expired' || ticket.busy || ticket.nextPollAt > Date.now()) {
-      return { status: ticket.status, ...(ticket.accountId ? { accountId: ticket.accountId } : {}) };
-    }
-    ticket.busy = true;
-    ticket.nextPollAt = Date.now() + 1500;
-    try {
-      const url = new URL('https://passport.bilibili.com/x/passport-login/web/qrcode/poll');
-      url.searchParams.set('qrcode_key', ticket.qrcodeKey);
-      let response: Response;
-      try {
-        response = await fetch(url, {
-          headers: {
-            accept: 'application/json',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          },
-          redirect: 'error',
-          signal: AbortSignal.timeout(10_000),
+    assertQrTransition(businessState, 'CANCELED');
+    await this.prisma.bilibiliQrTicket.update({
+      where: { id: ticket.id },
+      data: {
+        state: 'CANCELED',
+        lastError: QR_STATE_MESSAGES.CANCELED,
+        qrcodeKeyCiphertext: null,
+        qrcodeKeyKeyId: null,
+        tempCookieCiphertext: null,
+        tempCookieKeyId: null,
+        tempMid: null,
+        tempUname: null,
+        lockedUntil: null,
+      },
+    });
+    this.logger.log(`[QR] ticket_canceled ticketId=${id}`);
+    return this.buildQrResult({
+      id: ticket.id,
+      state: 'CANCELED',
+      businessState: 'CANCELED',
+      code: ticket.lastBiliCode,
+      expiresAt: ticket.expiresAt.getTime(),
+    });
+  }
+
+  private async verifyAndSaveTicket(params: {
+    workspaceId: string;
+    userId: string;
+    ticketId: string;
+    groupId: string | null;
+    expiresAtMs: number;
+    cookieHeader: string;
+    existingMid?: string | null;
+    existingUname?: string | null;
+    currentState: QrBusinessState;
+  }): Promise<QrPollResult> {
+    const { workspaceId, userId, ticketId, groupId, expiresAtMs, cookieHeader } = params;
+    let mid = params.existingMid ?? null;
+    let uname = params.existingUname ?? null;
+
+    if (!mid || !uname) {
+      const verifyStart = Date.now();
+      const probe = await this.probeBilibiliNavCookie(cookieHeader);
+      const verifyDuration = Date.now() - verifyStart;
+
+      if (probe.kind === 'timeout') {
+        this.logger.warn(`[QR] upstream_timeout ticketId=${ticketId} stage=cookie_verify durationMs=${verifyDuration}`);
+        return this.buildQrResult({
+          id: ticketId,
+          state: 'NETWORK_ERROR',
+          businessState: 'VERIFYING',
+          code: 0,
+          expiresAt: expiresAtMs,
+          retryAfterMs: 3000,
+          canRetry: true,
+          message: 'B 站已确认扫码，但连接用户信息核验接口超时，正在重试核验…',
         });
-      } catch {
-        throw new BadGatewayException('暂时无法连接 B 站扫码状态接口，请稍后重试');
       }
-      if (!response.ok) throw new BadGatewayException(`B 站扫码状态接口返回 HTTP ${response.status}`);
-      const payload = qrPollResponseSchema.safeParse(await response.json().catch(() => null));
-      if (!payload.success) throw new BadGatewayException('B 站扫码状态返回格式异常');
+      if (probe.kind === 'network' || probe.kind === 'upstream_http' || probe.kind === 'invalid_json') {
+        this.logger.warn(
+          `[QR] network_error ticketId=${ticketId} stage=cookie_verify kind=${probe.kind} durationMs=${verifyDuration}`,
+        );
+        return this.buildQrResult({
+          id: ticketId,
+          state: 'NETWORK_ERROR',
+          businessState: 'VERIFYING',
+          code: 0,
+          expiresAt: expiresAtMs,
+          retryAfterMs: 3000,
+          canRetry: true,
+          message: 'B 站已确认扫码，但核验接口网络暂不可用，正在重试…',
+        });
+      }
+      if (probe.kind === 'rate_limited') {
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=${ticketId} stage=cookie_verify httpStatus=${probe.httpStatus}`);
+        return this.buildQrResult({
+          id: ticketId,
+          state: 'RATE_LIMITED',
+          businessState: 'VERIFYING',
+          code: 0,
+          expiresAt: expiresAtMs,
+          retryAfterMs: 5000,
+          canRetry: true,
+          message: 'B 站核验接口限流，稍后将自动继续核验。',
+        });
+      }
+      if (probe.kind === 'invalid') {
+        this.logger.warn(
+          `[QR] cookie_verify_failed ticketId=${ticketId} stage=cookie_verify biliCode=${probe.biliCode ?? 'unknown'} durationMs=${verifyDuration}`,
+        );
+        if (canQrTransition(params.currentState, 'VERIFY_FAILED')) {
+          await this.prisma.bilibiliQrTicket.update({
+            where: { id: ticketId },
+            data: {
+              state: 'VERIFY_FAILED',
+              lastError: probe.message,
+              tempCookieCiphertext: null,
+              tempCookieKeyId: null,
+              tempMid: null,
+              tempUname: null,
+            },
+          });
+        }
+        return this.buildQrResult({
+          id: ticketId,
+          state: 'VERIFY_FAILED',
+          businessState: 'VERIFY_FAILED',
+          code: 0,
+          expiresAt: expiresAtMs,
+          canRetry: false,
+          message: probe.message,
+        });
+      }
 
-      const code = payload.data.data.code;
-      if (code === 86101) {
-        ticket.status = 'pending';
-        return { status: 'pending' as const };
-      }
-      if (code === 86090) {
-        ticket.status = 'scanned';
-        return { status: 'scanned' as const };
-      }
-      if (code === 86038) {
-        ticket.status = 'expired';
-        return { status: 'expired' as const };
-      }
-      if (code !== 0) {
-        throw new BadGatewayException(payload.data.data.message || `B 站扫码未成功（${code}）`);
-      }
+      mid = probe.mid;
+      uname = probe.uname;
+      this.logger.log(`[QR] cookie_verify_success ticketId=${ticketId} durationMs=${verifyDuration}`);
+      await this.prisma.bilibiliQrTicket.update({
+        where: { id: ticketId },
+        data: { tempMid: mid, tempUname: uname },
+      });
+    }
 
-      const cookieHeader = extractCookiesFromResponse(response, payload.data.data.url);
-      if (!cookieHeader || !cookieHeader.includes('SESSDATA=')) {
-        throw new BadGatewayException('B 站未返回完整登录 Cookie，请重新扫码');
-      }
-      const { mid, uname } = await this.verifyBilibiliCookie(cookieHeader);
+    const saveStart = Date.now();
+    try {
       const accountId = await this.saveBilibiliWebAccount(workspaceId, userId, {
         mid,
         uname,
         cookieHeader,
         accessMethod: 'qr_login',
-        groupId: ticket.groupId,
+        groupId,
       });
-      ticket.status = 'connected';
-      ticket.accountId = accountId;
-      return { status: 'connected' as const, accountId };
+      const saveDuration = Date.now() - saveStart;
+      this.logger.log(`[QR] account_save_success ticketId=${ticketId} accountId=${accountId} durationMs=${saveDuration}`);
+
+      await this.prisma.bilibiliQrTicket.update({
+        where: { id: ticketId },
+        data: {
+          state: 'CONNECTED',
+          accountId,
+          lastError: null,
+          qrcodeKeyCiphertext: null,
+          qrcodeKeyKeyId: null,
+          tempCookieCiphertext: null,
+          tempCookieKeyId: null,
+          tempMid: null,
+          tempUname: null,
+        },
+      });
+      this.logger.log(`[QR] connected ticketId=${ticketId} accountId=${accountId}`);
+      return this.buildQrResult({
+        id: ticketId,
+        state: 'CONNECTED',
+        businessState: 'CONNECTED',
+        code: 0,
+        expiresAt: expiresAtMs,
+        accountId,
+      });
+    } catch (error) {
+      const saveDuration = Date.now() - saveStart;
+      const reason = error instanceof Error ? error.message : '数据库写入失败';
+      this.logger.error(
+        `[QR] account_save_failed ticketId=${ticketId} stage=account_save errorType=${errorName(error)} durationMs=${saveDuration}`,
+      );
+      await this.prisma.bilibiliQrTicket.update({
+        where: { id: ticketId },
+        data: {
+          state: 'SAVE_FAILED',
+          lastError: reason,
+        },
+      });
+      return this.buildQrResult({
+        id: ticketId,
+        state: 'SAVE_FAILED',
+        businessState: 'SAVE_FAILED',
+        code: 0,
+        expiresAt: expiresAtMs,
+        canRetry: true,
+        message: `账号核验已通过，但保存失败：${reason}`,
+      });
+    }
+  }
+
+  async pollBilibiliWebQr(workspaceId: string, userId: string, id: string, manual = false): Promise<QrPollResult> {
+    const ticket = await this.prisma.bilibiliQrTicket.findFirst({
+      where: { id, workspaceId, userId },
+    });
+    if (!ticket) {
+      this.logger.warn(`[QR] upstream_invalid_response ticketId=${id} stage=lookup reason=not_found`);
+      throw new NotFoundException('扫码会话不存在或已过期，请重新获取二维码');
+    }
+
+    const businessState = ticket.state as QrBusinessState;
+    const expiresAtMs = ticket.expiresAt.getTime();
+    const now = new Date();
+    const nowMs = now.getTime();
+
+    if (businessState === 'CONNECTED' || businessState === 'QR_EXPIRED' || businessState === 'CANCELED') {
+      return this.buildQrResult({
+        id: ticket.id,
+        state: businessState,
+        businessState,
+        code: ticket.lastBiliCode,
+        expiresAt: expiresAtMs,
+        message: ticket.lastError || QR_STATE_MESSAGES[businessState],
+        accountId: ticket.accountId,
+      });
+    }
+
+    const hasCachedCookie = Boolean(ticket.tempCookieCiphertext);
+    if (!hasCachedCookie && expiresAtMs <= nowMs) {
+      assertQrTransition(businessState, 'QR_EXPIRED');
+      await this.prisma.bilibiliQrTicket.update({
+        where: { id: ticket.id },
+        data: {
+          state: 'QR_EXPIRED',
+          lastError: QR_STATE_MESSAGES.QR_EXPIRED,
+          qrcodeKeyCiphertext: null,
+          qrcodeKeyKeyId: null,
+          lockedUntil: null,
+        },
+      });
+      this.logger.log(`[QR] qr_expired ticketId=${id} reason=local_ttl`);
+      return this.buildQrResult({
+        id: ticket.id,
+        state: 'QR_EXPIRED',
+        businessState: 'QR_EXPIRED',
+        code: 86038,
+        expiresAt: expiresAtMs,
+      });
+    }
+
+    if (!manual && !hasCachedCookie && ticket.nextPollAt.getTime() > nowMs) {
+      return this.buildQrResult({
+        id: ticket.id,
+        state: businessState,
+        businessState,
+        code: ticket.lastBiliCode,
+        expiresAt: expiresAtMs,
+        message: ticket.lastError || QR_STATE_MESSAGES[businessState],
+      });
+    }
+
+    // Atomic concurrency lock across concurrent polls / API restarts.
+    const lockUntil = new Date(nowMs + BILI_POLL_LOCK_MS);
+    const { count: locked } = await this.prisma.bilibiliQrTicket.updateMany({
+      where: {
+        id: ticket.id,
+        workspaceId,
+        userId,
+        OR: [{ lockedUntil: null }, { lockedUntil: { lte: now } }],
+      },
+      data: { lockedUntil: lockUntil },
+    });
+    if (!locked) {
+      return this.buildQrResult({
+        id: ticket.id,
+        state: businessState,
+        businessState,
+        code: ticket.lastBiliCode,
+        expiresAt: expiresAtMs,
+        message: ticket.lastError || QR_STATE_MESSAGES[businessState],
+      });
+    }
+
+    this.logger.log(`[QR] poll_started ticketId=${id} state=${businessState}`);
+    try {
+      // Resume verification/save directly if Bilibili already returned code=0 on an earlier poll.
+      if (hasCachedCookie) {
+        const cachedCookie = this.decryptTicketSecret(
+          'bili-qr-cookie',
+          workspaceId,
+          userId,
+          ticket.id,
+          ticket.tempCookieCiphertext,
+          ticket.tempCookieKeyId,
+        );
+        if (!cachedCookie) {
+          await this.prisma.bilibiliQrTicket.update({
+            where: { id: ticket.id },
+            data: {
+              state: 'VERIFY_FAILED',
+              lastError: '临时登录凭据已失效，请重新扫码',
+              tempCookieCiphertext: null,
+              tempCookieKeyId: null,
+              tempMid: null,
+              tempUname: null,
+            },
+          });
+          return this.buildQrResult({
+            id: ticket.id,
+            state: 'VERIFY_FAILED',
+            businessState: 'VERIFY_FAILED',
+            code: 0,
+            expiresAt: expiresAtMs,
+            canRetry: false,
+            message: '临时登录凭据已失效，请重新生成二维码扫码',
+          });
+        }
+        return await this.verifyAndSaveTicket({
+          workspaceId,
+          userId,
+          ticketId: ticket.id,
+          groupId: ticket.groupId,
+          expiresAtMs,
+          cookieHeader: cachedCookie,
+          existingMid: ticket.tempMid,
+          existingUname: ticket.tempUname,
+          currentState: businessState,
+        });
+      }
+
+      const qrcodeKey = this.decryptTicketSecret(
+        'bili-qr',
+        workspaceId,
+        userId,
+        ticket.id,
+        ticket.qrcodeKeyCiphertext,
+        ticket.qrcodeKeyKeyId,
+      );
+      if (!qrcodeKey) {
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=${id} stage=poll reason=missing_qrcode_key`);
+        await this.prisma.bilibiliQrTicket.update({
+          where: { id: ticket.id },
+          data: { state: 'VERIFY_FAILED', lastError: '扫码票据密钥已失效，请重新生成二维码' },
+        });
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'VERIFY_FAILED',
+          businessState: 'VERIFY_FAILED',
+          code: null,
+          expiresAt: expiresAtMs,
+          canRetry: false,
+          message: '扫码票据状态不可恢复，请重新生成二维码',
+        });
+      }
+
+      const url = new URL('https://passport.bilibili.com/x/passport-login/web/qrcode/poll');
+      url.searchParams.set('qrcode_key', qrcodeKey);
+
+      const upstreamStart = Date.now();
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          headers: biliWebHeaders,
+          redirect: 'manual',
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch (error) {
+        const durationMs = Date.now() - upstreamStart;
+        if (isTimeoutError(error)) {
+          this.logger.warn(`[QR] upstream_timeout ticketId=${id} stage=poll durationMs=${durationMs}`);
+          return this.buildQrResult({
+            id: ticket.id,
+            state: 'NETWORK_ERROR',
+            businessState,
+            code: ticket.lastBiliCode,
+            expiresAt: expiresAtMs,
+            retryAfterMs: 3000,
+            canRetry: true,
+            message: '查询 B 站扫码状态超时，二维码仍有效，正在重试…',
+          });
+        }
+        this.logger.warn(`[QR] network_error ticketId=${id} stage=poll errorType=${errorName(error)} durationMs=${durationMs}`);
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'NETWORK_ERROR',
+          businessState,
+          code: ticket.lastBiliCode,
+          expiresAt: expiresAtMs,
+          retryAfterMs: 3000,
+          canRetry: true,
+          message: QR_STATE_MESSAGES.NETWORK_ERROR,
+        });
+      }
+
+      const durationMs = Date.now() - upstreamStart;
+      if (response.status === 429 || response.status === 412) {
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=${id} stage=poll httpStatus=${response.status} durationMs=${durationMs}`);
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'RATE_LIMITED',
+          businessState,
+          code: ticket.lastBiliCode,
+          expiresAt: expiresAtMs,
+          retryAfterMs: 5000,
+          canRetry: true,
+          message: `B 站查询受限（HTTP ${response.status}），将自动放慢重试频率`,
+        });
+      }
+      if (!response.ok) {
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=${id} stage=poll httpStatus=${response.status} durationMs=${durationMs}`);
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'NETWORK_ERROR',
+          businessState,
+          code: ticket.lastBiliCode,
+          expiresAt: expiresAtMs,
+          retryAfterMs: 3500,
+          canRetry: true,
+          message: `B 站扫码状态接口返回 HTTP ${response.status}，二维码仍有效，将重试查询`,
+        });
+      }
+
+      const rawJson = await response.json().catch(() => null);
+      const payload = qrPollResponseSchema.safeParse(rawJson);
+      if (!payload.success) {
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=${id} stage=poll httpStatus=${response.status} durationMs=${durationMs} reason=invalid_json`);
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'NETWORK_ERROR',
+          businessState,
+          code: ticket.lastBiliCode,
+          expiresAt: expiresAtMs,
+          retryAfterMs: 3500,
+          canRetry: true,
+          message: 'B 站扫码接口返回非预期数据，二维码仍有效，将重试查询',
+        });
+      }
+
+      const code = payload.data.data.code;
+      this.logger.log(`[QR] poll_response ticketId=${id} code=${code} httpStatus=${response.status} durationMs=${durationMs}`);
+
+      if (code === 86101) {
+        assertQrTransition(businessState, 'WAITING_SCAN');
+        await this.prisma.bilibiliQrTicket.update({
+          where: { id: ticket.id },
+          data: { state: 'WAITING_SCAN', lastBiliCode: 86101, lastError: null },
+        });
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'WAITING_SCAN',
+          businessState: 'WAITING_SCAN',
+          code: 86101,
+          expiresAt: expiresAtMs,
+        });
+      }
+
+      if (code === 86090) {
+        assertQrTransition(businessState, 'SCANNED');
+        await this.prisma.bilibiliQrTicket.update({
+          where: { id: ticket.id },
+          data: { state: 'SCANNED', lastBiliCode: 86090, lastError: null },
+        });
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'SCANNED',
+          businessState: 'SCANNED',
+          code: 86090,
+          expiresAt: expiresAtMs,
+        });
+      }
+
+      if (code === 86038) {
+        assertQrTransition(businessState, 'QR_EXPIRED');
+        await this.prisma.bilibiliQrTicket.update({
+          where: { id: ticket.id },
+          data: {
+            state: 'QR_EXPIRED',
+            lastBiliCode: 86038,
+            lastError: QR_STATE_MESSAGES.QR_EXPIRED,
+            qrcodeKeyCiphertext: null,
+            qrcodeKeyKeyId: null,
+          },
+        });
+        this.logger.log(`[QR] qr_expired ticketId=${id} code=86038`);
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'QR_EXPIRED',
+          businessState: 'QR_EXPIRED',
+          code: 86038,
+          expiresAt: expiresAtMs,
+        });
+      }
+
+      if (code === -412 || code === -509 || code === -799) {
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'RATE_LIMITED',
+          businessState,
+          code,
+          expiresAt: expiresAtMs,
+          retryAfterMs: 5000,
+          canRetry: true,
+          message: payload.data.data.message || `B 站扫码查询受限（${code}），稍后自动重试`,
+        });
+      }
+
+      if (code !== 0) {
+        const msg = payload.data.data.message || `B 站返回异常状态码（${code}）`;
+        this.logger.warn(`[QR] upstream_invalid_response ticketId=${id} code=${code}`);
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'NETWORK_ERROR',
+          businessState,
+          code,
+          expiresAt: expiresAtMs,
+          retryAfterMs: 3500,
+          canRetry: true,
+          message: msg,
+        });
+      }
+
+      // code === 0: Login confirmed by Bilibili app!
+      const extracted = extractCookiesFromResponse(response, payload.data.data.url);
+      if (!extracted.cookieHeader || !extracted.hasSessdata) {
+        this.logger.warn(`[QR] cookie_extract_failed ticketId=${id} stage=cookie_extract hasSessdata=${extracted.hasSessdata}`);
+        assertQrTransition(businessState, 'VERIFYING');
+        await this.prisma.bilibiliQrTicket.update({
+          where: { id: ticket.id },
+          data: {
+            state: 'VERIFY_FAILED',
+            lastBiliCode: 0,
+            lastError: 'B 站已确认扫码，但未提取到有效登录 Cookie（缺少 SESSDATA），请重新扫码或改用 Cookie 导入',
+            qrcodeKeyCiphertext: null,
+            qrcodeKeyKeyId: null,
+          },
+        });
+        return this.buildQrResult({
+          id: ticket.id,
+          state: 'VERIFY_FAILED',
+          businessState: 'VERIFY_FAILED',
+          code: 0,
+          expiresAt: expiresAtMs,
+          canRetry: false,
+          message: 'B 站已确认扫码，但未提取到有效登录 Cookie（缺少 SESSDATA），请重新生成二维码或改用 Cookie 导入',
+        });
+      }
+
+      this.logger.log(
+        `[QR] cookie_extract_success ticketId=${id} hasSessdata=${extracted.hasSessdata} hasBiliJct=${extracted.hasBiliJct} hasDedeUserId=${extracted.hasDedeUserId}`,
+      );
+      assertQrTransition(businessState, 'VERIFYING');
+      const tempCookieCiphertext = encryptPlatformSecret(
+        ['bili-qr-cookie', workspaceId, userId, ticket.id],
+        extracted.cookieHeader,
+      );
+      await this.prisma.bilibiliQrTicket.update({
+        where: { id: ticket.id },
+        data: {
+          state: 'VERIFYING',
+          lastBiliCode: 0,
+          lastError: null,
+          qrcodeKeyCiphertext: null,
+          qrcodeKeyKeyId: null,
+          tempCookieCiphertext,
+          tempCookieKeyId: platformKeyId,
+        },
+      });
+
+      return await this.verifyAndSaveTicket({
+        workspaceId,
+        userId,
+        ticketId: ticket.id,
+        groupId: ticket.groupId,
+        expiresAtMs,
+        cookieHeader: extracted.cookieHeader,
+        currentState: 'VERIFYING',
+      });
     } finally {
-      ticket.busy = false;
-      ticket.nextPollAt = Date.now() + 1500;
+      await this.prisma.bilibiliQrTicket.updateMany({
+        where: { id: ticket.id, workspaceId, userId },
+        data: {
+          lockedUntil: null,
+          nextPollAt: new Date(Date.now() + BILI_POLL_INTERVAL_MS),
+        },
+      }).catch(() => {});
     }
   }
 
