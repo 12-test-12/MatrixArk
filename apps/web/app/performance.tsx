@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { BarChart3, ChevronRight, HelpCircle, UsersRound } from 'lucide-react';
+import { BarChart3, CheckCircle2, ChevronRight, Eye, Heart, HelpCircle, Layers3, UsersRound } from 'lucide-react';
 import { api, ApiError, canRecord, cleanAccountName, formatPlatformAccount, formatTime, platformLabel, post, publishPlatformLabel, useAction, useResource, type Account, type MatrixGroup, type Role, type Task } from './api';
 import { pushToast } from './toast';
-import { Empty, Feedback, Loading, PageHeader, PlatformIcon } from './ui';
+import { askConfirm } from './confirm-dialog';
+import { Empty, Feedback, Loading, PageHeader, PlatformIcon, StatGrid, type StatCardItem } from './ui';
 
 const fields = [
   ['views', '阅读 / 播放'], ['likes', '点赞'], ['comments', '评论'], ['favorites', '收藏'], ['shares', '分享'],
@@ -547,7 +548,6 @@ function MetricNumbers({ values, video }: { values?: MetricValues | null; video:
 function MetricsForm({ work, scope, onSaved }: { work: Work; scope: string; onSaved: () => void }) {
   const action = useAction();
   const [error, setError] = useState('');
-  const [anomalyWarning, setAnomalyWarning] = useState('');
   const path = scope + '/tasks/' + encodeURIComponent(work.id) + '/metrics';
   const metrics = work.result.metrics;
   const isVideo = Boolean(work.variant.videoAssetId);
@@ -558,7 +558,7 @@ function MetricsForm({ work, scope, onSaved }: { work: Work; scope: string; onSa
   const today = localDateValue(new Date());
   const minDate = localDateValue(new Date(Date.now() - 365 * 86_400_000));
 
-  function save(event: FormEvent<HTMLFormElement>) {
+  async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const values = Object.fromEntries(fields.map(([field]) => {
@@ -569,23 +569,35 @@ function MetricsForm({ work, scope, onSaved }: { work: Work; scope: string; onSa
       setError('至少填写一项成效数据。');
       return;
     }
+    const recordedDate = String(form.get('recordedDate') ?? '').trim();
     const views = values.views;
     const engagementHigh = views !== null && (
       (values.likes ?? 0) > views || (values.comments ?? 0) > views
       || (values.favorites ?? 0) > views || (values.shares ?? 0) > views
     );
-    if (engagementHigh && !anomalyWarning) {
-      setError('');
-      setAnomalyWarning(`检测到点赞、评论、收藏或分享高于${isVideo ? '播放' : '阅读'}量，常见于填串列或漏填；请核对后再次点击下方按钮确认保存。`);
-      return;
+    if (engagementHigh) {
+      const viewName = isVideo ? '播放' : '阅读';
+      const confirmed = await askConfirm({
+        tone: 'warning',
+        badge: '数值异常复核',
+        title: `互动量高于${viewName}量，确认保存吗？`,
+        target: `${formatPlatformAccount(platformLabel[work.variant.platform], work.account.displayName)} · ${recordedDate || today}`,
+        description: `检测到点赞、评论、收藏或分享高于${viewName}量，常见于填串列或漏填。请核对下方数值是否符合真实后台数据。`,
+        impacts: [
+          `${viewName}：${views.toLocaleString('zh-CN')}`,
+          `互动：赞 ${values.likes ?? '—'} · 评 ${values.comments ?? '—'} · 藏 ${values.favorites ?? '—'} · 享 ${values.shares ?? '—'}`,
+          '确认保存后将写入该统计日期的手动成效快照',
+        ],
+        confirmLabel: '确认数值并保存',
+        cancelLabel: '返回核对',
+      });
+      if (!confirmed) return;
     }
-    const recordedDate = String(form.get('recordedDate') ?? '').trim();
     const body: Record<string, unknown> = { ...values };
     if (recordedDate && recordedDate !== today) {
       body.recordedAt = new Date(`${recordedDate}T12:00:00`).toISOString();
     }
     setError('');
-    setAnomalyWarning('');
     sync.reset();
     void action.run(async () => {
       await api(path, { method: 'PATCH', body });
@@ -596,7 +608,7 @@ function MetricsForm({ work, scope, onSaved }: { work: Work; scope: string; onSa
   return <details className="work-metrics-editor">
     <summary>记录 / 补录成效</summary>
     <div className="work-metrics-fields">
-      <form className="form-stack" onSubmit={save} onChange={() => { setError(''); setAnomalyWarning(''); action.reset(); }}>
+      <form className="form-stack" onSubmit={(event) => void save(event)} onChange={() => { setError(''); action.reset(); }}>
         <p className="muted small" id={'metrics-hint-' + work.id}>
           归属账号：{formatPlatformAccount(platformLabel[work.variant.platform], work.account.displayName)}。可选择具体统计日期进行补录（空白表示未采集，实际为零填 0），保存时自动记入当前登录账号。
         </p>
@@ -612,11 +624,10 @@ function MetricsForm({ work, scope, onSaved }: { work: Work; scope: string; onSa
               defaultValue={metrics?.[field] ?? ''} disabled={action.busy || sync.busy} />
           </label>)}
         </div>
-        {anomalyWarning && <div role="alert" className="feedback">{anomalyWarning}</div>}
         <Feedback error={error || action.error || sync.error} notice={action.notice || sync.notice} />
         <div className="actions">
           <button className="button primary compact" disabled={action.busy || sync.busy}>
-            {action.busy ? '保存中…' : anomalyWarning ? '确认异常数值并保存' : '保存手动录入'}
+            {action.busy ? '保存中…' : '保存手动录入'}
           </button>
           {canSync && <button type="button" className="button compact" disabled={action.busy || sync.busy}
             onClick={() => {
@@ -660,22 +671,23 @@ function AccountMatrixTable({ rows, onInspectAccount }: {
         <span className="count">{rows.length} 个账号</span>
       </div>
       <div className="table-well">
+        <div className="table-scroll" role="region" aria-label="全矩阵账号对比表" tabIndex={0}>
         <table className="perf-account-table">
           <thead>
             <tr>
-              <th>发布账号 / 负责人</th>
-              <th>平台</th>
-              <th className="num">已发布 / 已采集</th>
-              <th className="num">累计阅读 / 播放</th>
-              <th className="num">累计互动（赞 · 评 · 藏 · 享）</th>
-              <th>最近更新（日期 · 录入账号）</th>
-              <th className="num">操作</th>
+              <th scope="col">发布账号 / 负责人</th>
+              <th scope="col">平台</th>
+              <th scope="col" className="num">已发布 / 已采集</th>
+              <th scope="col" className="num">累计阅读 / 播放</th>
+              <th scope="col" className="num">累计互动（赞 · 评 · 藏 · 享）</th>
+              <th scope="col">最近更新（日期 · 录入账号）</th>
+              <th scope="col" className="num">操作</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((row) => (
               <tr key={row.accountId}>
-                <td>
+                <th scope="row">
                   <div className="perf-account-cell">
                     <PlatformIcon platform={row.platform} />
                     <div>
@@ -686,7 +698,7 @@ function AccountMatrixTable({ rows, onInspectAccount }: {
                       </small>
                     </div>
                   </div>
-                </td>
+                </th>
                 <td><span className="badge gray">{platformLabel[row.platform]}</span></td>
                 <td className="num tabular">{number.format(row.published)} / {number.format(row.tracked)}</td>
                 <td className="num tabular"><strong>{count(row.views)}</strong></td>
@@ -712,6 +724,7 @@ function AccountMatrixTable({ rows, onInspectAccount }: {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </section>
   );
@@ -754,6 +767,48 @@ export function Performance({ scope, role, initialAccount, openTask }: {
 
   const summaryCards = (content ? allSummary.data?.summary : result.data?.summary) ?? result.data?.summary ?? [];
   const accountSummaryRows = result.data?.accountSummary ?? [];
+  const totalPublished = summaryCards.reduce((sum, item) => sum + item.published, 0);
+  const totalTracked = summaryCards.reduce((sum, item) => sum + item.tracked, 0);
+  const articleSummary = summaryCards.find((item) => item.content === 'article');
+  const videoSummary = summaryCards.find((item) => item.content === 'video');
+  const totalInteractions = summaryCards.reduce(
+    (sum, item) => sum + (item.likes ?? 0) + (item.comments ?? 0) + (item.favorites ?? 0) + (item.shares ?? 0),
+    0,
+  );
+  const overviewStats: StatCardItem[] = [
+    {
+      key: 'published',
+      label: '真实已发布作品',
+      value: result.data ? number.format(totalPublished) : '—',
+      note: '仅统计真实通道（不含沙箱演练）',
+      icon: Layers3,
+      tone: 'neutral',
+    },
+    {
+      key: 'tracked',
+      label: '已采集成效作品',
+      value: result.data ? number.format(totalTracked) : '—',
+      note: result.data && totalPublished > 0 ? `采集覆盖 ${Math.round((totalTracked / totalPublished) * 100)}%` : '等待手动录入或平台同步',
+      icon: CheckCircle2,
+      tone: totalTracked > 0 ? 'green' : 'neutral',
+    },
+    {
+      key: 'views',
+      label: '图文阅读 / 视频播放',
+      value: result.data ? `${count(articleSummary?.views ?? null)} / ${count(videoSummary?.views ?? null)}` : '—',
+      note: '分体裁统计，未采集项记为「—」',
+      icon: Eye,
+      tone: 'violet',
+    },
+    {
+      key: 'interactions',
+      label: '已采集互动总计',
+      value: result.data && totalTracked > 0 ? number.format(totalInteractions) : '—',
+      note: '赞 + 评 + 藏 + 享（不含未采集项）',
+      icon: Heart,
+      tone: 'sky',
+    },
+  ];
   const refreshAll = () => {
     result.refresh();
     if (content) allSummary.refresh();
@@ -763,6 +818,7 @@ export function Performance({ scope, role, initialAccount, openTask }: {
     <PageHeader title="作品成效" description="查看已发布作品的阅读、播放和互动，按平台、账号或时间复盘。">
       <button type="button" className="button" onClick={() => { refreshAll(); pushToast('成效数据已刷新', 'info', 2200); }}>刷新数据</button>
     </PageHeader>
+    <StatGrid items={overviewStats} columns={4} label="作品成效核心指标" />
     <p className="perf-scope-note muted small">
       统计范围：仅纳入真实通道（人工交接 / 官方直发）且状态为「已发布」的作品；沙箱模拟及未完成任务不会计入下方统计与数量对比。
       官方直发按平台发表时间计入时间范围，人工交接作品没有平台发表时间，按回填时间计入。

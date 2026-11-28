@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import type { ReactNode } from 'react';
+import { ConfirmViewport } from './confirm-dialog';
 import { ToastViewport } from './toast';
 import './globals.css';
 
@@ -20,6 +21,6 @@ const restoreTheme = `try {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return <html lang="zh-CN" suppressHydrationWarning>
     <head><script dangerouslySetInnerHTML={{ __html: restoreTheme }} /></head>
-    <body>{children}<ToastViewport /></body>
+    <body>{children}<ToastViewport /><ConfirmViewport /></body>
   </html>;
 }

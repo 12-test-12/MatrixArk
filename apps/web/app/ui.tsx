@@ -97,3 +97,59 @@ export function TaskBadge({ status }: { status: TaskStatus }) {
           : status === 'under_review' || status === 'submitted' ? 'sky' : 'gray';
   return <span className={`badge ${tone}`}><span className="badge-dot" aria-hidden="true" />{taskLabel[status]}</span>;
 }
+
+export type StatTone = 'neutral' | 'violet' | 'green' | 'amber' | 'red' | 'sky';
+
+export type StatCardItem = {
+  key: string;
+  label: string;
+  value: string | number;
+  note?: string;
+  tone?: StatTone;
+  icon: LucideIcon;
+  active?: boolean;
+  onClick?: () => void;
+};
+
+export function StatGrid({ items, columns = 5, label }: {
+  items: StatCardItem[];
+  columns?: 4 | 5;
+  label: string;
+}) {
+  return (
+    <div className={`stat-grid stat-cols-${columns}`} role="region" aria-label={label}>
+      {items.map((item) => {
+        const Icon = item.icon;
+        const tone = item.tone ?? 'neutral';
+        const content = <>
+          <div className="stat-card-top">
+            <span className="stat-card-label">{item.label}</span>
+            <span className={`stat-card-icon tone-${tone}`} aria-hidden="true">
+              <Icon size={15} />
+            </span>
+          </div>
+          <strong className="stat-card-value">{item.value}</strong>
+          {item.note && <small className="stat-card-note">{item.note}</small>}
+        </>;
+        if (item.onClick) {
+          return (
+            <button
+              key={item.key}
+              type="button"
+              aria-pressed={item.active}
+              className={`card stat-card is-interactive tone-${tone}${item.active ? ' active' : ''}`}
+              onClick={item.onClick}
+            >
+              {content}
+            </button>
+          );
+        }
+        return (
+          <div key={item.key} className={`card stat-card tone-${tone}`}>
+            {content}
+          </div>
+        );
+      })}
+    </div>
+  );
+}

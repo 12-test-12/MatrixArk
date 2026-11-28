@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { Bot, ImageOff, Telescope } from 'lucide-react';
+import { Bot, BookmarkCheck, ImageOff, Layers3, Sparkles, Telescope } from 'lucide-react';
 import { api, formatTime, messageOf, post, useAction, useResource } from './api';
 import { readCreatorHubReport, topicMediaTypes, topicPlatforms, type ImportedWork, type TopicWork } from './creatorhub-report';
 import { TopicAiGoal, TopicAiPanel, TopicAiSettings, useTopicAiAnalysis, type TopicAiStatus } from './topic-ai';
@@ -7,7 +7,7 @@ import { pushToast } from './toast';
 import { useTopicNotes } from './topic-notes';
 import { TopicSources } from './topic-sources';
 import { TopicChanges, TopicInsights } from './topic-insights';
-import { Empty, Feedback, Loading, PageHeader } from './ui';
+import { Empty, Feedback, Loading, PageHeader, StatGrid, type StatCardItem } from './ui';
 
 function titleOf(item: TopicWork) {
   return item.description.split('\n', 1)[0]?.trim() || '无作品描述';
@@ -257,6 +257,41 @@ export function Topics({ scope, openManuscript, canConfigureAi, view, selected, 
   const list = useResource<{ items: TopicWork[]; total: number }>(invalidDates ? null : path + '?' + search, 10_000);
   const items = list.data?.items ?? [];
   const selectedItem = items.find(({ id }) => id === selected) ?? items[0];
+  const savedInView = items.filter((item) => Boolean(item.savedAt)).length;
+  const topicStats: StatCardItem[] = [
+    {
+      key: 'total',
+      label: saved ? '选题池匹配总数' : '对标作品总数',
+      value: list.data ? list.data.total.toLocaleString('zh-CN') : '—',
+      note: list.data && list.data.total > items.length ? `接口当前最多返回最近 ${items.length} 条` : '基于当前筛选条件实时统计',
+      icon: Layers3,
+      tone: 'neutral',
+    },
+    {
+      key: 'loaded',
+      label: '当前可分析样本',
+      value: list.data ? items.length.toLocaleString('zh-CN') : '—',
+      note: '支持即时样本统计与 AI 拆解',
+      icon: Telescope,
+      tone: 'sky',
+    },
+    {
+      key: 'saved',
+      label: '已收藏到选题池',
+      value: list.data ? savedInView.toLocaleString('zh-CN') : '—',
+      note: '当前列表内已收藏条目',
+      icon: BookmarkCheck,
+      tone: savedInView > 0 ? 'green' : 'neutral',
+    },
+    {
+      key: 'ai',
+      label: 'AI 拆解模型',
+      value: ai.data?.provider ? (activeGoal ? '分析中' : '已就绪') : '待配置',
+      note: ai.data?.model ? `当前模型：${ai.data.model}` : '未配置模型时不生成虚假分析',
+      icon: Sparkles,
+      tone: ai.data?.provider ? 'violet' : 'amber',
+    },
+  ];
   const workPath = !showCollection && selectedItem ? path + '/' + selectedItem.id : null;
   const analysis = useTopicAiAnalysis(workPath, selectedItem?.id === selected ? activeGoal : '', ai.data?.model ?? null);
 
@@ -355,6 +390,7 @@ export function Topics({ scope, openManuscript, canConfigureAi, view, selected, 
       <button type="button" className={showCollection ? 'active' : ''} aria-pressed={showCollection}
         onClick={() => onView('collection')}>采集与导入</button>
     </div>
+    {!showCollection && <StatGrid items={topicStats} columns={4} label="选题台数据概览" />}
     <div className="topic-view" hidden={showCollection}>
     <section className="card form-card form-stack">
       <div className="form-stack" role="group" aria-label="作品筛选">
@@ -410,7 +446,7 @@ export function Topics({ scope, openManuscript, canConfigureAi, view, selected, 
             className={`list-item${selectedItem?.id === item.id ? ' selected' : ''}`}
             aria-pressed={selectedItem?.id === item.id} onClick={() => onSelect(item.id)}>
             <TopicCover key={coverOf(item)} url={coverOf(item)} platform={item.platform} />
-            <span className="list-copy"><strong>{titleOf(item)}</strong>
+            <span className="list-copy"><strong title={titleOf(item)}>{titleOf(item)}</strong>
               <small>{topicPlatforms[item.platform]} · {item.creator ?? '作者未记录'}{item.savedAt ? ' · 已收藏' : ''}</small>
               <small>{[item.publishedOn?.slice(0, 10), item.views != null ? `${item.views.toLocaleString('zh-CN')} ${item.mediaType === 'video' ? '次播放' : '次阅读'}`
                 : item.likes != null ? `${item.likes.toLocaleString('zh-CN')} 次点赞` : null,

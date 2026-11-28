@@ -1,6 +1,7 @@
 import { useId, useState, type FormEvent } from 'react';
 import { api, formatTime, post, useAction, useResource } from './api';
 import { pushToast } from './toast';
+import { askConfirm } from './confirm-dialog';
 import { Feedback, Loading } from './ui';
 import { TopicChanges } from './topic-insights';
 
@@ -57,8 +58,20 @@ export function TopicSources({ scope, refreshWorks }: { scope: string; refreshWo
     });
   }
 
-  function remove(source: Source) {
-    if (!window.confirm(`删除采集任务「${source.target}」？任务将停止执行，已采集的作品仍可查看。`)) return;
+  async function remove(source: Source) {
+    const ok = await askConfirm({
+      tone: 'danger',
+      badge: '停止并删除',
+      title: '删除采集任务？',
+      target: `${targets[source.provider]?.label ?? source.provider} · ${source.target}`,
+      description: '删除后 Worker 将停止继续拉取该来源的新作品。',
+      impacts: [
+        '已采集入库的作品、截图与 AI 分析记录保留在选题台',
+        '如有需要，后续可随时重新添加同名来源任务',
+      ],
+      confirmLabel: '确认删除任务',
+    });
+    if (!ok) return;
     setNotice('');
     void action.run(async () => {
       await api(path + '/' + source.id, { method: 'DELETE' });

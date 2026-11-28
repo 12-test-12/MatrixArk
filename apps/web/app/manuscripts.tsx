@@ -1,14 +1,15 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import {
-  ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarPlus, ChevronRight, CircleCheck, FileText, ImagePlus, Images, PencilLine, Plus,
-  ShieldCheck, Sparkles,
+  ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarPlus, ChevronRight, CircleCheck, Clock3, FileText, ImagePlus, Images, PencilLine, Plus,
+  RotateCcw, ShieldCheck, Sparkles,
 } from 'lucide-react';
 import {
   api, canEdit, canReview, cleanAccountName, fileBody, formatTime, imageUrl, platforms, post, publishPlatformLabel, useAction, useResource,
   type Account, type Manuscript, type ManuscriptSummary, type ManuscriptVariant, type MatrixGroup, type Platform, type Role, type Variant,
 } from './api';
 import { pushToast } from './toast';
-import { Empty, Feedback, Loading, PageHeader, PlatformIcon, ReviewPicture } from './ui';
+import { askConfirm } from './confirm-dialog';
+import { Empty, Feedback, Loading, PageHeader, PlatformIcon, ReviewPicture, StatGrid, type StatCardItem } from './ui';
 
 type ReviewFilter = 'all' | 'pending' | 'returned';
 
@@ -457,10 +458,25 @@ function ManuscriptDetail({ scope, role, id, accounts, drafts, reviewFilter, cha
     action.reset(); setPlatform(next); setEditing(focus ? null : false); setRejecting(false);
     if (focus) platformOptions.current?.querySelector<HTMLButtonElement>(`[data-platform="${next}"]`)?.focus();
   }
-  function archive() {
+  async function archive() {
     if (!manuscript) return;
     const restoring = Boolean(manuscript.archivedAt);
-    if (!restoring && !window.confirm(`归档「${manuscript.title}」？待发任务会暂停，历史任务和稿件资料仍可查看。`)) return;
+    if (!restoring) {
+      const ok = await askConfirm({
+        tone: 'warning',
+        badge: '原稿归档',
+        title: '归档当前原稿？',
+        target: manuscript.title,
+        description: '归档后原稿会从「在用稿件」隐藏，关联的未执行待发任务将自动暂停调度。',
+        impacts: [
+          '待派发排期任务自动暂停，防止误发旧内容',
+          '版本快照、审核意见与历史回执完整保留',
+          '随时可在「已归档原稿」恢复继续使用',
+        ],
+        confirmLabel: '确认归档原稿',
+      });
+      if (!ok) return;
+    }
     void action.run(async () => {
       const path = scope + '/manuscripts/' + id;
       await api(restoring ? path + '/restore' : path, { method: restoring ? 'PATCH' : 'DELETE' });
@@ -737,6 +753,43 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
   const start = () => setCreating(true);
   const emptyTitle = showArchived ? '暂无已归档稿件' : reviewFilter === 'pending' ? '暂无待审核原稿'
     : reviewFilter === 'returned' ? '暂无需要你修改的稿件' : '暂无原稿';
+  const pendingManuscripts = items.filter((item) => item.variants.some((v) => v.status === 'draft' && !v.returned)).length;
+  const returnedManuscripts = items.filter((item) => item.variants.some((v) => v.status !== 'superseded' && v.returned)).length;
+  const approvedManuscripts = items.filter((item) => item.variants.some((v) => v.status === 'approved')).length;
+  const manuscriptStats: StatCardItem[] = [
+    {
+      key: 'page-total',
+      label: showArchived ? '本页已归档原稿' : '本页原稿数',
+      value: list.data ? items.length : '—',
+      note: `第 ${pages.length + 1} 页（每页最多 20 条）`,
+      icon: FileText,
+      tone: 'neutral',
+    },
+    {
+      key: 'pending',
+      label: '含待审核版本',
+      value: list.data ? pendingManuscripts : '—',
+      note: '待审核人逐版确认快照',
+      icon: Clock3,
+      tone: pendingManuscripts > 0 ? 'amber' : 'neutral',
+    },
+    {
+      key: 'returned',
+      label: '含退回待修改',
+      value: list.data ? returnedManuscripts : '—',
+      note: '修改保存后将形成新版本',
+      icon: RotateCcw,
+      tone: returnedManuscripts > 0 ? 'red' : 'neutral',
+    },
+    {
+      key: 'approved',
+      label: '已有已审核版本',
+      value: list.data ? approvedManuscripts : '—',
+      note: '可按版本锁定规则安排排期',
+      icon: CircleCheck,
+      tone: approvedManuscripts > 0 ? 'green' : 'neutral',
+    },
+  ];
   function changePage(next: string[]) {
     setPages(next); setSelection(''); setCreating(false); setReviewNotice('');
   }
@@ -759,6 +812,7 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
     </div>}
     <Feedback error={listError} notice={reviewNotice} />
     {list.error && <button type="button" className="button compact" onClick={list.refresh}>重试加载原稿</button>}
+    <StatGrid items={manuscriptStats} columns={4} label="原稿审核状态概览" />
     <div className="split-panel">
       <section className="card item-list">
         <div className="card-heading"><h2>{showArchived ? '已归档原稿' : '原稿列表'}</h2><span className="count">{items.length}</span></div>
@@ -772,7 +826,7 @@ export function Manuscripts({ scope, role, accounts, drafts, openTasks, openAcco
           return <button key={item.id} className={`list-item ${active === item.id && !creating ? 'selected' : ''}`}
             aria-pressed={active === item.id && !creating} onClick={() => { setSelection(item.id); setCreating(false); setReviewNotice(''); }}>
             <span className="list-icon"><FileText size={18} aria-hidden="true" /></span>
-            <span className="list-copy"><strong>{item.title}</strong><small>{item.videoAssetId ? '视频 · ' : ''}{item.assetCount} 张图片 · {variants.length
+            <span className="list-copy"><strong title={item.title}>{item.title}</strong><small>{item.videoAssetId ? '视频 · ' : ''}{item.assetCount} 张图片 · {variants.length
               ? `${variants.length} 个版本 · ${review || '已审核'}` : '未生成版本'}</small></span>
             <ChevronRight className="row-chevron" size={15} aria-hidden="true" />
           </button>;

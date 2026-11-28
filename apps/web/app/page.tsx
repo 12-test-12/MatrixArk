@@ -122,9 +122,9 @@ function SignIn({ onSession, onClose, initialError }: {
   </dialog>;
 }
 
-function WorkspaceBody({ workspace, section, itemId, topicView, topicWorkId, onTopicView, onTopicWork, drafts, openTasks, openAccounts, openPerformance, openManuscript,
+function WorkspaceBody({ workspace, currentUserId, section, itemId, topicView, topicWorkId, onTopicView, onTopicWork, drafts, openTasks, openAccounts, openPerformance, openManuscript,
   openManuscripts, summary }: {
-  workspace: Workspace; section: Section; itemId: string; openTasks: (id: string) => void; openAccounts: () => void;
+  workspace: Workspace; currentUserId: string; section: Section; itemId: string; openTasks: (id: string) => void; openAccounts: () => void;
   topicView: TopicView; topicWorkId: string; onTopicView: (view: TopicView) => void; onTopicWork: (id: string) => void;
   drafts: ManuscriptDrafts; openPerformance: (id: string) => void; openManuscript: (id: string) => void;
   openManuscripts: () => void; summary: ReturnType<typeof useResource<WorkbenchSummary>>;
@@ -138,7 +138,7 @@ function WorkspaceBody({ workspace, section, itemId, topicView, topicWorkId, onT
   if (section === 'tasks') return <Tasks scope={scope} role={workspace.role} initialId={itemId} trial={workspace.trial}
     openManuscripts={openManuscripts} counts={summary.data?.taskCounts} refreshSummary={summary.refresh} />;
   if (section === 'performance') return <Performance scope={scope} role={workspace.role} initialAccount={itemId} openTask={openTasks} />;
-  if (section === 'members') return <Members scope={scope} />;
+  if (section === 'members') return <Members scope={scope} role={workspace.role} currentUserId={currentUserId} />;
   if (section === 'monitor') return canMonitorWorker(workspace.role)
     ? <WorkerMonitor key={scope} scope={scope} openTask={openTasks} />
     : <section className="card"><Empty icon={Check} title="仅负责人与运营可查看运行监控" /></section>;
@@ -146,7 +146,7 @@ function WorkspaceBody({ workspace, section, itemId, topicView, topicWorkId, onT
     <PageHeader title="飞书提醒演练" description="交接提醒和 2 分钟未回填提醒会在任务详情里生成模拟投递记录。" />
     <p className="muted">要在飞书群里收到消息，请切回正式工作室，保存群机器人地址后点击「发一条测试消息」。</p>
     <div className="actions"><button type="button" className="button" onClick={() => openTasks('')}>查看发布任务</button></div>
-  </> : <FeishuSettings scope={scope} />;
+  </> : <FeishuSettings scope={scope} summary={summary.data} openTasks={openTasks} />;
   return <Accounts scope={scope} canManage={canEdit(workspace.role)} canConfigure={workspace.role === 'owner'}
     canReportRisk={canRecord(workspace.role)} trial={workspace.trial} resource={accounts} openPerformance={openPerformance} />;
 }
@@ -297,8 +297,9 @@ export default function Home() {
       <span>试用工作室 · 小红书练习审核与人工回填，B 站演示模拟投稿，飞书提醒记录在任务详情。</span>
       {section !== 'tasks' && <button type="button" className="button compact" onClick={() => openSection('tasks')}>查看示例任务</button>}
     </div>}
-    {section === 'profile' ? <Profile user={session.user} onSave={(user) => setSession((current) => current ? { ...current, user } : current)} />
-      : workspace && section ? <WorkspaceBody key={workspace.id} workspace={workspace} section={section} itemId={itemId} drafts={drafts}
+    {section === 'profile' ? <Profile user={session.user} workspaces={session.workspaces} activeWorkspace={workspace}
+        onSave={(user) => setSession((current) => current ? { ...current, user } : current)} />
+      : workspace && section ? <WorkspaceBody key={workspace.id} workspace={workspace} currentUserId={session.user.id} section={section} itemId={itemId} drafts={drafts}
       topicView={topicView} topicWorkId={topicWorkId} onTopicView={(view) => updateLocation({ topicView: view })}
       onTopicWork={(id) => updateLocation({ topicWorkId: id })}
       openPerformance={(id) => openSection('performance', id)} openManuscript={(id) => openSection('manuscripts', id)}

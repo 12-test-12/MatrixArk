@@ -15,6 +15,7 @@ import {
   type HealthCheckDiagnostics,
 } from './account-status';
 import { pushToast } from './toast';
+import { askConfirm } from './confirm-dialog';
 import { Feedback, Loading, PageHeader, PlatformIcon } from './ui';
 
 const accountPlatforms = {
@@ -1856,8 +1857,23 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
     }, `${name}演示账号已添加。`);
   }
 
-  function archive(account: Account) {
-    if (!showArchived && !window.confirm(`归档「${account.displayName}」？账号会从排期列表移除，历史任务可以继续查看。`)) return;
+  async function archive(account: Account) {
+    if (!showArchived) {
+      const targetName = account.alias ? `${account.alias}（${account.displayName}）` : account.displayName;
+      const ok = await askConfirm({
+        tone: 'warning',
+        badge: '账号归档',
+        title: '归档发布账号？',
+        target: targetName,
+        description: '归档后该账号会立即从可用排期列表移除，后续不再参与新任务的自动或人工派发。',
+        impacts: [
+          '历史发布记录、回执与成效统计仍完整保留',
+          '若需恢复排期，随时可切到「已归档账号」一键恢复',
+        ],
+        confirmLabel: '确认归档',
+      });
+      if (!ok) return;
+    }
     void archiveAction.run(async () => {
       const accountPath = accountsPath + '/' + account.id;
       await api(showArchived ? accountPath + '/restore' : accountPath, { method: showArchived ? 'PATCH' : 'DELETE' });
@@ -1889,8 +1905,21 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
     }, editingGroup ? '矩阵组已更新。' : '矩阵组已创建。');
   }
 
-  function deleteGroup(group: MatrixGroup) {
-    if (!window.confirm(`删除矩阵组「${group.name}」？组内账号不会被删除，将转为「未分组」。`)) return;
+  async function deleteGroup(group: MatrixGroup) {
+    const ok = await askConfirm({
+      tone: 'danger',
+      badge: '危险操作',
+      title: '删除矩阵组？',
+      target: `${group.name}（${group.accountCount} 个账号）`,
+      description: '删除矩阵组仅解除分组归属，不会删除或归档组内任何发布账号。',
+      impacts: [
+        '组内所有账号将自动转为「未分组」',
+        '账号原有授权状态与排期任务不受影响',
+        '该分组名称与颜色标识将被永久移除',
+      ],
+      confirmLabel: '确认删除分组',
+    });
+    if (!ok) return;
     void groupAction.run(async () => {
       await api(`${groupsPath}/${group.id}`, { method: 'DELETE' });
       refreshAll();

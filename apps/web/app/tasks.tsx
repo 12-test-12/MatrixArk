@@ -267,6 +267,13 @@ function TaskActions({ task, path, role, changed }: { task: TaskDetail; path: st
   </div>;
 }
 
+function channelInfo(task: Pick<Task, 'executionChannel' | 'isSandbox' | 'status' | 'account'>) {
+  const channel = task.executionChannel ?? (task.status === 'scheduled' ? task.account.channelKind : null);
+  if (task.isSandbox || channel === 'sandbox') return { label: '沙箱演示', tone: 'gray' as const };
+  if (channel === 'official') return { label: '官方自动投稿', tone: 'violet' as const };
+  return { label: '人工交接', tone: 'amber' as const };
+}
+
 function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
   id: string; scope: string; role: Role; onRecorded: (title: string) => void; people: Map<string, string>; trial?: boolean;
 }) {
@@ -287,6 +294,7 @@ function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
   const result = task.result;
   const resultUrl = externalUrl(result?.remoteUrl ?? null);
   const channel = task.executionChannel ?? (task.status === 'scheduled' ? task.account.channelKind : null);
+  const channelMeta = channelInfo(task);
   const automated = channel === 'official' || channel === 'sandbox';
   function actorName(actorId: string | null) {
     return actorId ? people.get(actorId) ?? '工作室成员' : '系统';
@@ -304,11 +312,17 @@ function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
         <h2>{task.variant.title?.trim() || '未命名任务'}</h2>
         <p>{formatPlatformAccount(publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId)), task.account.displayName)} · V{task.variant.version}</p>
       </div>
-      <TaskBadge status={task.status} />
+      <div className="actions">
+        <span className={`badge ${channelMeta.tone}`}>{channelMeta.label}</span>
+        <TaskBadge status={task.status} />
+      </div>
     </div>
     <div className="detail-content">
       <Feedback error={detail.error || task.lastError || undefined} />
-      {task.isSandbox && <p className="feedback">沙箱任务</p>}
+      {task.status === 'unknown' && <div className="feedback" role="status">
+        <span>平台回执尚未确认（网络超时或回调延迟），请先核对目标平台是否已发出，再到下方「核对发布结果」更新状态；切勿盲目重试导致重复投稿。</span>
+      </div>}
+      {task.isSandbox && <p className="feedback">沙箱演示任务：仅用于流程演练，不会向真实平台发布，也不计入作品成效。</p>}
       <dl className="task-meta">
         <div><dt>计划时间</dt><dd>{formatTime(task.scheduledAt)}</dd></div>
         {automated
@@ -560,23 +574,32 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
         {list.loading ? <Loading /> : !filteredItems.length ? empty : tableView ? <div className="table-well"><div className="table-scroll scroll-fade-x" tabIndex={0}
           role="region" aria-label="可横向滚动的任务明细">
           <table className="task-table" aria-label="发布任务明细">
-            <thead><tr>{['任务', '平台', '账号', '计划时间', '状态', '异常'].map((label) => <th scope="col" key={label}>{label}</th>)}</tr></thead>
-            <tbody>{filteredItems.map((task) => <tr key={task.id} className={active === task.id ? 'selected' : ''}>
-              <th scope="row"><button type="button" className="task-table-title" aria-pressed={active === task.id}
-                onClick={() => chooseTask(task.id)}>{task.variant.title?.trim() || '未命名任务'}</button></th>
+            <thead><tr>{['任务', '平台', '执行通道', '账号', '计划时间', '状态', '异常'].map((label) => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+            <tbody>{filteredItems.map((task) => {
+              const title = task.variant.title?.trim() || '未命名任务';
+              const meta = channelInfo(task);
+              return <tr key={task.id} className={active === task.id ? 'selected' : ''}>
+              <th scope="row"><button type="button" className="task-table-title" title={title} aria-pressed={active === task.id}
+                onClick={() => chooseTask(task.id)}>{title}</button></th>
               <td>{publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId))}</td>
+              <td><span className={`badge ${meta.tone}`}>{meta.label}</span></td>
               <td>{cleanAccountName(task.account.displayName)}</td>
               <td>{formatTime(task.scheduledAt)}</td>
               <td><TaskBadge status={task.status} /></td>
               <td className="task-table-error">{task.lastError || '—'}</td>
-            </tr>)}</tbody>
+            </tr>;
+            })}</tbody>
           </table>
-        </div></div> : <div className="list-well scroll-shadow-y">{filteredItems.map((task) => <button key={task.id} type="button" className={`list-item ${active === task.id ? 'selected' : ''}`}
+        </div></div> : <div className="list-well scroll-shadow-y">{filteredItems.map((task) => {
+          const title = task.variant.title?.trim() || '未命名任务';
+          const meta = channelInfo(task);
+          return <button key={task.id} type="button" className={`list-item ${active === task.id ? 'selected' : ''}`}
           aria-pressed={active === task.id} onClick={() => chooseTask(task.id)}>
           <span className="list-icon"><CalendarDays size={17} aria-hidden="true" /></span>
-          <span className="list-copy"><strong>{task.variant.title?.trim() || '未命名任务'}</strong><small>{formatPlatformAccount(publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId)), task.account.displayName)} · {formatTime(task.scheduledAt)}</small></span>
+          <span className="list-copy"><strong title={title}>{title}</strong><small>{formatPlatformAccount(publishPlatformLabel(task.variant.platform, Boolean(task.variant.videoAssetId)), task.account.displayName)} · {meta.label} · {formatTime(task.scheduledAt)}</small></span>
           <TaskBadge status={task.status} /><ChevronRight className="row-chevron" size={14} aria-hidden="true" />
-        </button>)}</div>}
+        </button>;
+        })}</div>}
         {(cursor || list.data?.nextCursor) && <div className="pagination">
           <button className="icon-button" aria-label="上一页" disabled={!cursor} onClick={() => changePage(pages.slice(0, -1))}><ArrowLeft size={17} aria-hidden="true" /></button>
           <small>第 {pages.length + 1} 页</small>
