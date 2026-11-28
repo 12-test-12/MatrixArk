@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { describe, test } from 'node:test';
 
+process.env.DATABASE_URL = 'postgresql://fixture@127.0.0.1/matrixark_qr_test';
 process.env.BILIBILI_CREDENTIALS_KEY = 'a'.repeat(64);
 process.env.SESSION_SECRET = 'b'.repeat(64);
 
