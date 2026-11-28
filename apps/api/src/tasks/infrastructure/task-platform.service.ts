@@ -134,7 +134,9 @@ export class TaskPlatformService {
     if (mode) await this.requireApplication(tx, account, channel);
     if (mode === 'local_browser') {
       if (!this.profiles) throw new ConflictException('本地浏览器未启用');
-      await this.profiles.requireVerified(account.workspaceId, account.id, extractBilibiliUid(account.externalId)!);
+      // 预检只看“该账号有已核验 Profile”，不限制当前开着哪个账号的窗口；真正打开时才决定是否切换。
+      await this.profiles.requireVerified(account.workspaceId, account.id, extractBilibiliUid(account.externalId)!,
+        { allowSwitch: true });
     }
     if (mode && await tx.publishTask.findFirst({ where: {
       accountId: account.id, ...(taskId && { id: { not: taskId } }),

@@ -292,8 +292,8 @@ export default function Home() {
     <Feedback error={trialAction.error} />
     {authorizationFeedback && (authorizationFeedback.workspaceId === null
       || (authorizationFeedback.workspaceId === workspace?.id && section === 'accounts')) && <Feedback
-        error={authorizationFeedback.status === 'connected' ? undefined : authorizationFeedback.message}
-        notice={authorizationFeedback.status === 'connected' ? authorizationFeedback.message : undefined} />}
+        error={['connected', 'pending'].includes(authorizationFeedback.status) ? undefined : authorizationFeedback.message}
+        notice={['connected', 'pending'].includes(authorizationFeedback.status) ? authorizationFeedback.message : undefined} />}
     {workspace?.trial && <div className="feedback">
       <span>试用工作室 · 小红书练习审核与人工回填，B 站演示模拟投稿，飞书提醒记录在任务详情。</span>
       {section !== 'tasks' && <button type="button" className="button compact" onClick={() => openSection('tasks')}>查看示例任务</button>}

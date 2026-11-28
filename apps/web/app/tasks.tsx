@@ -370,7 +370,7 @@ function TaskDetails({ id, scope, role, onRecorded, people, trial, nextBrowserTa
         {handoff.data.profileUrl && <a className="button compact" href={handoff.data.profileUrl} target="_blank" rel="noreferrer">
           <ExternalLink size={15} aria-hidden="true" />核对{platformLabel[task.variant.platform]}账号主页
         </a>}
-        {task.selectedMode === 'local_browser' ? <>
+        {task.selectedMode === 'local_browser' && recordable ? <>
           <button type="button" className="button primary compact" disabled={browserAction.busy}
             onClick={() => void browserAction.run(async () => {
               const result = await post<BrowserOpenResult>(path + '/browser', { switchAccount: true });

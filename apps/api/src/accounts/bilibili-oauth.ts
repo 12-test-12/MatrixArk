@@ -128,7 +128,15 @@ export class BilibiliOAuthService {
       orderBy: { createdAt: 'desc' }, take: 20,
     });
     const items = await Promise.all(records.map(async (record) => {
-      const grant = this.decode(workspaceId, userId, record);
+      let grant: z.infer<typeof pendingGrant>;
+      try {
+        grant = this.decode(workspaceId, userId, record);
+      } catch {
+        // 单条授权损坏时只清理它，不能让整个待确认列表不可用。
+        await this.prisma.oAuthState.updateMany({ where: { id: record.id, workspaceId, userId,
+          pendingGrantCiphertext: record.pendingGrantCiphertext }, data: { pendingGrantCiphertext: null } });
+        return null;
+      }
       if (new Date(grant.expiresAt) <= now) {
         await this.prisma.oAuthState.updateMany({ where: { id: record.id, workspaceId, userId,
           pendingGrantCiphertext: record.pendingGrantCiphertext }, data: { pendingGrantCiphertext: null } });

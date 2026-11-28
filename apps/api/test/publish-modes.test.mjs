@@ -65,7 +65,8 @@ test('浏览器推荐依赖本机已核验 Profile；OAuth openid 不能冒充 U
   const { service, tx, calls, setBrowser } = setup();
   const browser = { ...account, channelKind: 'manual', accessMethod: 'cookie', externalId: 'bili-web-uid:123' };
   assert.equal((await service.publishOptions(tx, browser, variant, now, false)).recommended, 'local_browser');
-  assert.deepEqual(calls[0], ['workspace', 'account', '123']);
+  // 预检只关心该账号是否有已核验 Profile，不限制当前打开的是哪个账号的窗口。
+  assert.deepEqual(calls[0], ['workspace', 'account', '123', { allowSwitch: true }]);
   setBrowser(false);
   assert.equal((await service.publishOptions(tx, browser, variant, now, false)).recommended, 'manual_handoff');
   await assert.rejects(() => service.requireReady(tx, account, variant, now, false, 'local_browser'), /openid/);
