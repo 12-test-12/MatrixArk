@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { ConflictException, Controller, Get, Header, Injectable, Query, Redirect } from '@nestjs/common';
+import { ConflictException, Controller, Get, Header, Injectable, NotFoundException, Query, Redirect } from '@nestjs/common';
+import { BilibiliAdapter } from '@matrixark/adapters';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { CurrentUser } from '../auth/decorators';
 import type { SessionUser } from '../auth/session.service';
@@ -7,7 +9,7 @@ import { can } from '../common/permissions';
 import { config } from '../config';
 import { PrismaService } from '../prisma/prisma.service';
 import { bindBilibiliAccount } from './bilibili-account';
-import { readPlatformApp } from './platform-app';
+import { decryptPlatformSecret, encryptPlatformSecret, readPlatformApp } from './platform-app';
 
 const callbackPath = '/api/channels/bilibili/oauth/callback';
 const statePattern = /^[\w-]{43}$/;
@@ -16,6 +18,10 @@ const oauthToken = z.object({
   data: z.object({ access_token: z.string().regex(/^[!-~]{1,4096}$/), expires_in: z.number().int().positive() }),
 });
 const hashState = (state: string) => createHash('sha256').update(state).digest('hex');
+const pendingGrant = z.object({ accessToken: z.string().regex(/^[!-~]{1,4096}$/), expiresAt: z.string().datetime(),
+  openid: z.string().min(1).max(256), name: z.string().min(1), scopes: z.array(z.string()),
+  appId: z.string(), appRevision: z.string(), managed: z.boolean() });
+const revision = (app: { revision: string } | undefined, secret: string) => app?.revision ?? hashState(secret);
 
 export const configuredBilibiliOAuthOrigin = config.publicBaseUrl && URL.canParse(config.publicBaseUrl)
   ? new URL(config.publicBaseUrl).origin : null;
@@ -35,13 +41,16 @@ function callbackUrl(origin?: string) {
 export class BilibiliOAuthService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async start(workspaceId: string, userId: string, origin?: string) {
+  async start(workspaceId: string, userId: string, origin?: string, accountId?: string) {
     const callback = callbackUrl(origin);
     const app = await readPlatformApp(this.prisma, workspaceId, 'bilibili');
     const appId = app?.appId ?? (config.bilibili.enabled ? config.bilibili.clientId : undefined);
     if (!appId) throw new ConflictException('请先在发布账号页保存 B 站开放平台应用凭据。');
+    if (accountId && !await this.prisma.channelAccount.findFirst({
+      where: { id: accountId, workspaceId, platform: 'bilibili', archivedAt: null, channelKind: { not: 'sandbox' } }, select: { id: true },
+    })) throw new NotFoundException('账号不存在或不可授权');
     const now = new Date();
-    const binding = { workspaceId, userId, platform: 'bilibili' as const, accountId: null };
+    const binding = { workspaceId, userId, platform: 'bilibili' as const, accountId: accountId ?? null };
     const state = randomBytes(32).toString('base64url');
     await this.prisma.$transaction([
       this.prisma.oAuthState.deleteMany({ where: { ...binding, expiresAt: { lte: now } } }),
@@ -54,13 +63,13 @@ export class BilibiliOAuthService {
   }
 
   async finish(userId: string, state: unknown, code: unknown): Promise<{
-    status: 'expired' | 'denied' | 'failed' | 'connected'; workspaceId?: string;
+    status: 'expired' | 'denied' | 'failed' | 'pending'; workspaceId?: string;
   }> {
     const invalid = { status: 'expired' } as const;
     if (config.sandboxChannel || typeof state !== 'string' || !statePattern.test(state)) return invalid;
     const now = new Date();
     const where = { userId, stateHash: hashState(state), platform: 'bilibili' as const,
-      accountId: null, consumedAt: null, expiresAt: { gt: now }, workspace: { trialOwnerId: null } };
+      consumedAt: null, expiresAt: { gt: now }, workspace: { trialOwnerId: null } };
     const request = await this.prisma.oAuthState.findFirst({ where, select: { id: true, appId: true, workspaceId: true } });
     if (!request?.appId) return invalid;
     const { workspaceId } = request;
@@ -84,15 +93,101 @@ export class BilibiliOAuthService {
       if (!response.ok) return { status: 'failed', workspaceId };
       const grant = oauthToken.safeParse(await response.json());
       if (!grant.success) return { status: 'failed', workspaceId };
-      await bindBilibiliAccount(this.prisma, workspaceId, userId, {
-        // expires_in 是剩余秒数，必须换算成“现在 + 有效期”，不能当作 Unix 时间戳。
+      const identity = await new BilibiliAdapter({ clientId, clientSecret }).authorizedAccount(grant.data.data.access_token);
+      const payload: z.infer<typeof pendingGrant> = {
         accessToken: grant.data.data.access_token,
-        expiresAt: new Date(Date.now() + grant.data.data.expires_in * 1000),
-      }, app);
-      return { status: 'connected', workspaceId };
+        expiresAt: new Date(Date.now() + grant.data.data.expires_in * 1000).toISOString(),
+        ...identity, appId: clientId, appRevision: revision(app, clientSecret), managed: Boolean(app),
+      };
+      const { count: saved } = await this.prisma.oAuthState.updateMany({
+        where: { id: request.id, userId, workspaceId, expiresAt: { gt: new Date() } },
+        data: { pendingGrantCiphertext: encryptPlatformSecret(['bilibili-pending', workspaceId, userId, request.id], JSON.stringify(payload)) },
+      });
+      return { status: saved ? 'pending' : 'expired', workspaceId };
     } catch {
       return { status: 'failed', workspaceId };
     }
+  }
+
+  private decode(workspaceId: string, userId: string, record: { id: string; pendingGrantCiphertext: string | null }) {
+    try {
+      return pendingGrant.parse(JSON.parse(decryptPlatformSecret(
+        ['bilibili-pending', workspaceId, userId, record.id], record.pendingGrantCiphertext!,
+      )));
+    } catch { throw new ConflictException('待确认授权无法读取，请取消后重新授权'); }
+  }
+
+  async pending(workspaceId: string, userId: string) {
+    const now = new Date();
+    await this.prisma.oAuthState.updateMany({
+      where: { workspaceId, userId, platform: 'bilibili', expiresAt: { lte: now }, pendingGrantCiphertext: { not: null } },
+      data: { pendingGrantCiphertext: null },
+    });
+    const records = await this.prisma.oAuthState.findMany({
+      where: { workspaceId, userId, platform: 'bilibili', pendingGrantCiphertext: { not: null }, expiresAt: { gt: now } },
+      orderBy: { createdAt: 'desc' }, take: 20,
+    });
+    const items = await Promise.all(records.map(async (record) => {
+      const grant = this.decode(workspaceId, userId, record);
+      if (new Date(grant.expiresAt) <= now) {
+        await this.prisma.oAuthState.updateMany({ where: { id: record.id, workspaceId, userId,
+          pendingGrantCiphertext: record.pendingGrantCiphertext }, data: { pendingGrantCiphertext: null } });
+        return null;
+      }
+      const existing = await this.prisma.channelAccount.findFirst({
+        where: { workspaceId, platform: 'bilibili', externalId: grant.openid }, select: { id: true, archivedAt: true },
+      });
+      // 仅同一 openid 的原档案可直接续期；UID、昵称和用户选择不构成映射证据。
+      return { id: record.id, accountId: record.accountId, openid: grant.openid, name: grant.name, scopes: grant.scopes,
+        expiresAt: grant.expiresAt, confirmBefore: record.expiresAt, existingAccountId: existing?.id ?? null,
+        requiresSeparate: Boolean(record.accountId && existing?.id !== record.accountId), archived: Boolean(existing?.archivedAt) };
+    }));
+    return items.filter((item) => item !== null);
+  }
+
+  async confirm(workspaceId: string, userId: string, id: string, saveSeparately: boolean) {
+    if (config.sandboxChannel) throw new ConflictException('沙箱模式不能保存真实授权');
+    const record = await this.prisma.oAuthState.findFirst({
+      where: { id, workspaceId, userId, platform: 'bilibili', pendingGrantCiphertext: { not: null },
+        consumedAt: { not: null }, expiresAt: { gt: new Date() }, workspace: { trialOwnerId: null } },
+    });
+    if (!record?.pendingGrantCiphertext) throw new ConflictException('待确认授权已过期、取消或已保存');
+    const grant = this.decode(workspaceId, userId, record);
+    const app = await readPlatformApp(this.prisma, workspaceId, 'bilibili');
+    const appId = app?.appId ?? (config.bilibili.enabled ? config.bilibili.clientId : undefined);
+    const secret = app?.appSecret ?? config.bilibili.clientSecret;
+    if (!secret || appId !== grant.appId || Boolean(app) !== grant.managed || revision(app, secret) !== grant.appRevision) {
+      throw new ConflictException('应用配置已变化，请取消后重新授权');
+    }
+    const accountId = await bindBilibiliAccount(this.prisma, workspaceId, userId,
+      { accessToken: grant.accessToken, expiresAt: new Date(grant.expiresAt) }, app,
+      { accountId: saveSeparately ? undefined : record.accountId ?? undefined, expectedOpenid: grant.openid,
+        pending: { id: record.id, ciphertext: record.pendingGrantCiphertext } });
+    return { id: accountId };
+  }
+
+  async discard(workspaceId: string, userId: string, id: string) {
+    const { count } = await this.prisma.oAuthState.updateMany({
+      where: { id, workspaceId, userId, platform: 'bilibili', pendingGrantCiphertext: { not: null } },
+      data: { pendingGrantCiphertext: null },
+    });
+    if (!count) throw new NotFoundException('待确认授权不存在');
+    return { ok: true };
+  }
+
+  async disable(workspaceId: string, id: string) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "ChannelAccount" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+      const account = await tx.channelAccount.findFirst({ where: { id, workspaceId, platform: 'bilibili', channelKind: 'official', archivedAt: null } });
+      if (!account) throw new NotFoundException('官方账号不存在');
+      if (await tx.publishTask.findFirst({ where: { accountId: id, status: 'dispatching' }, select: { id: true } })) {
+        throw new ConflictException('账号正在投稿，请等待本次提交结束再停用授权');
+      }
+      await tx.channelAccount.update({ where: { id }, data: { credentials: Prisma.DbNull,
+        credentialsCiphertext: null, credentialsKeyId: null, credentialsUpdatedAt: new Date(), authStatus: 'revoked',
+        authScope: [], authExpiresAt: null } });
+      return { ok: true };
+    });
   }
 }
 

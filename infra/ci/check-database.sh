@@ -58,6 +58,11 @@ for test_db in matrixark_test matrixark_upgrade_test; do
 DO $$
 BEGIN
   ASSERT current_setting('server_version_num')::int / 10000 = 16, 'Use PostgreSQL 16 for migration checks';
+  ASSERT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
+    AND table_name = 'OAuthState' AND column_name = 'pendingGrantCiphertext'), 'Missing pending OAuth grant storage';
+    ASSERT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
+      AND table_name = 'PublishTask' AND column_name = 'selectedMode'), 'Missing task publish mode';
+    ASSERT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PublishTask_mode_channel_check'), 'Missing publish mode/channel guard';
   ASSERT EXISTS (SELECT 1 FROM pg_index WHERE indexrelid = to_regclass('"PublishTask_one_dispatching_per_account"')
     AND indisunique AND indisvalid AND indpred IS NOT NULL), 'Missing account dispatch constraint';
   ASSERT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'

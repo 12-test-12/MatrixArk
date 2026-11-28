@@ -8,6 +8,7 @@ export const bilibiliManualUidPrefix = 'manual-bili-uid:';
 
 export const bilibiliWebUidPrefix = 'bili-web-uid:';
 
+// 仅解析带类型前缀的 UID；OAuth openid 即使全是数字也不能视为 UID。
 export function extractBilibiliUid(externalId?: string | null) {
   if (!externalId) return null;
   for (const prefix of [bilibiliManualUidPrefix, bilibiliWebUidPrefix]) {

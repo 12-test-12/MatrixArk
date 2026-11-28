@@ -13,6 +13,9 @@ export const PLATFORM_LABELS: Record<Platform, string> = {
 export const CHANNEL_KINDS = ['official', 'manual', 'sandbox'] as const;
 export type ChannelKind = (typeof CHANNEL_KINDS)[number];
 
+export const PUBLISH_MODES = ['official_api', 'local_browser', 'manual_handoff', 'sandbox'] as const;
+export type PublishMode = (typeof PUBLISH_MODES)[number];
+
 export const CHANNEL_KIND_LABELS: Record<ChannelKind, string> = {
   official: '官方直发',
   manual: '人工交接',

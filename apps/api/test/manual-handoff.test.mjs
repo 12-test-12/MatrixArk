@@ -11,7 +11,7 @@ import sharp from 'sharp';
 
 test('单账号排期去重、并发交接、回填及截图隔离', async (t) => {
   const url = process.env.DATABASE_URL;
-  assert(url && new URL(url).pathname === '/matrixark_upgrade_test' && process.env.STORAGE_LOCAL_DIR,
+  assert(url && /^\/matrixark_upgrade_test(?:_[a-f0-9]{24})?$/.test(new URL(url).pathname) && process.env.STORAGE_LOCAL_DIR,
     'Use infra/ci/check-database.sh');
   process.env.XIAOHONGSHU_APP_ID = 'identity-fixture';
   process.env.XIAOHONGSHU_APP_SECRET = 'identity-fixture-secret';
@@ -1062,14 +1062,15 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     assert.equal(accounts.find((account) => account.id === id).availableForOfficial, true);
     assert.ok(!JSON.stringify(accounts).includes(token));
 
-    async function scheduleArticle(title, accountId = id) {
+    async function scheduleArticle(title, accountId = id, selectedMode) {
       const { data: [draft] } = await post(source + '/generate', { platforms: ['bilibili'] });
       const { data: { variant } } = await call(own + '/variants/' + draft.id, {
         method: 'PATCH', cookie, body: { title, body: '已审内容'.repeat(60) + '\n<script>', coverAssetId: image.id,
           platformFields: { category: 100, summary: '已审摘要'.repeat(60) } },
       });
       await post(own + '/variants/' + variant.id + '/confirm', {});
-      const payload = { variantIds: [variant.id], accountIds: [accountId], scheduledAt };
+      const payload = { variantIds: [variant.id], accountIds: [accountId], scheduledAt,
+        ...(selectedMode ? { accountModes: { [accountId]: selectedMode } } : {}) };
       const { data: { items: [task] } } = await post(own + '/tasks', payload);
       const { data: { items: [duplicate] } } = await post(own + '/tasks', payload, 200);
       assert.equal(duplicate.id, task.id);
@@ -1077,7 +1078,8 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     }
     const dispatch = worker.get(TasksService);
     const replica = api.get(TasksService);
-    const task = await scheduleArticle('官方专栏');
+    const task = await scheduleArticle('官方专栏', id, 'official_api');
+    assert.equal(task.selectedMode, 'official_api');
     assert.deepEqual((await Promise.all([dispatch.dispatchDue(), replica.dispatchDue()])).sort(), [0, 1]);
     const path = own + '/tasks/' + task.id;
     const { data: submitted } = await call(path, { cookie });
@@ -1182,7 +1184,7 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
       assert.deepEqual(Object.fromEntries(options.body), { client_id: process.env.BILIBILI_CLIENT_ID,
         client_secret: appSecret, grant_type: 'authorization_code', code: 'oauth-code-fixture' });
       return Response.json({ code: 0, data: { access_token: authorizedToken,
-        expires_in: Math.floor(Date.now() / 1000) + 3600 } });
+        expires_in: 3600 } });
     });
     const { data: authorization } = await post(own + '/accounts/bilibili/authorize', {});
     const provider = new URL(authorization.authorizationUrl);
@@ -1200,9 +1202,22 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     const callbacks = await Promise.all([callback(state, cookie), callback(state, cookie)]);
     const locations = callbacks.map((response) => response.headers.get('location'));
     assert.ok(callbacks.every((response) => response.status === 303 && response.headers.get('cache-control') === 'no-store'));
-    assert.ok(locations.includes('/?bilibiliAuthorization=connected&workspace=' + workspaceId));
+    assert.ok(locations.includes('/?bilibiliAuthorization=pending&workspace=' + workspaceId));
     assert.ok(locations.includes('/?bilibiliAuthorization=expired'));
     assert.equal(exchanges, 1);
+    assert.equal(await prisma.channelAccount.count({ where: { workspaceId, externalId: 'oauth-bili-fixture-open-id' } }), 0,
+      'OAuth 回调仅暂存授权，确认前不创建账号');
+    const { data: pendingGrants } = await call(own + '/accounts/bilibili/pending', { cookie });
+    const pendingGrant = pendingGrants.find((grant) => grant.openid === 'oauth-bili-fixture-open-id');
+    assert.ok(pendingGrant);
+    assert.ok(!JSON.stringify(pendingGrants).includes(authorizedToken));
+    await call(`${foreign}/accounts/bilibili/pending/${pendingGrant.id}/confirm`, {
+      method: 'POST', cookie: otherCookie, body: {}, status: 409,
+    });
+    const confirmations = await Promise.all([201, 409].map(() => fetch(`${base}${own}/accounts/bilibili/pending/${pendingGrant.id}/confirm`, {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: '{}',
+    })));
+    assert.deepEqual(confirmations.map((response) => response.status).sort(), [201, 409]);
     const { data: canceled } = await post(own + '/accounts/bilibili/authorize', {});
     assert.match((await callback(new URL(canceled.authorizationUrl).searchParams.get('state'), cookie, '')).headers.get('location'),
       /bilibiliAuthorization=denied/);
@@ -2174,6 +2189,98 @@ test('单账号排期去重、并发交接、回填及截图隔离', async (t) =
     await assert.rejects(prisma.$transaction(tx => transitionTask(tx, { ...isolatedTask, workspaceId: other.workspaces[0].id },
       { status: 'paused' }, { kind: 'paused' })), { code: 'P2025' });
     assert.equal((await prisma.publishTask.findUniqueOrThrow({ where: { id: isolatedTask.id } })).status, 'dispatching');
+  });
+
+  await t.test('任务按所选方式执行，OAuth 人工兜底与浏览器交接保留幂等和核实边界', async (modeTest) => {
+    const { data: modesOwner, cookie: modesCookie } = await register('publish-modes');
+    const modeWorkspace = modesOwner.workspaces[0].id;
+    const modeScope = `/workspaces/${modeWorkspace}`;
+    const send = (path, body, status = 201) => call(modeScope + path, { cookie: modesCookie, method: 'POST', body, status });
+    const { data: draft } = await send('/manuscripts', { title: '发布方式验收', body: '发布方式验收正文'.repeat(50), tags: [] });
+    await send(`/manuscripts/${draft.id}/assets`, file(sourcePng));
+    const { data: [initial] } = await send(`/manuscripts/${draft.id}/generate`, { platforms: ['bilibili'] });
+    const { data: { variant: approved } } = await call(modeScope + '/variants/' + initial.id, {
+      cookie: modesCookie, method: 'PATCH', body: { platformFields: { category: 100, summary: '发布方式验收摘要'.repeat(50) } },
+    });
+    await send('/variants/' + approved.id + '/confirm', {});
+    const official = await prisma.channelAccount.create({ data: {
+      workspaceId: modeWorkspace, platform: 'bilibili', channelKind: 'official', accessMethod: 'oauth',
+      displayName: '已停用官方身份', externalId: 'modes-official-openid', authCheckedAt: new Date(), authStatus: 'revoked',
+    } });
+    const endpoint = modeScope + '/tasks/publish-options?variantIds=' + approved.id;
+    await call(endpoint, { cookie: otherCookie, status: 403 });
+    const options = (await call(endpoint, { cookie: modesCookie })).data.items.find((item) => item.accountId === official.id);
+    assert.equal(options.recommended, 'manual_handoff');
+    assert.equal(options.modes.find((item) => item.mode === 'official_api').available, false);
+    const payload = { variantIds: [approved.id], accountIds: [official.id], scheduledAt: new Date(Date.now() - 1000).toISOString(),
+      accountModes: { [official.id]: 'manual_handoff' } };
+    const { data: { items: [manual] } } = await send('/tasks', payload);
+    assert.equal(manual.selectedMode, 'manual_handoff');
+    await send('/tasks', { ...payload, accountModes: {} }, 400);
+    await send('/tasks', { ...payload, accountModes: { [official.id]: 'official_api' } }, 409);
+    assert.equal(await prisma.publishTask.count({ where: { accountId: official.id, variantId: approved.id } }), 1);
+    await assert.rejects(() => prisma.publishTask.update({ where: { id: manual.id }, data: { selectedMode: 'official_api' } }), /MA002|发布方式已确定/);
+    const { TaskClaimService } = await import('../dist/tasks/dispatch/task-claim.service.js');
+    const { TaskPlatformService } = await import('../dist/tasks/infrastructure/task-platform.service.js');
+    assert.equal(await prisma.publishTask.count({ where: { id: manual.id, ...api.get(TaskPlatformService).dispatchScope() } }), 1,
+      'official identity with manual choice must be included in Worker scope');
+    const claim = (task) => api.get(TaskClaimService).claim({ ...task, workspaceId: modeWorkspace,
+      variant: { manuscriptId: draft.id } });
+    assert.equal(await claim(manual), true);
+    const handed = await prisma.publishTask.findUniqueOrThrow({ where: { id: manual.id } });
+    assert.equal(handed.status, 'handed_off');
+    assert.equal(handed.executionChannel, 'manual');
+    assert.equal(handed.leaseId, null);
+    assert.equal((await prisma.channelAccount.findUniqueOrThrow({ where: { id: official.id } })).channelKind, 'official');
+    await send(`/tasks/${manual.id}/result`, { state: 'published', remoteUrl: 'https://www.bilibili.com/read/cv123' }, 200);
+    const publishedOption = (await call(endpoint, { cookie: modesCookie })).data.items.find((item) => item.accountId === official.id);
+    assert.equal(publishedOption.existingTaskId, manual.id);
+    assert.ok(publishedOption.modes.every((mode) => !mode.available));
+
+    const correctionAccount = await prisma.channelAccount.create({ data: {
+      workspaceId: modeWorkspace, platform: 'bilibili', channelKind: 'official', accessMethod: 'oauth',
+      displayName: '人工补录官方身份', externalId: 'modes-correction-openid', authCheckedAt: new Date(), authStatus: 'revoked',
+    } });
+    const { data: { items: [correction] } } = await send('/tasks', { ...payload, accountIds: [correctionAccount.id],
+      accountModes: { [correctionAccount.id]: 'manual_handoff' } });
+    await send(`/tasks/${correction.id}/cancel`, { reason: '尚未交接，先核对记录' }, 200);
+    await send(`/tasks/${correction.id}/result`, { state: 'published', reason: '已核实用户自行完成了发布', remoteUrl: 'https://www.bilibili.com/read/cv124' }, 200);
+    assert.equal((await prisma.publishTask.findUniqueOrThrow({ where: { id: correction.id } })).executionChannel, 'manual',
+      'correcting a pre-dispatch canceled task respects the selected mode instead of the account kind');
+
+    const browserAccount = await prisma.channelAccount.create({ data: {
+      workspaceId: modeWorkspace, platform: 'bilibili', channelKind: 'manual', accessMethod: 'qr_login',
+      displayName: '浏览器 UID 身份', externalId: 'bili-web-uid:12345', authCheckedAt: new Date(), authStatus: 'active',
+    } });
+    const { LocalBrowserProfiles } = await import('../dist/accounts/local-browser-profiles.js');
+    const { BilibiliBrowserService } = await import('../dist/accounts/bilibili-browser.service.js');
+    const profiles = api.get(LocalBrowserProfiles), browser = api.get(BilibiliBrowserService);
+    const requireVerified = profiles.requireVerified, openPublishing = browser.openPublishing;
+    modeTest.after(() => { profiles.requireVerified = requireVerified; browser.openPublishing = openPublishing; });
+    profiles.requireVerified = async (ws, accountId, uid) => {
+      assert.deepEqual([ws, accountId, uid], [modeWorkspace, browserAccount.id, '12345']);
+      return { id: 'fixture-session', status: 'verified' };
+    };
+    let opens = 0;
+    browser.openPublishing = async (ws, accountId) => {
+      assert.deepEqual([ws, accountId], [modeWorkspace, browserAccount.id]); opens++;
+      return { sessionId: 'fixture-session', message: 'Fixture: opened, no submission' };
+    };
+    const { data: { items: [local] } } = await send('/tasks', { ...payload, accountIds: [browserAccount.id],
+      accountModes: { [browserAccount.id]: 'local_browser' } });
+    await send(`/tasks/${local.id}/browser`, {}, 409);
+    assert.equal(await claim(local), true);
+    assert.equal((await prisma.publishTask.findUniqueOrThrow({ where: { id: local.id } })).leaseId, null);
+    await call(modeScope + `/tasks/${local.id}/browser`, { cookie: otherCookie, method: 'POST', body: {}, status: 403 });
+    await send(`/tasks/${local.id}/browser`, {}, 200);
+    assert.equal(opens, 1);
+    assert.equal((await prisma.publishTask.findUniqueOrThrow({ where: { id: local.id } })).status, 'handed_off');
+    await send('/tasks', { ...payload, accountIds: [browserAccount.id], accountModes: { [browserAccount.id]: 'manual_handoff' } }, 409);
+    await send(`/tasks/${local.id}/result`, { state: 'unknown', note: '平台提交后尚无明确回执' }, 200);
+    await send(`/tasks/${local.id}/browser`, {}, 409);
+    await send(`/tasks/${local.id}/retry`, { scheduledAt: new Date(Date.now() + 60_000).toISOString() }, 409);
+    assert.equal(opens, 1, 'unknown result never opens or switches executor automatically');
+    assert.equal((await call(endpoint, { cookie: modesCookie })).data.items.find((item) => item.accountId === browserAccount.id).recommended, null);
   });
 
   await t.test('WorkerModule 独立启动、有界并发、租约心跳续期与积压监控', async (workerTest) => {

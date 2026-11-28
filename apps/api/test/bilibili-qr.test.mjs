@@ -11,6 +11,7 @@ const { AccountOnboardingService, extractCookiesFromResponse } = await import('.
 function createInMemoryPrisma(options = {}) {
   const tickets = new Map();
   const accounts = new Map();
+  const tasks = new Map();
   let failNextAccountWrite = Boolean(options.failAccountWrite);
 
   const matchTicket = (row, where = {}) => {
@@ -45,6 +46,7 @@ function createInMemoryPrisma(options = {}) {
   const prisma = {
     _tickets: tickets,
     _accounts: accounts,
+    _tasks: tasks,
     setFailAccountWrite(val) {
       failNextAccountWrite = val;
     },
@@ -113,7 +115,8 @@ function createInMemoryPrisma(options = {}) {
     channelAccount: {
       async findFirst({ where } = {}) {
         for (const acc of accounts.values()) {
-          if (where.id && acc.id !== where.id) continue;
+          if (typeof where.id === 'string' && acc.id !== where.id) continue;
+          if (where.id?.not && acc.id === where.id.not) continue;
           if (where.workspaceId && acc.workspaceId !== where.workspaceId) continue;
           if (where.platform && acc.platform !== where.platform) continue;
           if (where.externalId?.in && !where.externalId.in.includes(acc.externalId)) continue;
@@ -149,11 +152,17 @@ function createInMemoryPrisma(options = {}) {
         return { count: 0 };
       },
     },
+    publishTask: {
+      async findFirst({ where }) {
+        return [...tasks.values()].find((task) => task.workspaceId === where.workspaceId && task.accountId === where.accountId) ?? null;
+      },
+    },
     async $transaction(fn) {
       const tx = {
         $queryRaw: async () => [],
         channelAccount: prisma.channelAccount,
         accountRiskEvent: prisma.accountRiskEvent,
+        publishTask: prisma.publishTask,
       };
       return fn(tx);
     },
@@ -190,6 +199,145 @@ async function withMockFetch(handler, fn) {
     globalThis.fetch = originalFetch;
   }
 }
+
+describe('Bilibili Cookie account identity', () => {
+  const account = {
+    id: 'account-1', workspaceId: 'ws-1', platform: 'bilibili', channelKind: 'manual',
+    externalId: 'bili-web-uid:111', displayName: 'Original account', accessMethod: 'qr_login',
+    archivedAt: null, cookieCiphertext: 'original-ciphertext', profileUrl: 'https://space.bilibili.com/111',
+  };
+  const input = { platform: 'bilibili', accountId: account.id, cookie: 'SESSDATA=new-session' };
+  const verified = (mid = '222') => jsonResponse({ code: 0, data: { isLogin: true, mid, uname: 'Verified account' } });
+
+  test('local browser identity binding does not upload or replace Cookie credentials', async () => {
+    const prisma = createInMemoryPrisma();
+    prisma._accounts.set(account.id, { ...account });
+    const service = makeService(prisma);
+    await withMockFetch(() => { throw new Error('unexpected network'); }, async () => {
+      assert.equal(await service.connectBilibiliBrowserAccount('ws-1', 'user-1', { uid: '111', name: 'Browser name' }, account.id), account.id);
+      assert.equal(prisma._accounts.get(account.id).cookieCiphertext, account.cookieCiphertext);
+      const fresh = await service.connectBilibiliBrowserAccount('ws-1', 'user-1', { uid: '222', name: 'New browser account' });
+      assert.equal(prisma._accounts.get(fresh).cookieCiphertext, undefined);
+      assert.equal(prisma._accounts.get(fresh).externalId, 'bili-web-uid:222');
+    });
+  });
+
+  test('rejects a different UID without changing the account or its task history', async () => {
+    for (const externalId of ['bili-web-uid:111', 'manual-bili-uid:111']) {
+      const prisma = createInMemoryPrisma();
+      const original = { ...account, externalId };
+      const task = { id: 'task-1', workspaceId: 'ws-1', accountId: account.id, status: 'published' };
+      prisma._accounts.set(account.id, { ...original });
+      prisma._tasks.set(task.id, { ...task });
+      await withMockFetch(() => verified(), async () => {
+        await assert.rejects(() => makeService(prisma).importCookieAccount('ws-1', 'user-1', input),
+          (error) => error.getStatus() === 409 && /UID/.test(error.message));
+      });
+      assert.deepEqual(prisma._accounts.get(account.id), original);
+      assert.deepEqual(prisma._tasks.get(task.id), task);
+      assert.equal(prisma._accounts.size, 1);
+    }
+  });
+
+  test('an explicit missing, foreign-workspace or other-platform account never creates a new account', async () => {
+    for (const overrides of [null, { workspaceId: 'ws-2' }, { platform: 'xiaohongshu' }]) {
+      const prisma = createInMemoryPrisma();
+      if (overrides) prisma._accounts.set(account.id, { ...account, ...overrides });
+      const before = structuredClone([...prisma._accounts]);
+      await withMockFetch(() => verified(), async () => {
+        await assert.rejects(() => makeService(prisma).importCookieAccount('ws-1', 'user-1', input),
+          (error) => error.getStatus() === 404);
+      });
+      assert.deepEqual([...prisma._accounts], before);
+    }
+  });
+
+  test('matching UID refreshes the same account and preserves task links and name', async () => {
+    for (const externalId of ['bili-web-uid:111', 'manual-bili-uid:111']) {
+      const prisma = createInMemoryPrisma();
+      prisma._accounts.set(account.id, { ...account, externalId });
+      const task = { id: 'task-1', workspaceId: 'ws-1', accountId: account.id, status: 'scheduled' };
+      prisma._tasks.set(task.id, { ...task });
+      await withMockFetch(() => verified('111'), async () => {
+        const result = await makeService(prisma).importCookieAccount('ws-1', 'user-1', input);
+        assert.equal(result.id, account.id);
+      });
+      const updated = prisma._accounts.get(account.id);
+      assert.equal(prisma._accounts.size, 1);
+      assert.equal(updated.externalId, 'bili-web-uid:111');
+      assert.equal(updated.displayName, account.displayName);
+      assert.equal(updated.accessMethod, 'cookie');
+      assert.notEqual(updated.cookieCiphertext, account.cookieCiphertext);
+      assert.deepEqual(prisma._tasks.get(task.id), task);
+    }
+  });
+
+  test('first UID binding is allowed only for a password placeholder without task history', async () => {
+    for (const hasHistory of [false, true]) {
+      const prisma = createInMemoryPrisma();
+      const placeholder = { ...account, externalId: 'pwd-account-1', accessMethod: 'password', profileUrl: null };
+      prisma._accounts.set(account.id, { ...placeholder });
+      if (hasHistory) prisma._tasks.set('task-1', { id: 'task-1', workspaceId: 'ws-1', accountId: account.id, status: 'canceled' });
+      await withMockFetch(() => verified(), async () => {
+        const request = () => makeService(prisma).importCookieAccount('ws-1', 'user-1', input);
+        if (hasHistory) {
+          await assert.rejects(request, (error) => error.getStatus() === 409 && /历史任务/.test(error.message));
+          assert.deepEqual(prisma._accounts.get(account.id), placeholder);
+        } else {
+          assert.equal((await request()).id, account.id);
+          assert.equal(prisma._accounts.get(account.id).externalId, 'bili-web-uid:222');
+          assert.equal(prisma._accounts.get(account.id).profileUrl, 'https://space.bilibili.com/222');
+        }
+      });
+    }
+  });
+
+  test('a registered profile UID and a supplied profile UID must match the verified Cookie UID', async () => {
+    for (const suppliedProfile of [false, true]) {
+      const prisma = createInMemoryPrisma();
+      const original = suppliedProfile ? { ...account } : { ...account, externalId: 'pwd-account-1', accessMethod: 'password' };
+      prisma._accounts.set(account.id, { ...original });
+      await withMockFetch(() => verified(suppliedProfile ? '111' : '222'), async () => {
+        await assert.rejects(() => makeService(prisma).importCookieAccount('ws-1', 'user-1', {
+          ...input, ...(suppliedProfile ? { profileUrl: 'https://space.bilibili.com/222' } : {}),
+        }), (error) => error.getStatus() === 409 && /UID/.test(error.message));
+      });
+      assert.deepEqual(prisma._accounts.get(account.id), original);
+    }
+  });
+
+  test('first binding cannot duplicate another active or archived UID account', async () => {
+    for (const archivedAt of [null, new Date()]) {
+      const prisma = createInMemoryPrisma();
+      prisma._accounts.set(account.id, { ...account, externalId: 'pwd-account-1', accessMethod: 'password', profileUrl: null });
+      prisma._accounts.set('account-2', { ...account, id: 'account-2', externalId: 'manual-bili-uid:222', archivedAt });
+      const before = structuredClone([...prisma._accounts]);
+      await withMockFetch(() => verified(), async () => {
+        await assert.rejects(() => makeService(prisma).importCookieAccount('ws-1', 'user-1', input),
+          (error) => error.getStatus() === 409);
+      });
+      assert.deepEqual([...prisma._accounts], before);
+    }
+  });
+
+  test('OAuth openid, unknown identities, sandbox and archived accounts cannot be rebound by Cookie', async () => {
+    for (const overrides of [
+      { channelKind: 'official', accessMethod: 'oauth', externalId: '222', credentialsCiphertext: 'oauth-ciphertext' },
+      { externalId: 'unknown-identity' },
+      { channelKind: 'sandbox', accessMethod: 'sandbox' },
+      { archivedAt: new Date() },
+    ]) {
+      const prisma = createInMemoryPrisma();
+      const original = { ...account, ...overrides };
+      prisma._accounts.set(account.id, { ...original });
+      await withMockFetch(() => verified(), async () => {
+        await assert.rejects(() => makeService(prisma).importCookieAccount('ws-1', 'user-1', input),
+          (error) => error.getStatus() === 409);
+      });
+      assert.deepEqual(prisma._accounts.get(account.id), original);
+    }
+  });
+});
 
 describe('Bilibili QR onboarding state machine & regression suite', () => {
   test('extractCookiesFromResponse handles multi Set-Cookie and fallback callback query', () => {

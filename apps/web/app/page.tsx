@@ -24,6 +24,7 @@ type Navigation = { workspaceId: string; locations: Record<string, WorkspaceLoca
 const emptyNavigation: Navigation = { workspaceId: '', locations: {} };
 const navigationKey = (userId: string) => `matrixark-navigation:${userId}`;
 const bilibiliMessages: Record<string, string> = {
+  pending: '已收到 B 站授权，请在下方确认保存官方身份。网页登录 UID 与 OAuth openid 尚未核实关联时会分别保留。',
   connected: 'B 站账号已连接，可以为已审核的专栏版本安排发布。',
   denied: '未收到 B 站授权，请重新连接并在授权页确认。',
   expired: 'B 站授权请求已失效，请回到发布账号页重新发起。',

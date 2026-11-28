@@ -61,6 +61,8 @@ test('账号能力沿用 UID、扫码、Cookie、密码、OAuth 与试用账号�
   assert.equal(derivePlatformUid({ platform: 'bilibili', externalId: 'bili-web-uid:45678', profileUrl: null }), '45678');
   assert.equal(derivePlatformUid({ platform: 'bilibili', externalId: 'manual-bili-uid:123', profileUrl: null }), '123');
   assert.equal(derivePlatformUid({ platform: 'bilibili', externalId: 'pwd-123', profileUrl: null }), null);
+  assert.equal(derivePlatformUid({ platform: 'bilibili', externalId: '123', profileUrl: null }), null,
+    'numeric OAuth openid must not be inferred as UID');
   assert.equal(derivePlatformUid({
     platform: 'xiaohongshu',
     externalId: 'xhs-cookie:abcdef',

@@ -291,7 +291,9 @@ export class AccountRiskService {
       if (account.platform === 'bilibili') {
         const check = await this.probeBilibiliCookie(cookie);
         if (check.state === 'invalid') {
-          await this.prisma.channelAccount.update({ where: { id: accountId }, data: { authStatus: 'expired' } });
+          if (account.channelKind !== 'official') {
+            await this.prisma.channelAccount.update({ where: { id: accountId }, data: { authStatus: 'expired' } });
+          }
           const event = await this.recordRisk({
             workspaceId,
             accountId,
@@ -315,10 +317,9 @@ export class AccountRiskService {
           });
           return { status: 'warning' as const, reason: event.message, feishuStatus: event.feishuStatus, diagnostics: buildDiagnostics('probe_error') };
         }
-        await this.prisma.channelAccount.update({
-          where: { id: accountId },
-          data: { authStatus: 'active', authCheckedAt: now },
-        });
+        if (account.channelKind !== 'official') {
+          await this.prisma.channelAccount.update({ where: { id: accountId }, data: { authStatus: 'active', authCheckedAt: now } });
+        }
       } else if (account.platform === 'xiaohongshu') {
         if (!hasXhsSessionKeys(cookie)) {
           const event = await this.recordRisk({

@@ -85,7 +85,7 @@ jobs:
           node-version: '24'
       - run: corepack enable && pnpm install --frozen-lockfile
       - run: pnpm db:generate && pnpm build && pnpm typecheck && pnpm test
-      - run: node --test apps/api/test/platform-policies.test.mjs apps/api/test/worker-concurrency.test.mjs
+      - run: node --test apps/api/test/publish-modes.test.mjs apps/api/test/bilibili-oauth.test.mjs apps/api/test/local-browser.test.mjs apps/api/test/bilibili-qr.test.mjs apps/api/test/platform-policies.test.mjs apps/api/test/worker-concurrency.test.mjs
 
   package:
     name: 最终 Docker 打包

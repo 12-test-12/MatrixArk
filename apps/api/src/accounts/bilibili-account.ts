@@ -10,7 +10,8 @@ import { encryptBilibiliCredentials } from './publish-account';
 
 export async function bindBilibiliAccount(prisma: PrismaService, workspaceId: string, operatorId: string,
   { accessToken, expiresAt }: { accessToken: string; expiresAt: Date },
-  app?: { appId: string; appSecret: string; revision: string }) {
+  app?: { appId: string; appSecret: string; revision: string },
+  options: { accountId?: string; expectedOpenid?: string; pending?: { id: string; ciphertext: string } } = {}) {
   if (!Number.isFinite(expiresAt.getTime()) || expiresAt <= new Date()) throw new ConflictException('B 站账号授权已到期。');
   const membershipKey = { userId: operatorId, workspaceId };
   const member = await prisma.membership.findUnique({ where: { userId_workspaceId: membershipKey } });
@@ -19,6 +20,7 @@ export async function bindBilibiliAccount(prisma: PrismaService, workspaceId: st
   const { openid, name, scopes } = await adapter.authorizedAccount(accessToken).catch(() => {
     throw new BadGatewayException('B 站账号核验失败。请检查应用凭据、访问令牌、专栏投稿及数据回读权限。');
   });
+  if (options.expectedOpenid && options.expectedOpenid !== openid) throw new ConflictException('授权身份已变化，请重新授权');
 
   return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
@@ -29,10 +31,22 @@ export async function bindBilibiliAccount(prisma: PrismaService, workspaceId: st
       if (setting?.secretCiphertext !== app.revision) throw new ConflictException('B 站应用凭据已更新，请重新连接账号。');
     }
     const scope = { workspaceId, platform: 'bilibili' as const, archivedAt: null };
-    const existing = await tx.channelAccount.findFirst({ where: { ...scope, externalId: openid } });
+    const existing = await tx.channelAccount.findFirst({ where: { workspaceId, platform: 'bilibili', externalId: openid } });
+    if (existing?.archivedAt) throw new ConflictException('该官方身份已有归档账号，请先恢复原账号');
+    if (options.accountId && existing?.id !== options.accountId) {
+      throw new ConflictException('无法证明本次 openid 与所选账号相同，请重新授权原官方身份或单独保存，不能直接合并 UID');
+    }
     if (existing && existing.channelKind !== 'official') throw new ConflictException('此身份已绑定到其他发布通道。');
     const now = new Date();
     if (expiresAt <= now) throw new ConflictException('B 站账号授权已到期。');
+    if (options.pending) {
+      const { count } = await tx.oAuthState.updateMany({
+        where: { id: options.pending.id, workspaceId, userId: operatorId, platform: 'bilibili',
+          consumedAt: { not: null }, pendingGrantCiphertext: options.pending.ciphertext, expiresAt: { gt: now } },
+        data: { pendingGrantCiphertext: null },
+      });
+      if (count !== 1) throw new ConflictException('待确认授权已过期、取消或已保存，请重新加载');
+    }
     const id = existing?.id ?? randomUUID();
     const authorization = {
       ...encryptBilibiliCredentials({ id, workspaceId, externalId: openid }, accessToken, Boolean(app)),

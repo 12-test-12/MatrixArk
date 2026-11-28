@@ -73,6 +73,12 @@ export const config = {
     localDir: isAbsolute(storageDir) ? storageDir : join(repoRoot, storageDir),
   },
   publicBaseUrl,
+  localBrowser: {
+    enabled: boolean(process.env.LOCAL_BROWSER_ENABLED ?? String(process.env.NODE_ENV !== 'production'
+      && ['127.0.0.1', 'localhost', '::1'].includes(apiHost)), 'LOCAL_BROWSER_ENABLED'),
+    root: resolve(repoRoot, process.env.LOCAL_BROWSER_DATA_DIR ?? './local-data/browser-profiles'),
+    channel: process.env.LOCAL_BROWSER_CHANNEL === 'chrome' ? 'chrome' as const : 'msedge' as const,
+  },
   worker: {
     dispatchConcurrency: boundedInt(process.env.WORKER_DISPATCH_CONCURRENCY, 4, 1, 16),
     receiptConcurrency: boundedInt(process.env.WORKER_RECEIPT_CONCURRENCY, 4, 1, 16),

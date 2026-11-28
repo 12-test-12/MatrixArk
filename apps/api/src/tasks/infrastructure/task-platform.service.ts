@@ -1,8 +1,10 @@
 import { AdapterRegistry, ChannelNotConfiguredError, type ChannelAdapter, type PublishInput, type PublishReceipt } from '@matrixark/adapters';
-import { BadGatewayException, BadRequestException, ConflictException, Inject, Injectable } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, ConflictException, Inject, Injectable, Optional } from '@nestjs/common';
+import { PUBLISH_MODES } from '@matrixark/shared';
 import type { ChannelAccount, ChannelKind, Platform, Prisma } from '@prisma/client';
 import { resolveAccountCapabilities } from '../../accounts/account-capabilities';
-import { isUnverifiedBilibiliAccount } from '../../accounts/publish-account';
+import { extractBilibiliUid, isUnverifiedBilibiliAccount } from '../../accounts/publish-account';
+import { LocalBrowserProfiles } from '../../accounts/local-browser-profiles';
 import { PrismaService } from '../../prisma/prisma.service';
 import { config } from '../../config';
 import { type AutomaticClaim, bilibiliAuthorizationRequired, type PublishableVariant, publishVariant } from '../domain/task-policy';
@@ -17,6 +19,7 @@ export class TaskPlatformService {
     private readonly prisma: PrismaService,
     private readonly adapters: AdapterRegistry,
     @Inject(PUBLISHING_PLATFORMS) platforms: readonly PublishingPlatform[],
+    @Optional() private readonly profiles?: LocalBrowserProfiles,
   ) {
     for (const platform of platforms) {
       if (this.platforms.has(platform.platform)) throw new Error(`发布平台重复注册：${platform.platform}`);
@@ -44,6 +47,7 @@ export class TaskPlatformService {
     return {
       ...(!config.trialAvailable && { workspace: { trialOwnerId: null } }),
       OR: [
+        { selectedMode: { in: ['manual_handoff', 'local_browser'] }, OR: [{ executionChannel: null }, { executionChannel: 'manual' }] },
         { account: { channelKind: 'manual' }, executionChannel: { in: ['manual'] } },
         { account: { channelKind: 'manual' }, executionChannel: null },
         ...[...this.platforms.values()].flatMap(platform => platform.dispatchScope()),
@@ -80,10 +84,33 @@ export class TaskPlatformService {
     this.platform(platform).validateRemoteId(remoteId);
   }
 
-  requireAvailableAccount(account: ChannelAccount, variant: PublishableVariant, now: Date, trial: boolean) {
+  channelFor(account: ChannelAccount, now: Date, trial: boolean, mode?: string | null): ChannelKind | undefined {
+    const capabilities = resolveAccountCapabilities(account, now, trial);
+    if (!mode) return capabilities.channel;
+    if (mode === 'official_api') return capabilities.channel === 'official' ? 'official' : undefined;
+    if (mode === 'sandbox') return capabilities.channel === 'sandbox' ? 'sandbox' : undefined;
+    if (!['manual_handoff', 'local_browser'].includes(mode) || !capabilities.identityVerified || trial
+      || account.archivedAt || (account.rateLimitedUntil && account.rateLimitedUntil > now)) return;
+    if (mode === 'local_browser' && (account.platform !== 'bilibili' || account.channelKind !== 'manual'
+      || !extractBilibiliUid(account.externalId))) return;
+    return 'manual';
+  }
+
+  requireAvailableAccount(account: ChannelAccount, variant: PublishableVariant, now: Date, trial: boolean, mode?: string | null) {
     if (isUnverifiedBilibiliAccount(account)) throw new ConflictException(bilibiliAuthorizationRequired);
     if (!account.externalId || !account.authCheckedAt) throw new ConflictException(`账号「${account.displayName}」尚未通过平台身份核验`);
-    const { channel } = resolveAccountCapabilities(account, now, trial);
+    if (account.archivedAt) throw new ConflictException('账号已归档，请先恢复账号');
+    if (account.rateLimitedUntil && account.rateLimitedUntil > now) throw new ConflictException('账号处于平台限流期，请等待限流结束');
+    if (mode === 'local_browser' && (account.platform !== 'bilibili' || account.channelKind !== 'manual'
+      || !extractBilibiliUid(account.externalId))) throw new ConflictException('浏览器辅助需要已核验的 B 站 UID 账号；OAuth openid 暂不能关联浏览器');
+    if (mode === 'official_api') {
+      if (account.channelKind !== 'official') throw new ConflictException('该账号尚未连接官方 OAuth 授权');
+      if (!this.supportsContent(account.platform, 'official', variant)) throw new ConflictException('当前官方 Adapter 未实现视频投稿，请选择浏览器辅助或人工交接');
+      if (account.authStatus !== 'active' || !account.authExpiresAt || account.authExpiresAt <= now) throw new ConflictException('官方授权已失效或停用，请重新授权');
+      if (!account.authScope.includes('ATC_BASE') || !account.authScope.includes('ATC_DATA')) throw new ConflictException('官方授权缺少 ATC_BASE / ATC_DATA Scope');
+    }
+    if (mode === 'sandbox' && account.channelKind !== 'sandbox') throw new ConflictException('沙箱方式仅供沙箱账号模拟，不会真实投稿');
+    const channel = this.channelFor(account, now, trial, mode);
     if (!channel) throw new ConflictException(`账号「${account.displayName}」当前不可排期，请检查授权和通道配置`);
     const { contentPolicy } = this.adapters.registration(account.platform, channel);
     if (!this.supportsContent(account.platform, channel, variant)) {
@@ -98,6 +125,38 @@ export class TaskPlatformService {
       throw new BadRequestException((error as Error).message);
     }
     return channel;
+  }
+
+  async requireReady(tx: Prisma.TransactionClient, account: ChannelAccount, variant: PublishableVariant,
+    now: Date, trial: boolean, mode?: string | null, taskId?: string) {
+    const channel = this.requireAvailableAccount(account, variant, now, trial, mode);
+    // 旧客户端继续由 Worker 检查应用；显式选择方式时在创建前完成预检。
+    if (mode) await this.requireApplication(tx, account, channel);
+    if (mode === 'local_browser') {
+      if (!this.profiles) throw new ConflictException('本地浏览器未启用');
+      await this.profiles.requireVerified(account.workspaceId, account.id, extractBilibiliUid(account.externalId)!);
+    }
+    if (mode && await tx.publishTask.findFirst({ where: {
+      accountId: account.id, ...(taskId && { id: { not: taskId } }),
+      status: { in: ['dispatching', 'handed_off', 'unknown', 'submitted', 'under_review'] },
+    }, select: { id: true } })) throw new ConflictException('该账号有未完成的发布任务，请先核对并回填原任务结果');
+    return channel;
+  }
+
+  async publishOptions(tx: Prisma.TransactionClient, account: ChannelAccount, variant: PublishableVariant, now: Date, trial: boolean) {
+    const existing = await tx.publishTask.findFirst({ where: { accountId: account.id, variantId: variant.id }, select: { id: true } });
+    if (existing) return { accountId: account.id, variantId: variant.id, recommended: null, existingTaskId: existing.id,
+      modes: PUBLISH_MODES.map((mode) => ({ mode, available: false, reason: '该账号与版本已有任务，请查看原任务，避免重复发布' })) };
+    const modes = await Promise.all(PUBLISH_MODES.map(async (mode) => {
+      try {
+        await this.requireReady(tx, account, variant, now, trial, mode);
+        return { mode, available: true, reason: null };
+      } catch (error) {
+        if (!(error instanceof ConflictException || error instanceof BadRequestException)) throw error;
+        return { mode, available: false, reason: error.message };
+      }
+    }));
+    return { accountId: account.id, variantId: variant.id, recommended: modes.find((mode) => mode.available)?.mode ?? null, modes };
   }
 
   async requireApplication(tx: Prisma.TransactionClient, account: ChannelAccount, channel: ChannelKind) {

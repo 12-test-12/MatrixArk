@@ -29,7 +29,7 @@ import {
 } from './account-secrets';
 import { MatrixGroupsService } from './matrix-groups.service';
 import { decryptPlatformSecret, encryptPlatformSecret, platformKeyId } from './platform-app';
-import { bilibiliManualUidPrefix, bilibiliWebUidPrefix, parseProfileInput } from './publish-account';
+import { bilibiliManualUidPrefix, bilibiliWebUidPrefix, extractBilibiliUid, parseProfileInput } from './publish-account';
 
 const BILI_QR_TTL_MS = 180_000;
 const BILI_POLL_INTERVAL_MS = 1500;
@@ -1042,7 +1042,7 @@ export class AccountOnboardingService {
     params: {
       mid: string;
       uname: string;
-      cookieHeader: string;
+      cookieHeader?: string;
       accessMethod: 'qr_login' | 'cookie';
       accountId?: string;
       displayName?: string;
@@ -1063,34 +1063,70 @@ export class AccountOnboardingService {
       const validGroupId = params.groupId !== undefined
         ? await this.groups.assertWorkspaceGroup(tx, workspaceId, params.groupId)
         : undefined;
+      if (params.accountId) {
+        // 与排期、资料修改共用账号行锁，首次绑定时不能并发产生旧身份的任务。
+        await tx.$queryRaw`SELECT id FROM "ChannelAccount" WHERE id = ${params.accountId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+      }
       const existing = params.accountId
         ? await tx.channelAccount.findFirst({ where: { id: params.accountId, workspaceId, platform: 'bilibili' } })
         : await tx.channelAccount.findFirst({
             where: { workspaceId, platform: 'bilibili', externalId: { in: [webId, manualId] } },
           });
+      if (params.accountId && !existing) throw new NotFoundException('账号不存在');
       if (existing?.archivedAt) {
         throw new ConflictException('该 B 站账号已归档，请先在归档列表中恢复后再更新登录态');
       }
       if (existing && existing.channelKind === 'official') {
         throw new ConflictException('该 B 站账号已绑定开放平台官方通道');
       }
+      if (existing && existing.channelKind !== 'manual') {
+        throw new ConflictException('该账号不支持更新真实网页登录态');
+      }
+      if (existing) {
+        const registeredUid = extractBilibiliUid(existing.externalId);
+        if (registeredUid && registeredUid !== params.mid) {
+          throw new ConflictException(`该账号已登记 UID ${registeredUid}，登录 UID 不一致，请登录原账号`);
+        }
+        if (!registeredUid) {
+          // 只有系统生成的密码占位档案允许首次绑定；未知标识及 OAuth openid 不作为 UID 推断。
+          if (existing.accessMethod !== 'password' || existing.externalId !== `pwd-${existing.id}`) {
+            throw new ConflictException('无法确认该账号的 UID，请通过扫码或 Cookie 重新接入账号');
+          }
+          const profileUid = parseProfileInput('bilibili', existing.profileUrl).uid;
+          if (profileUid && profileUid !== params.mid) {
+            throw new ConflictException(`该账号主页已登记 UID ${profileUid}，登录 UID 不一致`);
+          }
+          if (await tx.publishTask.findFirst({ where: { workspaceId, accountId: existing.id }, select: { id: true } })) {
+            throw new ConflictException('该账号尚未绑定 UID 且已有历史任务，请单独接入已核验账号，保留原账号和历史任务');
+          }
+        }
+        if (params.accountId) {
+          const duplicate = await tx.channelAccount.findFirst({
+            where: { workspaceId, platform: 'bilibili', id: { not: existing.id }, externalId: { in: [webId, manualId] } },
+          });
+          if (duplicate) {
+            throw new ConflictException(duplicate.archivedAt
+              ? '该 B 站 UID 已有归档账号，请先恢复原账号再更新登录态'
+              : '该 B 站 UID 已绑定其他账号档案，请更新原账号的登录态');
+          }
+        }
+      }
 
       const id = existing?.id ?? randomUUID();
-      const { ciphertext, keyId } = encryptAccountSecret('cookie', workspaceId, id, params.cookieHeader);
+      const cookie = params.cookieHeader ? encryptAccountSecret('cookie', workspaceId, id, params.cookieHeader) : null;
       const resolvedName = existing
         ? existing.displayName
         : await this.uniqueDisplayName(tx, workspaceId, 'bilibili', params.displayName?.trim() || params.uname);
 
       const commonData = {
         externalId: webId,
+        profileUrl: `https://space.bilibili.com/${params.mid}`,
         channelKind: 'manual' as const,
         accessMethod: params.accessMethod,
         authStatus: 'active' as const,
         authCheckedAt: now,
         authAuthorizedBy: userId,
-        cookieCiphertext: ciphertext,
-        cookieKeyId: keyId,
-        cookieUpdatedAt: now,
+        ...(cookie && { cookieCiphertext: cookie.ciphertext, cookieKeyId: cookie.keyId, cookieUpdatedAt: now }),
         ...(params.cookieExpiresAt !== undefined && { cookieExpiresAt: params.cookieExpiresAt }),
         ...(params.egressIp !== undefined && { egressIp: params.egressIp }),
         ...(params.profileLabel !== undefined && { profileLabel: params.profileLabel }),
@@ -1121,6 +1157,13 @@ export class AccountOnboardingService {
         });
       }
       return id;
+    });
+  }
+
+  async connectBilibiliBrowserAccount(workspaceId: string, userId: string,
+    identity: { uid: string; name: string }, accountId?: string, groupId?: string | null) {
+    return this.saveBilibiliWebAccount(workspaceId, userId, {
+      mid: identity.uid, uname: identity.name, accessMethod: 'qr_login', accountId, groupId,
     });
   }
 
@@ -1199,7 +1242,11 @@ export class AccountOnboardingService {
     const profileLabel = input.profileLabel !== undefined ? (input.profileLabel?.trim() || null) : undefined;
 
     if (input.platform === 'bilibili') {
+      const profileUid = parseProfileInput('bilibili', input.profileUrl).uid;
       const { mid, uname } = await this.verifyBilibiliCookie(header);
+      if (profileUid && profileUid !== mid) {
+        throw new ConflictException('填写的主页 UID 与 Cookie 登录 UID 不一致');
+      }
       const id = await this.saveBilibiliWebAccount(workspaceId, userId, {
         mid,
         uname,

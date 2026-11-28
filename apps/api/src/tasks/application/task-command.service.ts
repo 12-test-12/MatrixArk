@@ -19,6 +19,17 @@ export class TaskCommandService {
     private readonly platforms: TaskPlatformService,
   ) { }
 
+  async publishOptions(workspaceId: string, variantIds: string[]) {
+    const variants = await this.prisma.variant.findMany({ where: { workspaceId, id: { in: variantIds } }, include: publishableVariant });
+    if (variants.length !== new Set(variantIds).size) throw new NotFoundException('版本不存在');
+    const accounts = await this.prisma.channelAccount.findMany({ where: { workspaceId, archivedAt: null,
+      platform: { in: variants.map((variant) => variant.platform) } } });
+    const now = await databaseTime(this.prisma);
+    const { trialOwnerId } = await this.prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { trialOwnerId: true } });
+    return { items: await Promise.all(variants.flatMap((variant) => accounts.filter((account) => account.platform === variant.platform)
+      .map((account) => this.platforms.publishOptions(this.prisma, account, variant, now, Boolean(trialOwnerId))))) };
+  }
+
   async schedule(workspaceId: string, userId: string, input: z.infer<typeof scheduleTasksSchema>, transaction?: Prisma.TransactionClient) {
     const variantIds = [...new Set(input.variantIds)];
     const accountIds = [...new Set(input.accountIds)];
@@ -41,6 +52,13 @@ export class TaskCommandService {
       const previous = await tx.publishTask.findMany({
         where: { workspaceId, variantId: { in: variantIds }, accountId: { in: accountIds } },
       });
+      for (const task of previous) {
+        const requested = input.accountModes?.[task.accountId];
+        const account = accounts.find((account) => account.id === task.accountId)!;
+        const channel = task.executionChannel ?? account.channelKind;
+        const previousMode = task.selectedMode ?? (channel === 'official' ? 'official_api' : channel === 'sandbox' ? 'sandbox' : 'manual_handoff');
+        if (requested && requested !== previousMode) throw new ConflictException('该版本与账号已有其他发布方式的任务，请先核对原任务，不能切换方式重复投稿');
+      }
       const existingPairs = new Set(previous.map(({ accountId, variantId }) => `${accountId}:${variantId}`));
       const now = await databaseTime(tx);
       const { trialOwnerId } = await tx.workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { trialOwnerId: true } });
@@ -55,7 +73,8 @@ export class TaskCommandService {
         if (targets.length === 0) continue;
         if (!hasApproval(variant)) throw new ConflictException('版本需要有效审核');
         for (const account of targets) {
-          this.platforms.requireAvailableAccount(account, variant, now, Boolean(trialOwnerId));
+          const selectedMode = input.accountModes?.[account.id] ?? null;
+          await this.platforms.requireReady(tx, account, variant, now, Boolean(trialOwnerId), selectedMode);
           let jitterSeconds = 0;
           if (jitterEnabled && pending.length > 0) {
             const step = maxJitter > minJitter ? randomInt(minJitter, maxJitter + 1) : minJitter;
@@ -68,6 +87,7 @@ export class TaskCommandService {
           pending.push({
             workspaceId, accountId: account.id, variantId: variant.id, scheduledAt: slotDate, createdById: userId,
             variantContentHash: variant.contentHash,
+            selectedMode,
             idempotencyKey: idempotencyKey({ accountId: account.id, variantId: variant.id, hash: variant.contentHash }),
             jitterSeconds,
           });
@@ -102,8 +122,8 @@ export class TaskCommandService {
         ...created.map((task) => ({ task, disposition: 'created' as const })),
         ...previous.map((task) => ({ task, disposition: 'existing' as const })),
       ];
-      return items.map(({ task: { id, accountId, variantId, status, scheduledAt }, disposition }) =>
-        ({ id, accountId, variantId, status, scheduledAt, disposition }));
+      return items.map(({ task: { id, accountId, variantId, status, scheduledAt, selectedMode }, disposition }) =>
+        ({ id, accountId, variantId, status, scheduledAt, selectedMode, disposition }));
     };
     return transaction ? scheduleIn(transaction) : this.prisma.$transaction(scheduleIn, { isolationLevel: 'ReadCommitted' });
   }
@@ -133,9 +153,9 @@ export class TaskCommandService {
       if (!hasApproval(task.variant) || task.variant.contentHash !== task.variantContentHash) {
         throw new ConflictException('原审核快照已失效，请审核当前版本后重新排期');
       }
-      const channel = this.platforms.requireAvailableAccount(task.account, task.variant, now, Boolean(task.workspace.trialOwnerId));
+      const channel = await this.platforms.requireReady(tx, task.account, task.variant, now, Boolean(task.workspace.trialOwnerId), task.selectedMode, task.id);
       if (task.executionChannel && task.executionChannel !== channel) throw new ConflictException('发布通道已变化，无法重新安排原任务');
-      await this.platforms.requireApplication(tx, task.account, channel);
+      if (!task.selectedMode) await this.platforms.requireApplication(tx, task.account, channel);
       if (operation === 'retry' || (operation === 'resume' && (task.attempts || task.claimedAt || task.handedOffAt || task.result || task.executionChannel))) {
         const verification = await tx.taskEvent.findFirst({
           where: { taskId: id, kind: 'verified', toStatus: 'verified' }, orderBy: { id: 'desc' },
@@ -319,7 +339,9 @@ export class TaskCommandService {
       const evidenceAssetId = await this.evidence.validateEvidence(tx, workspaceId, id, input.evidenceAssetId);
       assertTransition(task.status, input.state);
       const recordedAt = await databaseTime(tx);
-      const resolvedChannel = task.executionChannel ?? task.account.channelKind;
+      const resolvedChannel = task.executionChannel ?? (task.selectedMode
+        ? task.selectedMode === 'official_api' ? 'official' : task.selectedMode === 'sandbox' ? 'sandbox' : 'manual'
+        : task.account.channelKind);
       const receipt = {
         workspaceId, taskId: id, state: input.state, evidenceAssetId, recordedById: userId, recordedAt,
         remoteId: input.remoteId || (corrected ? task.result?.remoteId : null) || null,

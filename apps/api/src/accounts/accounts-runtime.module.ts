@@ -5,10 +5,13 @@ import { AccountRiskService } from './account-risk.service';
 import { BilibiliOAuthService } from './bilibili-oauth';
 import { MatrixGroupsService } from './matrix-groups.service';
 import { XiaohongshuIdentityService } from './xiaohongshu-identity.service';
+import { LocalBrowserProfiles } from './local-browser-profiles';
+import { config } from '../config';
 
 @Module({
   imports: [NotificationsRuntimeModule],
   providers: [
+    { provide: LocalBrowserProfiles, useFactory: () => new LocalBrowserProfiles(config.localBrowser) },
     XiaohongshuIdentityService,
     BilibiliOAuthService,
     MatrixGroupsService,
@@ -16,6 +19,7 @@ import { XiaohongshuIdentityService } from './xiaohongshu-identity.service';
     AccountOnboardingService,
   ],
   exports: [
+    LocalBrowserProfiles,
     XiaohongshuIdentityService,
     BilibiliOAuthService,
     MatrixGroupsService,

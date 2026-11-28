@@ -4,7 +4,6 @@ import { Injectable } from '@nestjs/common';
 import { type PublishTask } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { isUnverifiedBilibiliAccount } from '../../accounts/publish-account';
-import { resolveAccountCapabilities } from '../../accounts/account-capabilities';
 import { config } from '../../config';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -44,14 +43,26 @@ export class TaskClaimService {
       const variant = await tx.variant.findUniqueOrThrow({ where: { id: variantId }, include: publishableVariant });
       const account = await tx.channelAccount.findUniqueOrThrow({ where: { id: accountId } });
       const trial = Boolean(task.workspace.trialOwnerId);
-      const channel = resolveAccountCapabilities(account, now, trial).channel;
-      if (task.executionChannel && task.executionChannel !== account.channelKind) return false;
+      const channel = this.platforms.channelFor(account, now, trial, task.selectedMode);
+      if (task.executionChannel && channel && task.executionChannel !== channel) return false;
+      if (await tx.publishTask.findFirst({ where: { accountId, id: { not: id },
+        OR: [
+          { status: 'dispatching' },
+          { status: { in: ['handed_off', 'unknown', 'submitted', 'under_review'] },
+            ...(task.selectedMode ? {} : { selectedMode: { not: null } }) },
+        ],
+      }, select: { id: true } })) return false;
       // 网页配置的应用凭据读不出来时先暂停，避免把待发任务直接烧成失败。
-      const appReady = await this.platforms.applicationReady(tx, account, channel);
+      let modeError: string | undefined;
+      if (task.selectedMode) {
+        try { await this.platforms.requireReady(tx, account, variant, now, trial, task.selectedMode, task.id); }
+        catch (error) { modeError = (error as Error).message; }
+      }
+      const appReady = !modeError && await this.platforms.applicationReady(tx, account, channel);
       if (!appReady || !hasApproval(variant) || variant.contentHash !== task.variantContentHash
         || account.platform !== variant.platform || !channel || !this.platforms.supportsContent(account.platform, channel, variant)) {
-        const reason = isUnverifiedBilibiliAccount(account) ? bilibiliAuthorizationRequired
-          : appReady ? '审核快照失效或发布账号不可用' : 'B 站开放平台应用凭据不可用，请负责人重新保存';
+        const reason = modeError ?? (isUnverifiedBilibiliAccount(account) ? bilibiliAuthorizationRequired
+          : appReady ? '审核快照失效或发布账号不可用' : 'B 站开放平台应用凭据不可用，请负责人重新保存');
         assertTransition(task.status, 'paused');
         await transitionTask(
           tx,
@@ -68,11 +79,6 @@ export class TaskClaimService {
 
         return false;
       }
-      if (await tx.publishTask.findFirst({
-        where: { accountId, status: 'dispatching' },
-        select: { id: true },
-      })) return false;
-
       const leaseId = randomUUID();
       assertTransition(task.status, 'dispatching');
       await transitionTask(
@@ -89,7 +95,7 @@ export class TaskClaimService {
         {
           kind: 'claimed',
           leaseId,
-          details: { executionChannel: channel },
+          details: { executionChannel: channel, selectedMode: task.selectedMode },
         },
       );
 

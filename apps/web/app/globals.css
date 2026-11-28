@@ -1891,7 +1891,7 @@ textarea {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   min-height: 40px;
-  height: 100%;
+  height: auto;
   gap: 8px;
   padding: 6px 8px;
   border: 1px solid var(--line-soft);
@@ -1901,6 +1901,23 @@ textarea {
   overflow-wrap: anywhere;
   cursor: pointer;
   transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.schedule-account-list > li {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.schedule-account-list .publish-mode-field {
+  grid-template-columns: minmax(0, 1fr);
+  cursor: default;
+}
+
+.schedule-account-list details,
+.schedule-account-list > li > p {
+  padding-inline: 8px;
 }
 
 .schedule-account-list label:hover,

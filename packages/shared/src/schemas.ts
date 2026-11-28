@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CHANNEL_KINDS, PLATFORMS, type JsonValue } from './platform.js';
+import { CHANNEL_KINDS, PLATFORMS, PUBLISH_MODES, type JsonValue } from './platform.js';
 
 export const emailSchema = z.string().trim().toLowerCase().email('邮箱格式不对');
 export const passwordSchema = z.string().min(8, '密码至少 8 位').max(72);
@@ -73,9 +73,13 @@ export const scheduleJitterSchema = z.object({
 export const scheduleTasksSchema = z.object({
   variantIds: z.array(z.string().uuid()).min(1, '至少选一个平台版本'),
   accountIds: z.array(z.string().uuid()).min(1, '至少选一个账号'),
+  accountModes: z.record(z.string().uuid(), z.enum(PUBLISH_MODES)).optional(),
   scheduledAt,
   jitter: scheduleJitterSchema.optional(),
-});
+}).refine(({ accountIds, accountModes }) => !accountModes || (
+  Object.keys(accountModes).length === new Set(accountIds).size
+  && accountIds.every((id) => accountModes[id])
+), '请为每个所选账号指定发布方式，且不要包含未选账号');
 
 export const recordResultSchema = z.object({
   state: z.enum(['published', 'failed', 'unknown']),

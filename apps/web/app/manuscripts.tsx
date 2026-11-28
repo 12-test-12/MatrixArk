@@ -4,8 +4,8 @@ import {
   RotateCcw, ShieldCheck, Sparkles,
 } from 'lucide-react';
 import {
-  api, canEdit, canReview, cleanAccountName, fileBody, formatTime, imageUrl, platforms, post, publishPlatformLabel, useAction, useResource,
-  type Account, type Manuscript, type ManuscriptSummary, type ManuscriptVariant, type MatrixGroup, type Platform, type Role, type Variant,
+  api, canEdit, canReview, cleanAccountName, fileBody, formatTime, imageUrl, platforms, post, publishModeLabel, publishPlatformLabel, useAction, useResource,
+  type Account, type Manuscript, type ManuscriptSummary, type ManuscriptVariant, type MatrixGroup, type Platform, type PublishMode, type PublishOption, type Role, type Variant,
 } from './api';
 import { pushToast } from './toast';
 import { askConfirm } from './confirm-dialog';
@@ -238,8 +238,12 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
 }) {
   const action = useAction();
   const groups = useResource<MatrixGroup[]>(scope + '/accounts/groups');
-  const targets = accounts.filter((account) => (account.availableForHandoff || account.availableForOfficial)
-    && variants.some(({ platform, videoAsset }) => platform === account.platform && (!videoAsset || account.channelKind !== 'official')));
+  const options = useResource<{ items: PublishOption[] }>(variants.length
+    ? scope + '/tasks/publish-options?variantIds=' + variants.map(({ id }) => id).join(',') : null, 10_000);
+  const [modes, setModes] = useState<Record<string, PublishMode>>({});
+  function optionFor(account: Account) { return options.data?.items.find((item) => item.accountId === account.id); }
+  function modeFor(account: Account) { return modes[account.id] ?? optionFor(account)?.recommended; }
+  const targets = accounts.filter((account) => optionFor(account)?.modes.some((item) => item.available));
   const [selectedPlatform, setPlatform] = useState<Platform | ''>('');
   const platform = selectedPlatform || (variants.length === 1 ? variants[0]!.platform : '');
   const [search, setSearch] = useState('');
@@ -253,16 +257,17 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
   const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 9);
   const localZone = new Intl.DateTimeFormat('zh-CN', { timeZoneName: 'longGeneric' })
     .formatToParts(now).find(({ type }) => type === 'timeZoneName')?.value ?? '设备时区';
-  const selected = targets.filter(({ id }) => selection.includes(id));
+  const selected = targets.filter((account) => selection.includes(account.id)
+    && optionFor(account)?.modes.some((item) => item.mode === modeFor(account) && item.available));
   const current = currentVariants.find((variant) => variant.platform === platform);
   const eligible = variants.find((variant) => variant.platform === platform);
-  const group = targets.filter((account) => account.platform === platform);
+  const group = accounts.filter((account) => account.platform === platform && optionFor(account));
   const query = search.trim().toLowerCase();
   const matching = group.filter((account) => account.displayName.toLowerCase().includes(query)
     || account.alias?.toLowerCase().includes(query)
     || account.operator?.toLowerCase().includes(query));
-  const matchingIds = matching.map(({ id }) => id);
-  const allMatchingSelected = matchingIds.every((id) => selection.includes(id));
+  const matchingIds = matching.filter((account) => targets.includes(account)).map(({ id }) => id);
+  const allMatchingSelected = matchingIds.length > 0 && matchingIds.every((id) => selection.includes(id));
   const activeGroups = (groups.data ?? []).filter((item) => accounts.some((acc) => acc.groupId === item.id));
   function selectByMatrixGroup(matrixGroup: MatrixGroup) {
     const inGroup = accounts.filter((acc) => acc.groupId === matrixGroup.id);
@@ -272,7 +277,7 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
       return;
     }
     const allIn = compatibleIds.every((id) => selection.includes(id));
-    setSelection((prev) => (allIn ? prev.filter((id) => !compatibleIds.includes(id)) : [...new Set([...prev, ...compatibleIds])]));
+    selectAccounts(compatibleIds, !allIn);
     const skipped = inGroup.length - compatibleIds.length;
     setGroupNotice(allIn
       ? `已取消选择矩阵组「${matrixGroup.name}」的账号。`
@@ -280,6 +285,11 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
   }
   function selectAccounts(ids: string[], checked: boolean) {
     const current = selected.map(({ id }) => id);
+    if (checked) {
+      const defaults = Object.fromEntries(targets.filter((account) => ids.includes(account.id))
+        .map((account) => [account.id, modeFor(account)!]));
+      setModes((previous) => ({ ...defaults, ...previous }));
+    }
     setSelection(checked ? [...new Set([...current, ...ids])] : current.filter((id) => !ids.includes(id)));
     if (checked && platform) previewPlatform(platform);
   }
@@ -292,6 +302,7 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
       const response = await post<{ items: { id: string; disposition?: 'created' | 'existing' }[] }>(scope + '/tasks', {
         variantIds: variants.filter(({ platform }) => selected.some((account) => account.platform === platform)).map(({ id }) => id),
         accountIds: selected.map(({ id }) => id),
+        accountModes: Object.fromEntries(selected.map((account) => [account.id, modeFor(account)])),
         scheduledAt: date.toISOString(),
         ...(useJitter ? { jitter: { enabled: true, minSeconds: 30, maxSeconds: 180 } } : {}),
       });
@@ -308,15 +319,17 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
       onSchedule(response.items[0].id);
     });
   }
-  const immediate = selected.length > 0 && selected.every((account) => account.availableForHandoff) ? '立即生成交接待办'
-    : selected.length > 0 && selected.every((account) => account.channelKind === 'sandbox') ? '立即模拟投稿'
-      : selected.length > 0 && selected.every((account) => account.channelKind === 'official') ? '立即投稿' : '立即执行';
+  const immediate = selected.length > 0 && selected.every((account) => ['manual_handoff', 'local_browser'].includes(modeFor(account)!)) ? '立即生成交接待办'
+    : selected.length > 0 && selected.every((account) => modeFor(account) === 'sandbox') ? '立即模拟投稿'
+      : selected.length > 0 && selected.every((account) => modeFor(account) === 'official_api') ? '立即投稿' : '立即执行';
   return <div id="publish-schedule" className="schedule" tabIndex={-1}>
     <h3><CalendarPlus size={17} aria-hidden="true" />安排发布</h3>
     <form className="form-stack" aria-busy={action.busy} onSubmit={(event) => {
       event.preventDefault();
       schedule(new Date(scheduledAt));
     }}>
+      {options.loading && <Loading />}
+      {options.error && <><Feedback error={options.error} /><button type="button" className="text-button" onClick={options.refresh}>重试加载发布方式</button></>}
       {activeGroups.length > 0 && <div className="field-group">
         <div className="section-line">
           <span>按矩阵组跨平台快选</span>
@@ -352,8 +365,7 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
         <button type="button" className="text-button" onClick={() => showPlatform(platform)}>查看版本</button>
       </p>}
       {eligible && group.length === 0 && <p className="muted small">
-        {eligible.videoAsset && accounts.some((account) => account.platform === platform && account.channelKind === 'official')
-          ? '当前视频需选择人工交接或沙箱账号。' : '该平台暂无可用账号，请检查账号连接或授权。'}
+        该平台暂无可用账号，请检查账号连接或授权。
         <button type="button" className="text-button" onClick={openAccounts}>查看发布账号</button>
       </p>}
       {eligible && group.length > 0 && <fieldset className="schedule-accounts" disabled={action.busy}>
@@ -365,7 +377,7 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
               if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.preventDefault();
             }} />
         </label>}
-        {matching.length > 1 && <button type="button" className="text-button"
+        {matchingIds.length > 1 && <button type="button" className="text-button"
           onClick={() => selectAccounts(matchingIds, !allMatchingSelected)}>
           {allMatchingSelected ? '取消全选' : '全选'}{query ? '搜索结果' : '当前平台账号'}
         </button>}
@@ -373,9 +385,30 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
           : <ul className="schedule-account-list">
             {matching.map((account) => <li key={account.id}><label>
               <input type="checkbox" checked={selection.includes(account.id)}
+                disabled={!targets.includes(account)}
                 onChange={(event) => selectAccounts([account.id], event.currentTarget.checked)} />
-              <span>{cleanAccountName(account.displayName)} · {account.channelKind === 'sandbox' ? '沙箱模拟' : account.availableForOfficial ? '自动投稿' : '人工交接'}</span>
-            </label></li>)}
+              <span>{cleanAccountName(account.displayName)}</span>
+            </label>
+              <label className="publish-mode-field">发布方式 · {cleanAccountName(account.displayName)}
+                <select value={modeFor(account) ?? ''} disabled={!targets.includes(account)} onChange={(event) => {
+                  const selectedMode = event.currentTarget.value as PublishMode;
+                  setModes((previous) => ({ ...previous, [account.id]: selectedMode }));
+                }}>
+                  {!modeFor(account) && <option value="">暂无可用方式</option>}
+                  {optionFor(account)?.modes.map((item) => <option key={item.mode} value={item.mode} disabled={!item.available}>
+                    {publishModeLabel[item.mode]}{!item.available ? '（不可用）' : item.mode === optionFor(account)?.recommended ? '（推荐）' : ''}
+                  </option>)}
+                </select>
+              </label>
+              <details className="muted small"><summary>查看发布方式与不可用原因</summary>
+                <ul>{optionFor(account)?.modes.map((item) => <li key={item.mode}>{publishModeLabel[item.mode]}：{item.reason ?? '可用'}</li>)}</ul>
+              </details>
+              {optionFor(account)?.existingTaskId && <button type="button" className="text-button"
+                onClick={() => onSchedule(optionFor(account)!.existingTaskId!)}>查看已有任务</button>}
+              {modes[account.id] && !optionFor(account)?.modes.some((item) => item.mode === modes[account.id] && item.available)
+                && <p className="muted small" role="status">当前选择的方式不可用，请查看原因并重新选择。</p>}
+              {modeFor(account) === 'local_browser' && <p className="muted small">先生成已审交接包，再从任务打开对应账号浏览器；完成投稿后手动回填结果。</p>}
+            </li>)}
           </ul>}
       </fieldset>}
       {targets.length > 0 && <>
@@ -403,10 +436,10 @@ function Schedule({ scope, variants, currentVariants, accounts, onSchedule, open
         </div>
         <Feedback error={action.error} />
         <div className="actions">
-          <button className="button primary" disabled={action.busy || selected.length === 0}>
+          <button className="button primary" disabled={action.busy || selected.length === 0 || Boolean(options.error)}>
             {selected.length ? `为 ${selected.length} 个账号排期` : '选择账号后排期'}<ChevronRight size={15} aria-hidden="true" />
           </button>
-          <button type="button" className="button" disabled={action.busy || selected.length === 0} onClick={() => schedule(new Date(), true)}>{immediate}</button>
+          <button type="button" className="button" disabled={action.busy || selected.length === 0 || Boolean(options.error)} onClick={() => schedule(new Date(), true)}>{immediate}</button>
         </div>
       </>}
     </form>

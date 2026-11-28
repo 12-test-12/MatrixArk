@@ -23,6 +23,10 @@ export class TasksService {
     return this.commands.schedule(...args);
   }
 
+  publishOptions(...args: Parameters<TaskCommandService['publishOptions']>) {
+    return this.commands.publishOptions(...args);
+  }
+
   changeSchedule(...args: Parameters<TaskCommandService['changeSchedule']>) {
     return this.commands.changeSchedule(...args);
   }
@@ -61,6 +65,18 @@ export class TasksService {
 
   handoff(...args: Parameters<TaskEvidenceService['handoff']>) {
     return this.evidence.handoff(...args);
+  }
+
+  openBrowser(...args: Parameters<TaskEvidenceService['openBrowser']>) {
+    return this.evidence.openBrowser(...args);
+  }
+
+  browserStatus(...args: Parameters<TaskEvidenceService['browserStatus']>) {
+    return this.evidence.browserStatus(...args);
+  }
+
+  closeBrowser(...args: Parameters<TaskEvidenceService['closeBrowser']>) {
+    return this.evidence.closeBrowser(...args);
   }
 
   readEvidence(...args: Parameters<TaskEvidenceService['readEvidence']>) {

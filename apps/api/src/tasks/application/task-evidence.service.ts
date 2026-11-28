@@ -1,4 +1,5 @@
-import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { BilibiliBrowserService } from '../../accounts/bilibili-browser.service';
 import { Prisma, type PublishTask, type Role } from '@prisma/client';
 import { isUnverifiedBilibiliAccount, resolveAccountProfileUrl } from '../../accounts/publish-account';
 import { inspectSnapshot, variantSnapshot } from '../../content/content.service';
@@ -12,7 +13,59 @@ export class TaskEvidenceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
+    @Optional() private readonly browser?: BilibiliBrowserService,
   ) { }
+
+  async openBrowser(workspaceId: string, id: string, options?: { switchAccount?: boolean }) {
+    const task = await this.prisma.publishTask.findFirst({ where: { workspaceId, id } });
+    if (!task) throw new NotFoundException('任务不存在');
+    if (task.selectedMode !== 'local_browser' || task.status !== 'handed_off') {
+      throw new ConflictException('仅待回填的浏览器辅助任务可以打开本地浏览器，请先核对原任务结果');
+    }
+    const handoff = await this.handoff(workspaceId, id);
+    if (!this.browser) throw new ConflictException('本地浏览器服务不可用');
+    const variant = await this.prisma.variant.findUniqueOrThrow({
+      where: { id: task.variantId },
+      select: {
+        platformFields: true,
+        videoAsset: { select: { storageKey: true } },
+        assets: { orderBy: { position: 'asc' }, select: { asset: { select: { storageKey: true } } } },
+      },
+    });
+    const fields = variant.platformFields && typeof variant.platformFields === 'object' && !Array.isArray(variant.platformFields)
+      ? variant.platformFields as Record<string, unknown>
+      : {};
+    const imagePaths = await Promise.all(
+      variant.assets.map(({ asset }) => this.storage.imagePath(workspaceId, asset.storageKey)),
+    );
+    const videoPath = variant.videoAsset ? this.storage.videoPath(workspaceId, variant.videoAsset.storageKey) : undefined;
+    return this.browser.openPublishing(workspaceId, task.accountId, {
+      taskId: task.id,
+      kind: videoPath ? 'video' : 'article',
+      title: handoff.title,
+      body: handoff.body,
+      tags: handoff.tags,
+      summary: typeof fields.summary === 'string' ? fields.summary : undefined,
+      imagePaths,
+      videoPath,
+    }, options);
+  }
+
+  async browserStatus(workspaceId: string, id: string) {
+    const task = await this.prisma.publishTask.findFirst({ where: { workspaceId, id }, select: { id: true } });
+    if (!task) throw new NotFoundException('任务不存在');
+    if (!this.browser) {
+      return { enabled: false, opened: false, activeForTask: false, sessionId: null, targetUrl: null, filled: [], manualSteps: [], capture: null };
+    }
+    return this.browser.getTaskStatus(workspaceId, id);
+  }
+
+  async closeBrowser(workspaceId: string, id: string) {
+    const task = await this.prisma.publishTask.findFirst({ where: { workspaceId, id }, select: { id: true } });
+    if (!task) throw new NotFoundException('任务不存在');
+    if (!this.browser) throw new ConflictException('本地浏览器服务不可用');
+    return this.browser.closeTaskBrowser(workspaceId, id);
+  }
 
   async handoff(workspaceId: string, id: string) {
     const task = await this.prisma.publishTask.findFirst({

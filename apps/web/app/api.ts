@@ -56,6 +56,7 @@ export type Account = {
   cookieExpiresAt?: string | null; envCheckedAt?: string | null;
   riskStatus?: AccountRiskStatus; riskReason?: string | null; riskDetectedAt?: string | null;
   authStatus?: AccountAuthStatus; authExpiresAt?: string | null; authCheckedAt?: string | null;
+  authScope?: string[];
   identityVerified: boolean; identityCheckedAt: string | null;
   availableForHandoff: boolean; availableForOfficial: boolean; availableForMetrics?: boolean;
   capabilityReason?: CapabilityReasonCode | null;
@@ -113,10 +114,17 @@ export type Result = {
 export type Task = {
   id: string; status: TaskStatus; scheduledAt: string; handedOffAt: string | null; claimedAt: string | null; lastError: string | null;
   executionChannel: string | null; isSandbox: boolean | null;
+  selectedMode?: PublishMode | null;
   account: Pick<Account, 'id' | 'platform' | 'displayName' | 'operator' | 'channelKind' | 'accessMethod'>;
   variant: Pick<Variant, 'id' | 'title' | 'platform' | 'version'> & { videoAssetId?: string | null };
   result: Result | null;
 };
+export type PublishMode = 'official_api' | 'local_browser' | 'manual_handoff' | 'sandbox';
+export const publishModeLabel: Record<PublishMode, string> = {
+  official_api: '官方 API', local_browser: '本地浏览器辅助', manual_handoff: '人工交接', sandbox: '沙箱模拟',
+};
+export type PublishOption = { accountId: string; variantId: string; recommended: PublishMode | null; existingTaskId?: string;
+  modes: { mode: PublishMode; available: boolean; reason: string | null }[] };
 export type TaskDetail = Task & {
   notificationDeliveries?: {
     id: string; kind: 'handoff_ready' | 'overdue_reminder'; status: 'pending' | 'sending' | 'sent' | 'failed' | 'skipped';
@@ -134,6 +142,29 @@ export type Handoff = Pick<Variant, 'title' | 'body' | 'tags' | 'version'> & {
   assets: (Picture & { url: string })[];
   profileUrl?: string | null;
   video?: (VideoAsset & { url: string }) | null;
+};
+export type BrowserTaskCapture = {
+  taskId: string;
+  detectedUrl: string;
+  detectedId: string | null;
+  detectedAt: string;
+};
+export type BrowserTaskStatus = {
+  enabled: boolean;
+  opened: boolean;
+  activeForTask: boolean;
+  sessionId: string | null;
+  targetUrl: string | null;
+  filled: string[];
+  manualSteps: string[];
+  capture: BrowserTaskCapture | null;
+};
+export type BrowserOpenResult = {
+  sessionId: string;
+  targetUrl?: string;
+  filled?: string[];
+  manualSteps?: string[];
+  message: string;
 };
 
 export const roleLabel: Record<Role, string> = {

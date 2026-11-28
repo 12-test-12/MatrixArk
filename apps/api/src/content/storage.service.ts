@@ -124,19 +124,30 @@ export class StorageService {
     return this.absolute(key);
   }
 
-  async readImage(workspaceId: string, key: string) {
+  private async readVerifiedImage(workspaceId: string, key: string) {
     const [office, filename, ...rest] = key.split('/');
     if (office !== workspaceId || !filename || rest.length || !/^[\w.-]+$/.test(filename)
       || filename === '.' || filename === '..') throw new NotFoundException('文件不存在');
+    const path = this.absolute(key);
     let data: Buffer;
     try {
-      data = await readFile(this.absolute(key));
+      data = await readFile(path);
     } catch {
       throw new NotFoundException('文件不存在');
     }
     const mimeType = imageType(data);
     if (!mimeType) throw new NotFoundException('文件不存在');
+    return { path, data, mimeType };
+  }
+
+  async readImage(workspaceId: string, key: string) {
+    const { data, mimeType } = await this.readVerifiedImage(workspaceId, key);
     return { data, mimeType };
+  }
+
+  async imagePath(workspaceId: string, key: string) {
+    const { path } = await this.readVerifiedImage(workspaceId, key);
+    return path;
   }
 
   private absolute(key: string): string {

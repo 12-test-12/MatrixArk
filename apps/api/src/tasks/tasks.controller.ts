@@ -41,6 +41,10 @@ const historyQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(365).optional(),
 });
 
+const browserOpenSchema = z.object({
+  switchAccount: z.boolean().optional(),
+}).strict();
+
 @Controller('workspaces/:workspaceId/tasks')
 @UseGuards(WorkspaceGuard)
 export class TasksController {
@@ -69,6 +73,14 @@ export class TasksController {
   @Get('performance')
   performance(@Param('workspaceId') workspaceId: string, @Query() query: unknown) {
     return this.tasks.list(workspaceId, { ...parse(performanceSchema, query), performance: true });
+  }
+
+  @Get('publish-options')
+  publishOptions(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Query() query: unknown) {
+    assertCan(role, 'task:schedule');
+    const input = parse(z.object({ variantIds: z.string().transform((value) => value.split(','))
+      .pipe(z.array(z.string().uuid()).min(1).max(20)) }), query);
+    return this.tasks.publishOptions(workspaceId, input.variantIds);
   }
 
   @Get(':id')
@@ -119,6 +131,32 @@ export class TasksController {
   handoff(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
     assertCan(role, 'task:result');
     return this.tasks.handoff(workspaceId, id);
+  }
+
+  @Get(':id/browser')
+  browserStatus(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
+    assertCan(role, 'task:result');
+    return this.tasks.browserStatus(workspaceId, id);
+  }
+
+  @Post(':id/browser')
+  @HttpCode(200)
+  openBrowser(
+    @CurrentRole() role: Role,
+    @Param('workspaceId') workspaceId: string,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    assertCan(role, 'task:result');
+    const options = body === undefined || body === null ? {} : parse(browserOpenSchema, body);
+    return this.tasks.openBrowser(workspaceId, id, options);
+  }
+
+  @Post(':id/browser/close')
+  @HttpCode(200)
+  closeBrowser(@CurrentRole() role: Role, @Param('workspaceId') workspaceId: string, @Param('id') id: string) {
+    assertCan(role, 'task:result');
+    return this.tasks.closeBrowser(workspaceId, id);
   }
 
   @Post(':id/evidence')

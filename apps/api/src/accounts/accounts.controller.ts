@@ -66,7 +66,10 @@ const appSchema = z.object({
 const bilibiliGrantSchema = z.object({
   accessToken: z.string().trim().regex(/^[!-~]{1,4096}$/, '请填写开放平台账号访问令牌'),
   expiresAt: z.string().datetime({ offset: true }).transform((value) => new Date(value)),
+  accountId: z.string().min(1).optional(),
 }).strict();
+const bilibiliAuthorizeSchema = z.object({ accountId: z.string().min(1).optional() }).strict();
+const confirmGrantSchema = z.object({ saveSeparately: z.boolean().default(false) }).strict();
 const biliQrStartSchema = z.object({
   groupId: z.string().min(1).nullable().optional(),
 }).strict().optional();
@@ -153,6 +156,7 @@ export class AccountsController {
         riskReason: account.riskReason,
         riskDetectedAt: account.riskDetectedAt,
         authStatus: account.authStatus,
+        authScope: account.authScope,
         authExpiresAt: account.authExpiresAt,
         authCheckedAt: account.authCheckedAt,
         identityVerified: capabilities.identityVerified,
@@ -436,16 +440,51 @@ export class AccountsController {
     const grant = parse(bilibiliGrantSchema, body);
     const app = await readPlatformApp(this.prisma, workspaceId, 'bilibili');
     if (!app && !config.bilibili.enabled) throw new ConflictException('请先在发布账号页保存 B 站开放平台应用凭据。');
-    const id = await bindBilibiliAccount(this.prisma, workspaceId, user.id, grant, app);
+    const id = await bindBilibiliAccount(this.prisma, workspaceId, user.id, grant, app, { accountId: grant.accountId });
     return { id };
   }
 
   @Post('bilibili/authorize')
   authorizeBilibili(@Param('workspaceId') workspaceId: string, @CurrentMembership() membership: { role: Role },
-    @CurrentUser() user: SessionUser, @CurrentTrial() trial: boolean, @Headers('origin') origin?: string) {
+    @CurrentUser() user: SessionUser, @CurrentTrial() trial: boolean, @Body() body: unknown, @Headers('origin') origin?: string) {
     assertCan(membership.role, 'account:manage');
     if (trial || config.sandboxChannel) throw new ConflictException('真实 B 站账号授权仅在非沙箱的正式工作室开放。');
-    return this.bilibiliOAuth.start(workspaceId, user.id, origin);
+    return this.bilibiliOAuth.start(workspaceId, user.id, origin, parse(bilibiliAuthorizeSchema, body).accountId);
+  }
+
+  @Get('bilibili/pending')
+  @Header('Cache-Control', 'no-store')
+  pendingBilibili(@Param('workspaceId') workspaceId: string, @CurrentMembership() membership: { role: Role },
+    @CurrentUser() user: SessionUser, @CurrentTrial() trial: boolean) {
+    assertCan(membership.role, 'account:manage');
+    if (trial) throw new ConflictException('试用工作室不支持真实授权');
+    return this.bilibiliOAuth.pending(workspaceId, user.id);
+  }
+
+  @Post('bilibili/pending/:id/confirm')
+  confirmBilibili(@Param('workspaceId') workspaceId: string, @Param('id') id: string,
+    @CurrentMembership() membership: { role: Role }, @CurrentUser() user: SessionUser,
+    @CurrentTrial() trial: boolean, @Body() body: unknown) {
+    assertCan(membership.role, 'account:manage');
+    if (trial) throw new ConflictException('试用工作室不支持真实授权');
+    const validId = parse(z.string().uuid(), id);
+    return this.bilibiliOAuth.confirm(workspaceId, user.id, validId, parse(confirmGrantSchema, body).saveSeparately);
+  }
+
+  @Delete('bilibili/pending/:id')
+  discardBilibili(@Param('workspaceId') workspaceId: string, @Param('id') id: string,
+    @CurrentMembership() membership: { role: Role }, @CurrentUser() user: SessionUser, @CurrentTrial() trial: boolean) {
+    assertCan(membership.role, 'account:manage');
+    if (trial) throw new ConflictException('试用工作室不支持真实授权');
+    return this.bilibiliOAuth.discard(workspaceId, user.id, parse(z.string().uuid(), id));
+  }
+
+  @Post(':id/oauth/disable')
+  disableBilibili(@Param('workspaceId') workspaceId: string, @Param('id') id: string,
+    @CurrentMembership() membership: { role: Role }, @CurrentTrial() trial: boolean) {
+    assertCan(membership.role, 'account:manage');
+    if (trial) throw new ConflictException('试用工作室不支持真实授权');
+    return this.bilibiliOAuth.disable(workspaceId, id);
   }
 
   @Post('xiaohongshu/authorize')
@@ -547,6 +586,7 @@ export class AccountsController {
     const nextEgressIp = input.egressIp !== undefined ? normalizeEgressIp(input.egressIp) : undefined;
     const nextProfileLabel = input.profileLabel !== undefined ? (input.profileLabel?.trim() || null) : undefined;
     return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "ChannelAccount" WHERE id = ${id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
       const existing = await tx.channelAccount.findFirst({ where: { id, workspaceId } });
       if (!existing) throw new NotFoundException('账号不存在');
       const parsedProfile = input.profileUrl !== undefined

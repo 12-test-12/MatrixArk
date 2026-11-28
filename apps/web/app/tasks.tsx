@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import {
   api, canEdit, canRecord, cleanAccountName, fileBody, formatPlatformAccount, formatTime, platformLabel, platforms, publishPlatformLabel, post, taskLabel, useAction, useResource,
-  type Handoff, type Platform, type Role, type Task, type TaskDetail, type TaskStatus, type WorkbenchSummary,
+  type BrowserOpenResult, type BrowserTaskStatus, type Handoff, type Platform, type Role, type Task, type TaskDetail, type TaskStatus, type WorkbenchSummary,
 } from './api';
 import { copyText } from './clipboard';
 import { pushToast } from './toast';
@@ -97,9 +97,12 @@ function useTaskEvidence(path: string) {
   };
 }
 
-function EvidenceFields({ choose }: { choose: (file?: File) => void }) {
+function EvidenceFields({ choose, remoteUrl, onRemoteUrlChange }: {
+  choose: (file?: File) => void; remoteUrl?: string; onRemoteUrlChange?: (value: string) => void;
+}) {
   return <>
-    <label>作品链接或分享文案<input name="remoteUrl" placeholder="粘贴作品链接或含链接的分享文案" maxLength={4096} /></label>
+    <label>作品链接或分享文案<input name="remoteUrl" placeholder="粘贴作品链接或含链接的分享文案" maxLength={4096}
+      {...(onRemoteUrlChange ? { value: remoteUrl ?? '', onChange: (event) => onRemoteUrlChange(event.currentTarget.value) } : {})} /></label>
     <label>截图证据 <small>JPG、PNG 或 WebP，最大 20 MB</small>
       <input className="file-field" type="file" accept="image/jpeg,image/png,image/webp"
         onChange={(event) => choose(event.currentTarget.files?.[0])} />
@@ -115,11 +118,19 @@ function readWorkUrl(fields: FormData) {
   return link;
 }
 
-function RecordResult({ path, saved, action, correction = false, trial = false }: {
-  path: string; saved: () => void; action: ReturnType<typeof useAction>; correction?: boolean; trial?: boolean;
+function RecordResult({ path, saved, action, correction = false, trial = false, suggestedUrl }: {
+  path: string; saved: () => void; action: ReturnType<typeof useAction>; correction?: boolean; trial?: boolean; suggestedUrl?: string | null;
 }) {
   const [state, setState] = useState<'published' | 'failed' | 'unknown'>('published');
+  const [urlDraft, setUrlDraft] = useState('');
+  const [appliedSuggestion, setAppliedSuggestion] = useState<string | null>(null);
   const evidence = useTaskEvidence(path);
+  useEffect(() => {
+    if (suggestedUrl && suggestedUrl !== appliedSuggestion && !urlDraft.trim()) {
+      setUrlDraft(suggestedUrl);
+      setAppliedSuggestion(suggestedUrl);
+    }
+  }, [suggestedUrl, appliedSuggestion, urlDraft]);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const fields = new FormData(event.currentTarget);
@@ -141,7 +152,10 @@ function RecordResult({ path, saved, action, correction = false, trial = false }
       {!correction && <label>发布结果<select value={state} onChange={(event) => setState(event.target.value as typeof state)}>
         <option value="published">已发布</option><option value="failed">失败</option><option value="unknown">待核实</option>
       </select></label>}
-      <EvidenceFields choose={evidence.choose} />
+      <EvidenceFields choose={evidence.choose}
+        remoteUrl={correction ? undefined : urlDraft}
+        onRemoteUrlChange={correction ? undefined : setUrlDraft} />
+      {!correction && appliedSuggestion && <p className="muted small" role="status">已从本地浏览器自动捕获作品链接，请核对后点击保存回填。</p>}
       {trial && state === 'published' && <p className="muted small">演练可直接保存，留空时会使用示例作品链接。</p>}
       {correction ? <label>更正原因<textarea name="reason" required rows={3} maxLength={1000} /></label>
         : <label>备注 <small>选填</small><textarea name="note" rows={3} maxLength={1000} placeholder="例如 发布后需要继续观察审核结果" /></label>}
@@ -267,21 +281,33 @@ function TaskActions({ task, path, role, changed }: { task: TaskDetail; path: st
   </div>;
 }
 
-function channelInfo(task: Pick<Task, 'executionChannel' | 'isSandbox' | 'status' | 'account'>) {
-  const channel = task.executionChannel ?? (task.status === 'scheduled' ? task.account.channelKind : null);
+function taskChannel(task: Pick<Task, 'executionChannel' | 'selectedMode' | 'status' | 'account'>) {
+  return task.executionChannel ?? (task.selectedMode
+    ? task.selectedMode === 'official_api' ? 'official' : task.selectedMode === 'sandbox' ? 'sandbox' : 'manual'
+    : task.status === 'scheduled' ? task.account.channelKind : null);
+}
+
+function channelInfo(task: Pick<Task, 'executionChannel' | 'selectedMode' | 'isSandbox' | 'status' | 'account'>) {
+  const channel = taskChannel(task);
+  if (task.selectedMode === 'local_browser') return { label: '本地浏览器辅助', tone: 'amber' as const };
   if (task.isSandbox || channel === 'sandbox') return { label: '沙箱演示', tone: 'gray' as const };
   if (channel === 'official') return { label: '官方自动投稿', tone: 'violet' as const };
   return { label: '人工交接', tone: 'amber' as const };
 }
 
-function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
+function TaskDetails({ id, scope, role, onRecorded, people, trial, nextBrowserTaskId, onSelectTask }: {
   id: string; scope: string; role: Role; onRecorded: (title: string) => void; people: Map<string, string>; trial?: boolean;
+  nextBrowserTaskId?: string; onSelectTask?: (id: string) => void;
 }) {
   const path = scope + '/tasks/' + id;
   const detail = useResource<TaskDetail>(path, 5_000);
   const recordAction = useAction();
+  const browserAction = useAction();
+  const [browserResult, setBrowserResult] = useState<BrowserOpenResult | null>(null);
   const task = detail.data;
   const recordable = canRecord(role);
+  const isLocalBrowserHandoff = Boolean(task?.selectedMode === 'local_browser' && task?.status === 'handed_off' && !trial && recordable);
+  const browserStatus = useResource<BrowserTaskStatus>(isLocalBrowserHandoff ? path + '/browser' : null, 2_500);
   // 只拦截后端认定为「仅 UID 历史账号」的 B 站人工任务；扫码 / Cookie 接入的 B 站账号可以正常交接与回填。
   const blockedHandoff = task?.status === 'handed_off' && task.account.platform === 'bilibili'
     && task.account.channelKind === 'manual' && task.account.accessMethod === 'manual_uid';
@@ -293,7 +319,7 @@ function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
 
   const result = task.result;
   const resultUrl = externalUrl(result?.remoteUrl ?? null);
-  const channel = task.executionChannel ?? (task.status === 'scheduled' ? task.account.channelKind : null);
+  const channel = taskChannel(task);
   const channelMeta = channelInfo(task);
   const automated = channel === 'official' || channel === 'sandbox';
   function actorName(actorId: string | null) {
@@ -337,16 +363,61 @@ function TaskDetails({ id, scope, role, onRecorded, people, trial }: {
           : '到计划时间后，系统将生成已审交接包。'}</p>
       </div>}
       <Feedback error={handoff.error} />
+      {task.status === 'handed_off' && <Feedback error={browserAction.error} />}
+      {task.status === 'handed_off' && browserAction.notice && <p className="feedback" role="status">{browserAction.notice}</p>}
       {blockedHandoff && <Feedback error="该 B 站账号尚未通过官方授权。请连接已授权账号后重新安排发布。" />}
       {handoff.data && task.status === 'handed_off' && !trial && <div className="actions">
         {handoff.data.profileUrl && <a className="button compact" href={handoff.data.profileUrl} target="_blank" rel="noreferrer">
           <ExternalLink size={15} aria-hidden="true" />核对{platformLabel[task.variant.platform]}账号主页
         </a>}
-        <a className="button compact" href={task.variant.platform === 'xiaohongshu' ? 'https://creator.xiaohongshu.com/' : 'https://member.bilibili.com/'}
-          target="_blank" rel="noreferrer"><ExternalLink size={15} aria-hidden="true" />打开平台创作中心</a>
+        {task.selectedMode === 'local_browser' ? <>
+          <button type="button" className="button primary compact" disabled={browserAction.busy}
+            onClick={() => void browserAction.run(async () => {
+              const result = await post<BrowserOpenResult>(path + '/browser', { switchAccount: true });
+              setBrowserResult(result);
+              browserStatus.refresh();
+            })}>
+            <ExternalLink size={15} aria-hidden="true" />
+            {browserAction.busy
+              ? '正在核验登录并预填…'
+              : browserStatus.data?.activeForTask
+                ? '重新打开投稿页并预填'
+                : browserStatus.data?.opened
+                  ? '切换账号并自动预填'
+                  : '打开浏览器并自动预填'}
+          </button>
+          {browserStatus.data?.activeForTask && <button type="button" className="button compact" disabled={browserAction.busy}
+            onClick={() => void browserAction.run(async () => {
+              await post(path + '/browser/close', {});
+              setBrowserResult(null);
+              browserStatus.refresh();
+            }, '已关闭本账号浏览器会话。')}>
+            <X size={15} aria-hidden="true" />关闭浏览器
+          </button>}
+          {nextBrowserTaskId && onSelectTask && <button type="button" className="button compact" disabled={browserAction.busy}
+            onClick={() => onSelectTask(nextBrowserTaskId)}>
+            <ArrowRight size={15} aria-hidden="true" />切到下一条待发
+          </button>}
+        </> : <a className="button compact" href={task.variant.platform === 'xiaohongshu' ? 'https://creator.xiaohongshu.com/' : 'https://member.bilibili.com/'}
+          target="_blank" rel="noreferrer"><ExternalLink size={15} aria-hidden="true" />打开平台创作中心</a>}
       </div>}
+      {isLocalBrowserHandoff && (browserStatus.data?.activeForTask || browserResult) && (() => {
+        const filled = browserStatus.data?.activeForTask ? browserStatus.data.filled : browserResult?.filled ?? [];
+        const manualSteps = browserStatus.data?.activeForTask ? browserStatus.data.manualSteps : browserResult?.manualSteps ?? [];
+        const capture = browserStatus.data?.capture;
+        return <div className="task-section form-stack">
+          <div className="section-line">
+            <h3><Send size={17} aria-hidden="true" />本地浏览器辅助状态</h3>
+            <span className={`badge ${capture ? 'green' : 'amber'}`}>{capture ? '已捕获作品链接' : '等待浏览器确认发布'}</span>
+          </div>
+          {filled.length > 0 && <p className="small"><strong>已自动预填：</strong>{filled.join('、')}</p>}
+          {manualSteps.map((step, index) => <p key={index} className="muted small">· {step}</p>)}
+          {capture && <p className="small" role="status"><strong>已捕获链接：</strong>{capture.detectedUrl}</p>}
+        </div>;
+      })()}
       {handoff.loading ? <Loading /> : handoff.data && <Package data={handoff.data} />}
-      {recordable && !blockedHandoff && task.status === 'handed_off' && <RecordResult path={path} action={recordAction} trial={trial} saved={() => {
+      {recordable && !blockedHandoff && task.status === 'handed_off' && <RecordResult path={path} action={recordAction} trial={trial}
+        suggestedUrl={browserStatus.data?.capture?.detectedUrl ?? null} saved={() => {
         detail.refresh();
         onRecorded(`「${task.variant.title}」的发布结果已保存。`);
       }} />}
@@ -449,9 +520,19 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
     });
   }, [items, keyword, platformFilter]);
 
+  const pendingBrowserTasks = useMemo(() => {
+    return filteredItems.filter((task) => task.selectedMode === 'local_browser' && task.status === 'handed_off');
+  }, [filteredItems]);
+
   const narrowing = Boolean(keyword.trim()) || platformFilter !== 'all';
   const active = (filteredItems.some(({ id }) => id === selected) || (!narrowing && selected === initialId) ? selected : '')
     || filteredItems[0]?.id || '';
+  const nextBrowserTaskId = useMemo(() => {
+    if (!pendingBrowserTasks.length) return undefined;
+    const index = pendingBrowserTasks.findIndex((task) => task.id === active);
+    if (index === -1) return pendingBrowserTasks[0]?.id;
+    return pendingBrowserTasks.length > 1 ? pendingBrowserTasks[(index + 1) % pendingBrowserTasks.length]?.id : undefined;
+  }, [pendingBrowserTasks, active]);
   function changePage(next: string[]) { setPages(next); setSelected(''); setRecordedTitle(''); }
   function chooseTask(id: string) { setSelected(id); setRecordedTitle(''); }
   const empty = <Empty icon={CalendarDays} title={narrowing ? '本页未找到符合条件的任务' : status ? '暂无该状态的任务' : '暂无发布任务'}>
@@ -516,6 +597,11 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
       </div>
     </div>
     <Feedback error={list.error} notice={recordedTitle || undefined} />
+    {!listUnavailable && !trial && canRecord(role) && pendingBrowserTasks.length > 0 && <div className="feedback" role="status">
+      <span>本地浏览器待发送队列：本页有 {pendingBrowserTasks.length} 条任务可自动预填投稿内容并逐个切换处理。</span>
+      {nextBrowserTaskId && active !== nextBrowserTaskId && <button type="button" className="button compact"
+        onClick={() => chooseTask(nextBrowserTaskId)}>跳到下一条待发</button>}
+    </div>}
     {!listUnavailable && <div className={tableView ? 'task-table-layout' : 'split-panel'}>
       <section className="card item-list">
         <div className="card-heading">
@@ -607,8 +693,9 @@ export function Tasks({ scope, role, initialId, counts, refreshSummary, openManu
             onClick={() => { if (list.data?.nextCursor) changePage([...pages, list.data.nextCursor]); }}><ArrowRight size={17} aria-hidden="true" /></button>
         </div>}
       </section>
-      {active ? <TaskDetails key={active} id={active} scope={scope} role={role} people={people} trial={trial} onRecorded={(title) => {
-        if (status === 'handed_off') setSelected((current) => current === active ? '' : current);
+      {active ? <TaskDetails key={active} id={active} scope={scope} role={role} people={people} trial={trial}
+        nextBrowserTaskId={nextBrowserTaskId} onSelectTask={chooseTask} onRecorded={(title) => {
+        if (status === 'handed_off') setSelected((current) => current === active ? (nextBrowserTaskId ?? '') : current);
         setRecordedTitle(title);
         pushToast(title, 'success');
         list.refresh();

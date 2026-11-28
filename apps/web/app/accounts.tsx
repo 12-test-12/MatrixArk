@@ -18,6 +18,8 @@ import {
 import { pushToast } from './toast';
 import { askConfirm } from './confirm-dialog';
 import { Feedback, Loading, PageHeader, PlatformIcon } from './ui';
+import { BilibiliBrowserPanel } from './bilibili-browser-panel';
+import { BilibiliOAuthPending } from './bilibili-oauth-pending';
 
 const accountPlatforms = {
   xiaohongshu: { name: '小红书', description: '支持扫码核验、账号密码托管或 Cookie 接入，统一管理与人工交接。',
@@ -40,7 +42,7 @@ type PlatformSettings = Record<Platform, boolean> & { bilibiliSandbox: boolean; 
 type ViewMode = 'platform' | 'group';
 type KpiFilter = 'all' | 'available' | 'pending' | 'risk' | 'unchecked';
 type RiskFilter = 'all' | 'normal' | 'warning' | 'risk';
-type OnboardingTab = 'qr' | 'password' | 'cookie';
+type OnboardingTab = 'qr' | 'password' | 'cookie' | 'browser';
 
 function makeQrDataUrl(text: string) {
   const code = qrcode(0, 'M');
@@ -107,13 +109,16 @@ function AppCredentials({ path, platform, configured, onSaved }: {
   </>;
 }
 
-function BilibiliConnection({ path, hasAccounts, onConnected }: { path: string; hasAccounts: boolean; onConnected: () => void }) {
+function BilibiliConnection({ path, hasAccounts, onConnected, accountId }: {
+  path: string; hasAccounts: boolean; onConnected: () => void; accountId?: string;
+}) {
+  const grantId = useId();
   const [editing, setEditing] = useState(false);
   const action = useAction();
   const oauth = useAction();
   function connect() {
     void oauth.run(async () => {
-      const { authorizationUrl } = await post<{ authorizationUrl: string }>(path + '/authorize', {});
+      const { authorizationUrl } = await post<{ authorizationUrl: string }>(path + '/authorize', accountId ? { accountId } : {});
       window.location.assign(authorizationUrl);
     });
   }
@@ -124,7 +129,7 @@ function BilibiliConnection({ path, hasAccounts, onConnected }: { path: string; 
     void action.run(async () => {
       const expiresAt = new Date(String(fields.get('expiresAt')));
       if (!Number.isFinite(expiresAt.getTime()) || expiresAt <= new Date()) throw new Error('请选择尚未到期的授权截止时间。');
-      await post(path + '/bind', { accessToken: fields.get('accessToken'), expiresAt: expiresAt.toISOString() });
+      await post(path + '/bind', { accessToken: fields.get('accessToken'), expiresAt: expiresAt.toISOString(), ...(accountId && { accountId }) });
       form.reset();
       setEditing(false);
       onConnected();
@@ -135,14 +140,14 @@ function BilibiliConnection({ path, hasAccounts, onConnected }: { path: string; 
       <button type="button" className="button compact primary" onClick={connect} disabled={oauth.busy || action.busy}>
         {oauth.busy ? '正在打开授权页…' : hasAccounts ? '开放平台 OAuth 授权' : '连接 B 站官方专栏'}
       </button>
-      <button type="button" className="button compact" aria-expanded={editing} aria-controls="bilibili-grant"
+      <button type="button" className="button compact" aria-expanded={editing} aria-controls={grantId}
         onClick={() => { setEditing(!editing); action.reset(); }} disabled={action.busy || oauth.busy}>
         {editing ? '收起令牌绑定' : '使用已有 OAuth 令牌'}
       </button>
     </div>
     <Feedback error={oauth.error} />
     <Feedback notice={action.notice} />
-    <div id="bilibili-grant" hidden={!editing}>
+    <div id={grantId} hidden={!editing}>
       {editing && <form className="form-stack account-form" onSubmit={bind}>
         <p className="muted small">使用同一个开放平台应用，填写目标账号授权返回的访问令牌和有效期。</p>
         <label>账号访问令牌<input name="accessToken" required type="password" maxLength={4096}
@@ -648,8 +653,8 @@ function OnboardingPanel({
   return <section className="card account-onboarding-card">
     <div className="card-heading">
       <div>
-        <h2>添加发布账号（扫码 / 账号密码 / Cookie）</h2>
-        <p className="muted small">统一支持扫码接入、账号密码托管或 Cookie 导入登记多个矩阵账号。</p>
+        <h2>添加发布账号</h2>
+        <p className="muted small">通过扫码、账号密码、Cookie 或本地浏览器接入账号。</p>
       </div>
       <button type="button" className="button compact" onClick={onClose}>
         <X size={15} aria-hidden="true" />收起面板
@@ -670,6 +675,10 @@ function OnboardingPanel({
             onClick={() => setTab('cookie')}>
             <Cookie size={15} aria-hidden="true" /> 3. Cookie 导入
           </button>
+          <button type="button" role="tab" aria-selected={tab === 'browser'} className={tab === 'browser' ? 'active' : undefined}
+            onClick={() => setTab('browser')}>
+            <ExternalLink size={15} aria-hidden="true" /> 4. 本地浏览器
+          </button>
         </div>
         <div className="onboarding-target-row">
           <label>目标平台
@@ -683,15 +692,19 @@ function OnboardingPanel({
               <option value="xiaohongshu">小红书</option>
             </select>
           </label>
-          <label>归属单一矩阵组 <small>选填</small>
+          {tab !== 'browser' && <label>归属单一矩阵组 <small>选填</small>
             <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
               <option value="">暂不分组（未分组）</option>
               {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
             </select>
-          </label>
+          </label>}
         </div>
       </div>
 
+      {tab === 'browser' && <div className="onboarding-panel">
+        {platform === 'bilibili' ? <BilibiliBrowserPanel accountsPath={accountsPath} onChanged={onDone} />
+          : <p className="muted small">本地浏览器会话目前支持 B 站，请切换目标平台。</p>}
+      </div>}
       {tab === 'qr' && <div className="onboarding-panel">
         <div className="form-stack">
           <p className="muted small">{activeQr.hint}</p>
@@ -1117,6 +1130,7 @@ function AccountDetailsDrawer({
   const metaAction = useAction();
   const profileAction = useAction();
   const riskAction = useAction();
+  const oauthAction = useAction();
 
   activeAccountIdRef.current = account.id;
 
@@ -1150,6 +1164,7 @@ function AccountDetailsDrawer({
     metaAction.reset();
     profileAction.reset();
     riskAction.reset();
+    oauthAction.reset();
     if (bodyRef.current) bodyRef.current.scrollTop = 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account.id]);
@@ -1610,6 +1625,9 @@ function AccountDetailsDrawer({
 
         {drawer.tab === 'auth' && (
           <div role="tabpanel" aria-labelledby={activeTabId} tabIndex={0} className="account-drawer-panel form-stack">
+            {account.platform === 'bilibili' && account.channelKind === 'manual' && canManage && !trial && !showArchived && (
+              <BilibiliBrowserPanel key={account.id} accountsPath={accountsPath} accountId={account.id} onChanged={onChanged} />
+            )}
             <div className="account-drawer-card form-stack">
               <div className="account-drawer-section-head">
                 <strong>会话与授权状态</strong>
@@ -1647,6 +1665,7 @@ function AccountDetailsDrawer({
                 <dt>官方授权状态</dt>
                 <dd>{account.channelKind === 'official' ? (account.authStatus ? authStatusLabels[account.authStatus] : '未知') : '未接入官方授权通道'}</dd>
               </div>
+              {account.channelKind === 'official' && <div><dt>授权权限</dt><dd>{account.authScope?.join('、') || '未授权 / 未知'}</dd></div>}
               <div>
                 <dt>授权到期时间</dt>
                 <dd>{account.authExpiresAt ? formatTime(account.authExpiresAt) : '未知 / 未设置'}</dd>
@@ -1679,13 +1698,30 @@ function AccountDetailsDrawer({
                 {settings?.bilibili ? (
                   <>
                     <p className="muted small">
-                      此账号当前通过网页扫码 / Cookie / 密码接入（仅支持人工交接）。工作区已配置 B 站开放平台 Key，请点击下方完成账号级 OAuth 授权以创建官方自动投稿（专栏图文）通道：
+                      可发起官方授权。B 站 openid 与网页登录 UID 尚无可靠映射时，授权会作为独立官方身份保存，保留此账号及历史任务。
                     </p>
-                    <BilibiliConnection path={`${accountsPath}/bilibili`} hasAccounts={hasOfficialBili} onConnected={onChanged} />
+                    <BilibiliConnection path={`${accountsPath}/bilibili`} accountId={account.id} hasAccounts={hasOfficialBili} onConnected={onChanged} />
                   </>
                 ) : (
                   <p className="muted small">如需开通官方自动投稿，请先在上方「添加账号」中配置 B 站开放平台应用 ID 与密钥。</p>
                 )}
+              </div>
+            )}
+            {account.platform === 'bilibili' && account.channelKind === 'official' && !showArchived && !trial && canManage && (
+              <div className="account-drawer-card form-stack">
+                <strong>官方授权管理</strong>
+                <BilibiliConnection key={account.id} path={`${accountsPath}/bilibili`} accountId={account.id}
+                  hasAccounts={true} onConnected={onChanged} />
+                <p className="muted small">停用会移除 MatrixArk 保存的 Token，待发布任务可能暂停；账号和历史记录保留。B 站侧的应用授权请在 B 站授权管理中撤销。</p>
+                <button type="button" className="button compact" disabled={oauthAction.busy || !account.hasCredentials} onClick={() => {
+                  void oauthAction.run(async () => {
+                    if (!await askConfirm({ title: '停用本系统的官方授权？', description: '移除本系统保存的 Token。账号档案和历史任务会保留，已提交作品仍需核实结果。',
+                      confirmLabel: '停用授权', tone: 'danger' })) return;
+                    await post(`${accountsPath}/${account.id}/oauth/disable`, {});
+                    onChanged();
+                  });
+                }}>停用本系统授权</button>
+                <Feedback error={oauthAction.error} />
               </div>
             )}
           </div>
@@ -2587,6 +2623,8 @@ export function Accounts({ scope, canManage, canConfigure, canReportRisk, trial,
         onDone={() => { setDiagByAccount({}); refreshAll(); settings.refresh(); }}
       />
     )}
+
+    {canManage && !trial && !showArchived && <BilibiliOAuthPending key={accountsPath} accountsPath={accountsPath} onChanged={refreshAll} />}
 
     {selectedIds.length > 0 && canManage && !showArchived && <section className="card batch-bar" aria-label="批量矩阵操作">
       <strong>已选择 {selectedIds.length} 个账号</strong>
