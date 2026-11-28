@@ -2,46 +2,12 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Info, ShieldAlert, Trash2, X } from 'lucide-react';
+import {
+  askConfirm, pendingConfirms, removeConfirm, resolveConfirm, subscribeConfirms,
+  type QueuedConfirm,
+} from './confirm-queue';
 
-export type ConfirmTone = 'warning' | 'danger' | 'primary';
-
-export type ConfirmOptions = {
-  title: string;
-  description: string;
-  target?: string;
-  impacts?: readonly string[];
-  badge?: string;
-  tone?: ConfirmTone;
-  confirmLabel?: string;
-  cancelLabel?: string;
-  lightDismiss?: boolean;
-};
-
-type QueuedConfirm = {
-  id: number;
-  options: ConfirmOptions;
-  resolve: (confirmed: boolean) => void;
-};
-
-type Listener = (queue: QueuedConfirm[]) => void;
-
-let nextConfirmId = 1;
-let queue: QueuedConfirm[] = [];
-const listeners = new Set<Listener>();
-
-function emit() {
-  for (const listener of listeners) listener(queue);
-}
-
-/**
- * Open a top-layer modal confirmation dialog and resolve once the user confirms or dismisses.
- */
-export function askConfirm(options: ConfirmOptions): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    queue = [...queue, { id: nextConfirmId++, options, resolve }];
-    emit();
-  });
-}
+export { askConfirm };
 
 let cachedSupportsDisplayTransition: boolean | undefined;
 
@@ -80,68 +46,43 @@ async function waitAnimations(element: HTMLElement) {
 }
 
 export function ConfirmViewport() {
-  const [items, setItems] = useState<QueuedConfirm[]>(() => queue);
+  const [items, setItems] = useState<QueuedConfirm[]>(() => pendingConfirms());
   const current = items[0];
   const dialogRef = useRef<HTMLDialogElement>(null);
   const cancelBtnRef = useRef<HTMLButtonElement>(null);
-  const closingRef = useRef(false);
-  const resolvedRef = useRef(false);
-  const removedRef = useRef(false);
+  /** Id of the dialog whose exit animation is running. Ids never repeat, so the next dialog is never blocked. */
+  const closingIdRef = useRef<number | null>(null);
   const titleId = useId();
   const descId = useId();
 
-  useEffect(() => {
-    listeners.add(setItems);
-    setItems(queue);
-    return () => {
-      listeners.delete(setItems);
-    };
-  }, []);
-
-  const resolveOnce = useCallback((confirmed: boolean) => {
-    if (resolvedRef.current || !current) return;
-    resolvedRef.current = true;
-    current.resolve(confirmed);
-  }, [current]);
-
-  const removeFromQueue = useCallback((id: number) => {
-    if (removedRef.current) return;
-    removedRef.current = true;
-    closingRef.current = false;
-    queue = queue.filter((item) => item.id !== id);
-    emit();
-  }, []);
+  useEffect(() => subscribeConfirms(setItems), []);
 
   const closeAnimated = useCallback(async (confirmed: boolean) => {
     const dialog = dialogRef.current;
-    if (!dialog || !current || closingRef.current) return;
-    closingRef.current = true;
+    if (!dialog || !current || closingIdRef.current === current.id) return;
+    closingIdRef.current = current.id;
     const itemId = current.id;
-    resolveOnce(confirmed);
+    resolveConfirm(itemId, confirmed);
 
     if (!supportsTopLayerExit()) {
       dialog.setAttribute('data-closing', '');
       await waitAnimations(dialog);
-      if (dialog.hasAttribute('data-closing')) dialog.removeAttribute('data-closing');
+      dialog.removeAttribute('data-closing');
       dialog.returnValue = confirmed ? 'confirm' : 'cancel';
       if (dialog.open) dialog.close(dialog.returnValue);
-      removeFromQueue(itemId);
+      removeConfirm(itemId);
       return;
     }
 
     dialog.returnValue = confirmed ? 'confirm' : 'cancel';
     if (dialog.open) dialog.close(dialog.returnValue);
     await waitAnimations(dialog);
-    removeFromQueue(itemId);
-  }, [current, removeFromQueue, resolveOnce]);
+    removeConfirm(itemId);
+  }, [current]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!current || !dialog) return;
-    resolvedRef.current = false;
-    removedRef.current = false;
-    closingRef.current = false;
-    dialog.removeAttribute('data-closing');
     if (!dialog.open) {
       dialog.showModal();
       cancelBtnRef.current?.focus();
@@ -164,11 +105,10 @@ export function ConfirmViewport() {
     const onClose = () => {
       const confirmed = dialog.returnValue === 'confirm';
       dialog.returnValue = '';
-      resolveOnce(confirmed);
-      if (!closingRef.current) {
-        closingRef.current = true;
-        void waitAnimations(dialog).then(() => removeFromQueue(itemId));
-      }
+      resolveConfirm(itemId, confirmed);
+      if (closingIdRef.current === itemId) return;
+      closingIdRef.current = itemId;
+      void waitAnimations(dialog).then(() => removeConfirm(itemId));
     };
 
     const supportsClosedBy = 'closedBy' in HTMLDialogElement.prototype;
@@ -194,7 +134,7 @@ export function ConfirmViewport() {
       dialog.removeEventListener('pointerdown', onPointerDown);
       dialog.removeEventListener('pointerup', onPointerUp);
     };
-  }, [closeAnimated, current, removeFromQueue, resolveOnce]);
+  }, [closeAnimated, current]);
 
   if (!current) return null;
 

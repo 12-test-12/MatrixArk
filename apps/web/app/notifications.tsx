@@ -26,9 +26,9 @@ export function FeishuSettings({ scope, summary, openTasks }: {
   const stats: StatCardItem[] = [
     {
       key: 'connection',
-      label: '机器人连接状态',
-      value: !setting ? '—' : setting.enabled ? '已连接' : setting.webhookConfigured ? '已保存' : '待配置',
-      note: !setting ? '等待读取配置' : setting.enabled ? '已启用自动推送' : setting.webhookConfigured ? '已存 Webhook，提醒未开启' : '尚未保存群机器人地址',
+      label: '提醒推送状态',
+      value: !setting ? '—' : setting.enabled ? '已开启' : setting.webhookConfigured ? '已保存' : '待配置',
+      note: !setting ? '等待读取配置' : setting.enabled ? '提醒开关已打开，实际送达以任务回执为准' : setting.webhookConfigured ? '已存 Webhook，提醒未开启' : '尚未保存群机器人地址',
       icon: Bell,
       tone: !setting ? 'neutral' : setting.enabled ? 'green' : setting.webhookConfigured ? 'amber' : 'neutral',
     },
