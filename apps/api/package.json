@@ -4,14 +4,14 @@
   "private": true,
   "scripts": {
     "build": "nest build",
-    "dev": "nest start --watch",
+    "dev": "node --env-file-if-exists=../../.env ./node_modules/@nestjs/cli/bin/nest.js start --watch",
     "start": "node dist/main.js",
-    "start:worker": "node dist/worker.js",
-    "bind:bilibili": "node dist/accounts/bind-bilibili.js",
+    "start:worker": "node --env-file-if-exists=../../.env dist/worker.js",
+    "bind:bilibili": "node --env-file-if-exists=../../.env dist/accounts/bind-bilibili.js",
     "typecheck": "tsc --noEmit",
     "db:generate": "node scripts/prisma.mjs generate",
-    "db:migrate": "node scripts/prisma.mjs migrate dev",
-    "db:deploy": "node scripts/prisma.mjs migrate deploy"
+    "db:migrate": "node --env-file-if-exists=../../.env scripts/prisma.mjs migrate dev",
+    "db:deploy": "node --env-file-if-exists=../../.env scripts/prisma.mjs migrate deploy"
   },
   "dependencies": {
     "@matrixark/adapters": "workspace:*",

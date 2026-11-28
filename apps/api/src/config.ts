@@ -1,10 +1,8 @@
-import { existsSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
 const repoRoot = resolve(__dirname, '../../..');
-const rootEnv = join(repoRoot, '.env');
 
-if (existsSync(rootEnv)) process.loadEnvFile(rootEnv);
+// 配置只读进程环境变量；本地开发由 apps/api 的 dev / db:* 脚本用 --env-file-if-exists 显式加载仓库根 .env。
 
 function boolean(value: string | undefined, name: string): boolean {
   const normalized = value?.trim().toLowerCase() ?? 'false';
@@ -37,7 +35,7 @@ const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? '';
 const databaseUrl = process.env.DATABASE_URL?.trim();
 const notificationKey = process.env.NOTIFICATION_CREDENTIALS_KEY?.trim();
 
-if (!databaseUrl) throw new Error('请在 .env 或进程环境中设置 DATABASE_URL');
+if (!databaseUrl) throw new Error('缺少 DATABASE_URL：请在进程环境中提供；本地用 pnpm dev:api / db:migrate 会自动加载仓库根 .env');
 const database = URL.canParse(databaseUrl) ? new URL(databaseUrl) : undefined;
 if (!database || !['postgresql:', 'postgres:'].includes(database.protocol) || !database.hostname || database.pathname.length < 2) {
   throw new Error('DATABASE_URL 必须是包含主机和库名的 PostgreSQL 连接地址');

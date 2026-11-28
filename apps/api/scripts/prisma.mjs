@@ -1,19 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const apiDir = join(here, '..');
-const rootEnv = join(apiDir, '../../.env');
-
-if (existsSync(rootEnv)) {
-  process.loadEnvFile(rootEnv);
-}
 
 if (process.argv[2] === 'migrate' && !process.env.DATABASE_URL) {
-  console.error('缺少 DATABASE_URL：请先复制 .env.example 为 .env');
+  console.error('缺少 DATABASE_URL：请在进程环境中提供，或复制 .env.example 为 .env 后使用 pnpm db:migrate');
   process.exit(1);
 }
 
